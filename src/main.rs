@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
-use app::{AppState, Panel, TargetStat};
+use app::{AppState, Panel, SpeedStatus, TargetStat};
 use config::Config;
 
 #[tokio::main]
@@ -30,16 +30,25 @@ async fn main() -> Result<()> {
         .collect();
     let state = Arc::new(Mutex::new(AppState::new(targets)));
 
+    // Trigger for the on-demand speed test (fired by the 's' key).
+    let speedtest_trigger = Arc::new(Notify::new());
+
     // Spawn collectors, each on its own cadence.
     tokio::spawn(collectors::ping::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::throughput::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::vitals::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::netinfo::run(state.clone()));
+    tokio::spawn(collectors::speedtest::run(
+        state.clone(),
+        speedtest_trigger.clone(),
+    ));
 
-    // Headless verification mode: collect for a few seconds, print a text
-    // snapshot, and exit. Lets collectors be exercised without a TTY.
+    // Headless verification mode: collect for a few seconds, run one speed test,
+    // print a text snapshot, and exit. Exercises collectors without a TTY.
     if std::env::args().any(|a| a == "--check") {
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        speedtest_trigger.notify_one();
+        tokio::time::sleep(Duration::from_secs(20)).await;
         print_snapshot(&state.lock().unwrap());
         return Ok(());
     }
@@ -61,7 +70,7 @@ async fn main() -> Result<()> {
     // ratatui::init() enables raw mode + alt screen and installs a panic hook
     // that restores the terminal, so a panic never leaves it wedged.
     let mut terminal = ratatui::init();
-    let result = run_ui(&mut terminal, state, rx).await;
+    let result = run_ui(&mut terminal, state, rx, speedtest_trigger).await;
     ratatui::restore();
     result
 }
@@ -70,12 +79,13 @@ async fn run_ui(
     terminal: &mut ratatui::DefaultTerminal,
     state: Arc<Mutex<AppState>>,
     mut rx: mpsc::UnboundedReceiver<KeyEvent>,
+    speedtest_trigger: Arc<Notify>,
 ) -> Result<()> {
     let mut ticker = tokio::time::interval(Duration::from_millis(200));
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
-            Some(key) = rx.recv() => handle_key(&state, key),
+            Some(key) = rx.recv() => handle_key(&state, key, &speedtest_trigger),
         }
 
         let s = state.lock().unwrap();
@@ -87,7 +97,7 @@ async fn run_ui(
     Ok(())
 }
 
-fn handle_key(state: &Arc<Mutex<AppState>>, key: KeyEvent) {
+fn handle_key(state: &Arc<Mutex<AppState>>, key: KeyEvent, speedtest_trigger: &Arc<Notify>) {
     if key.kind == KeyEventKind::Release {
         return;
     }
@@ -96,6 +106,13 @@ fn handle_key(state: &Arc<Mutex<AppState>>, key: KeyEvent) {
         KeyCode::Char('q') | KeyCode::Esc => s.should_quit = true,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => s.should_quit = true,
         KeyCode::Tab => s.focus = next_panel(s.focus),
+        KeyCode::Char('s') => {
+            // Ignore if a test is already in flight.
+            if !matches!(s.speedtest.status, SpeedStatus::Running) {
+                s.speedtest.status = SpeedStatus::Running;
+                speedtest_trigger.notify_one();
+            }
+        }
         _ => {}
     }
 }
@@ -116,6 +133,18 @@ fn print_snapshot(s: &AppState) {
     let tp = &s.throughput;
     println!("\n[Bandwidth] iface={}", tp.iface);
     println!("  down={:.0} B/s   up={:.0} B/s", tp.down_bps, tp.up_bps);
+    let st = &s.speedtest;
+    let status = match &st.status {
+        SpeedStatus::Idle => "idle".to_string(),
+        SpeedStatus::Running => "running".to_string(),
+        SpeedStatus::Done => "done".to_string(),
+        SpeedStatus::Failed(e) => format!("failed: {e}"),
+    };
+    println!(
+        "  speedtest[{status}]: down={} up={}",
+        st.down_mbps.map(|v| format!("{v:.1} Mbps")).unwrap_or_else(|| "—".into()),
+        st.up_mbps.map(|v| format!("{v:.1} Mbps")).unwrap_or_else(|| "—".into()),
+    );
 
     let n = &s.netinfo;
     println!("\n[Network]");
