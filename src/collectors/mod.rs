@@ -7,5 +7,6 @@ pub mod ping;
 pub mod procbw;
 pub mod speedtest;
 pub mod throughput;
+pub mod traceroute;
 pub mod vitals;
 pub mod wifi;
