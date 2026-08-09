@@ -1,0 +1,245 @@
+//! Rendering. A single [`render`] entry point draws the four panels from an
+//! immutable snapshot of [`AppState`]. No data collection happens here.
+
+use ratatui::prelude::*;
+use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Sparkline, Table};
+
+use crate::app::{AppState, Panel};
+
+/// Draw the whole dashboard.
+pub fn render(f: &mut Frame, s: &AppState) {
+    let root = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(f.area());
+    header(f, s, root[0]);
+
+    let rows = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(root[1]);
+    let top = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[0]);
+    let bottom = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[1]);
+
+    quality_panel(f, s, top[0]);
+    bandwidth_panel(f, s, top[1]);
+    netinfo_panel(f, s, bottom[0]);
+    vitals_panel(f, s, bottom[1]);
+}
+
+fn header(f: &mut Frame, s: &AppState, area: Rect) {
+    let up = s.started.elapsed().as_secs();
+    let line = Line::from(vec![
+        Span::styled(" octomon ", Style::new().fg(Color::Black).bg(Color::Cyan).bold()),
+        Span::raw(format!("  uptime {:02}:{:02}:{:02}", up / 3600, (up % 3600) / 60, up % 60)),
+        Span::raw("   "),
+        Span::styled("[q]", Style::new().fg(Color::Cyan)),
+        Span::raw("uit  "),
+        Span::styled("[Tab]", Style::new().fg(Color::Cyan)),
+        Span::raw(" focus"),
+    ]);
+    f.render_widget(Paragraph::new(line), area);
+}
+
+fn block(title: &str, focused: bool) -> Block<'static> {
+    let border = if focused { Color::Cyan } else { Color::DarkGray };
+    Block::bordered()
+        .title(Span::styled(format!(" {title} "), Style::new().bold()))
+        .border_style(Style::new().fg(border))
+}
+
+fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
+    let b = block("Connection Quality", s.focus == Panel::Quality);
+    let inner = b.inner(area);
+    f.render_widget(b, area);
+
+    // Table of targets on top, latency sparkline for the first target below.
+    let parts = Layout::vertical([Constraint::Min(3), Constraint::Length(5)]).split(inner);
+
+    let header = Row::new(["Target", "Address", "last", "avg", "jitter", "loss"])
+        .style(Style::new().fg(Color::Gray).bold());
+    let rows = s.targets.iter().map(|t| {
+        let loss = t.loss_pct();
+        let color = latency_color(t.last_rtt_ms, loss);
+        Row::new(vec![
+            Cell::from(t.label.clone()),
+            Cell::from(t.addr.to_string()),
+            Cell::from(fmt_ms(t.last_rtt_ms)),
+            Cell::from(fmt_ms(t.avg_ms)),
+            Cell::from(format!("{:.1}", t.jitter_ms)),
+            Cell::from(format!("{loss:.0}%")),
+        ])
+        .style(Style::new().fg(color))
+    });
+    let widths = [
+        Constraint::Length(11),
+        Constraint::Length(16),
+        Constraint::Length(8),
+        Constraint::Length(8),
+        Constraint::Length(7),
+        Constraint::Length(6),
+    ];
+    f.render_widget(Table::new(rows, widths).header(header), parts[0]);
+
+    if let Some(t) = s.targets.first() {
+        let data = t.history.tail_u64(parts[1].width as usize);
+        let spark = Sparkline::default()
+            .data(data)
+            .style(Style::new().fg(Color::Cyan))
+            .block(Block::new().title(Span::styled(
+                format!(" latency · {} ", t.label),
+                Style::new().fg(Color::DarkGray),
+            )));
+        f.render_widget(spark, parts[1]);
+    }
+}
+
+fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
+    let tp = &s.throughput;
+    let b = block(
+        &format!("Bandwidth · {}", if tp.iface.is_empty() { "…" } else { &tp.iface }),
+        s.focus == Panel::Bandwidth,
+    );
+    let inner = b.inner(area);
+    f.render_widget(b, area);
+
+    let parts = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
+
+    let down = Sparkline::default()
+        .data(tp.down_hist.tail_u64(parts[0].width as usize))
+        .style(Style::new().fg(Color::Green))
+        .block(Block::new().title(Span::styled(
+            format!(" ↓ down  {}", fmt_rate(tp.down_bps)),
+            Style::new().fg(Color::Green).bold(),
+        )));
+    f.render_widget(down, parts[0]);
+
+    let up = Sparkline::default()
+        .data(tp.up_hist.tail_u64(parts[1].width as usize))
+        .style(Style::new().fg(Color::Magenta))
+        .block(Block::new().title(Span::styled(
+            format!(" ↑ up    {}", fmt_rate(tp.up_bps)),
+            Style::new().fg(Color::Magenta).bold(),
+        )));
+    f.render_widget(up, parts[1]);
+}
+
+fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
+    let n = &s.netinfo;
+    let b = block("Network", s.focus == Panel::NetInfo);
+    let inner = b.inner(area);
+    f.render_widget(b, area);
+
+    let kv = |k: &str, v: String| {
+        Line::from(vec![
+            Span::styled(format!("{k:<9}"), Style::new().fg(Color::DarkGray)),
+            Span::raw(v),
+        ])
+    };
+    let dash = |v: &str| if v.is_empty() { "-".to_string() } else { v.to_string() };
+
+    let lines = vec![
+        kv("iface", dash(&n.iface)),
+        kv("link", dash(&n.link_kind)),
+        kv("ipv4", if n.ipv4.is_empty() { "-".into() } else { n.ipv4.join(", ") }),
+        kv("ipv6", if n.ipv6.is_empty() { "-".into() } else { n.ipv6.join(", ") }),
+        kv("mac", dash(&n.mac)),
+        kv("gateway", format!("{}  ({})", dash(&n.gateway_ip), dash(&n.gateway_mac))),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
+    let v = &s.vitals;
+    let b = block("Machine", s.focus == Panel::Vitals);
+    let inner = b.inner(area);
+    f.render_widget(b, area);
+
+    let parts = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+
+    let cpu = v.cpu_pct.clamp(0.0, 100.0);
+    f.render_widget(
+        Gauge::default()
+            .ratio((cpu / 100.0) as f64)
+            .label(format!("CPU {cpu:.0}%"))
+            .gauge_style(Style::new().fg(usage_color(cpu))),
+        parts[0],
+    );
+
+    let mem_pct = if v.mem_total > 0 {
+        v.mem_used as f32 / v.mem_total as f32 * 100.0
+    } else {
+        0.0
+    };
+    f.render_widget(
+        Gauge::default()
+            .ratio((mem_pct / 100.0).clamp(0.0, 1.0) as f64)
+            .label(format!("MEM {}/{}", fmt_bytes(v.mem_used), fmt_bytes(v.mem_total)))
+            .gauge_style(Style::new().fg(usage_color(mem_pct))),
+        parts[1],
+    );
+
+    // CPU history sparkline (uses the remaining space).
+    let spark = Sparkline::default()
+        .max(100)
+        .data(v.cpu_hist.tail_u64(parts[3].width as usize))
+        .style(Style::new().fg(Color::Yellow))
+        .block(Block::new().title(Span::styled(" cpu history ", Style::new().fg(Color::DarkGray))));
+    f.render_widget(spark, parts[3]);
+}
+
+// --- formatting & color helpers -------------------------------------------
+
+fn fmt_ms(v: Option<f64>) -> String {
+    match v {
+        Some(ms) => format!("{ms:.1}ms"),
+        None => "—".to_string(),
+    }
+}
+
+fn fmt_rate(bps: f64) -> String {
+    if bps >= 1_000_000.0 {
+        format!("{:.1} MB/s", bps / 1_000_000.0)
+    } else if bps >= 1_000.0 {
+        format!("{:.1} KB/s", bps / 1_000.0)
+    } else {
+        format!("{bps:.0} B/s")
+    }
+}
+
+fn fmt_bytes(n: u64) -> String {
+    let f = n as f64;
+    const G: f64 = 1_073_741_824.0;
+    const M: f64 = 1_048_576.0;
+    if f >= G {
+        format!("{:.1}G", f / G)
+    } else if f >= M {
+        format!("{:.0}M", f / M)
+    } else {
+        format!("{:.0}K", f / 1024.0)
+    }
+}
+
+fn latency_color(last: Option<f64>, loss: f64) -> Color {
+    if loss >= 5.0 || last.is_none() {
+        return Color::Red;
+    }
+    if loss >= 1.0 {
+        return Color::Yellow;
+    }
+    match last {
+        Some(ms) if ms < 50.0 => Color::Green,
+        Some(ms) if ms < 150.0 => Color::Yellow,
+        _ => Color::Red,
+    }
+}
+
+fn usage_color(pct: f32) -> Color {
+    if pct >= 85.0 {
+        Color::Red
+    } else if pct >= 60.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    }
+}
