@@ -78,7 +78,11 @@ async fn main() -> Result<()> {
         .map(|t| TargetStat::new(t.label.clone(), t.addr))
         .collect();
     let state = Arc::new(Mutex::new(AppState::new(targets)));
-    state.lock().unwrap().speedtest_enabled = !cli.no_speedtest;
+    {
+        let mut s = state.lock().unwrap();
+        s.speedtest_enabled = !cli.no_speedtest;
+        s.samples_per_sec = 1000.0 / cfg.ping_interval_ms.max(1) as f64;
+    }
 
     // Triggers fired by key presses.
     let speedtest_trigger = Arc::new(Notify::new()); // 's'
@@ -239,6 +243,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 KeyCode::Char('f') => s.fullscreen = !s.fullscreen,
                 KeyCode::Char('p') => s.paused = !s.paused,
                 KeyCode::Char('r') => side = Side::Refresh,
+                KeyCode::Char('w') => s.cycle_window(),
                 KeyCode::Char('s')
                     if s.speedtest_enabled
                         && !matches!(s.speedtest.status, SpeedStatus::Running) =>
@@ -311,13 +316,29 @@ async fn add_target(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Confi
 /// Text dump of the current state for `--check` / debugging.
 fn print_snapshot(s: &AppState) {
     println!("== octomon --check ==");
-    println!("\n[Connection Quality]");
+    let n = s.window_samples();
+    println!("\n[Connection Quality]  (window {}s)", s.window_secs);
+    let ms = |v: Option<f64>| v.map(|x| format!("{x:.1}")).unwrap_or_else(|| "—".into());
     for t in &s.targets {
-        let last = t.last_rtt_ms.map(|v| format!("{v:.1}ms")).unwrap_or_else(|| "—".into());
-        let avg = t.avg_ms.map(|v| format!("{v:.1}ms")).unwrap_or_else(|| "—".into());
+        let st = t.stats(n);
+        let bloat = t
+            .bufferbloat_ms(n)
+            .map(|b| format!("{b:+.0}ms"))
+            .unwrap_or_else(|| "—".into());
         println!(
-            "  {:<11} {:<16} last={last:<8} avg={avg:<8} jitter={:.1}ms loss={:.0}% ({}/{} recv)",
-            t.label, t.addr.to_string(), t.jitter_ms, t.loss_pct(), t.recv, t.sent
+            "  {:<12} {:<16} last={:<7} min={:<6} avg={:<6} p95={:<6} max={:<6} jit={:.1} sd={:.1} loss={:.0}% bloat={bloat} ({}/{})",
+            t.label,
+            t.addr.to_string(),
+            ms(t.last_rtt_ms),
+            ms(st.min),
+            ms(st.mean),
+            ms(st.p95),
+            ms(st.max),
+            t.jitter_ms,
+            st.stddev,
+            t.loss_pct(),
+            t.recv,
+            t.sent
         );
     }
 
