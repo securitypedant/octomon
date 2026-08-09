@@ -240,10 +240,28 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 KeyCode::Char('c') if ctrl => s.should_quit = true,
                 KeyCode::Char('?') => s.show_help = true,
                 KeyCode::Tab => s.focus = next_panel(s.focus),
+                KeyCode::BackTab => s.focus = prev_panel(s.focus),
                 KeyCode::Char('f') => s.fullscreen = !s.fullscreen,
                 KeyCode::Char('p') => s.paused = !s.paused,
-                KeyCode::Char('r') => side = Side::Refresh,
+                KeyCode::Char('r') => {
+                    s.notice = Some("re-probing network info…".to_string());
+                    side = Side::Refresh;
+                }
                 KeyCode::Char('w') => s.cycle_window(),
+                // Bandwidth: move the top-talkers column cursor and sort.
+                KeyCode::Left if s.focus == Panel::Bandwidth => {
+                    s.bw_col = s.bw_col.saturating_sub(1);
+                }
+                KeyCode::Right if s.focus == Panel::Bandwidth => {
+                    s.bw_col = (s.bw_col + 1).min(4);
+                }
+                KeyCode::Enter if s.focus == Panel::Bandwidth => {
+                    let col = s.bw_col;
+                    s.bw_sort = match s.bw_sort {
+                        Some((c, desc)) if c == col => Some((c, !desc)),
+                        _ => Some((col, col != 0)), // name asc, metrics desc
+                    };
+                }
                 KeyCode::Char('s')
                     if s.speedtest_enabled
                         && !matches!(s.speedtest.status, SpeedStatus::Running) =>
@@ -388,6 +406,7 @@ fn print_snapshot(s: &AppState) {
     println!("  iface={}  link={}", n.iface, n.link_kind);
     println!("  ipv4={:?}", n.ipv4);
     println!("  mac={}  gateway={} ({})", n.mac, n.gateway_ip, n.gateway_mac);
+    println!("  dns={:?}", n.dns);
     if let Some(w) = &n.wifi {
         println!(
             "  wifi: ssid={} phy={} ch={} signal={} tx={}",
@@ -411,5 +430,14 @@ fn next_panel(p: Panel) -> Panel {
         Panel::Bandwidth => Panel::NetInfo,
         Panel::NetInfo => Panel::Vitals,
         Panel::Vitals => Panel::Quality,
+    }
+}
+
+fn prev_panel(p: Panel) -> Panel {
+    match p {
+        Panel::Quality => Panel::Vitals,
+        Panel::Bandwidth => Panel::Quality,
+        Panel::NetInfo => Panel::Bandwidth,
+        Panel::Vitals => Panel::NetInfo,
     }
 }

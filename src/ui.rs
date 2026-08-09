@@ -4,7 +4,10 @@
 use ratatui::layout::Alignment;
 use ratatui::prelude::*;
 use ratatui::style::Modifier;
-use ratatui::widgets::{Block, Cell, Clear, Gauge, Paragraph, Row, Sparkline, Table};
+use ratatui::symbols::Marker;
+use ratatui::widgets::{
+    Axis, Block, Cell, Chart, Clear, Dataset, Gauge, GraphType, Paragraph, Row, Sparkline, Table,
+};
 
 use crate::app::{AppState, InputMode, Panel, ProcStatus, SpeedStatus};
 
@@ -28,8 +31,8 @@ pub fn render(f: &mut Frame, s: &AppState) {
         }
     } else {
         let rows = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(root[1]);
-        let top = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[0]);
-        let bottom = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[1]);
+        let top = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[0]);
+        let bottom = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
         quality_panel(f, s, top[0]);
         bandwidth_panel(f, s, top[1]);
         netinfo_panel(f, s, bottom[0]);
@@ -165,17 +168,63 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     ];
     f.render_widget(Table::new(rows, widths).header(header), parts[1]);
 
-    if let Some(t) = s.targets.get(s.graph_target) {
-        let data = t.history.tail_u64(parts[2].width as usize);
-        let spark = Sparkline::default()
-            .data(data)
-            .style(Style::new().fg(Color::Cyan))
-            .block(Block::new().title(Span::styled(
-                format!(" latency · {} ", t.label),
+    latency_graph(f, s, n, parts[2]);
+}
+
+/// Latency line chart for the graphed target, with a p95 reference line.
+fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
+    let Some(t) = s.targets.get(s.graph_target) else {
+        return;
+    };
+    // Braille markers double horizontal resolution.
+    let want = (area.width as usize).saturating_mul(2).max(20);
+    let raw: Vec<f64> = {
+        let mut v: Vec<f64> = t.history.data.iter().rev().take(want).copied().collect();
+        v.reverse();
+        v
+    };
+    if raw.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!(" latency · {} — collecting…", t.label),
                 Style::new().fg(Color::DarkGray),
-            )));
-        f.render_widget(spark, parts[2]);
+            )),
+            area,
+        );
+        return;
     }
+
+    let series: Vec<(f64, f64)> = raw.iter().enumerate().map(|(i, &v)| (i as f64, v)).collect();
+    let xmax = (series.len().saturating_sub(1)).max(1) as f64;
+    let p95 = t.stats(n).p95.unwrap_or(0.0);
+    let ymax = raw.iter().copied().fold(0.0_f64, f64::max).max(p95) * 1.15 + 1.0;
+    let p95_line = [(0.0, p95), (xmax, p95)];
+
+    let datasets = vec![
+        Dataset::default()
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::new().fg(Color::Cyan))
+            .data(&series),
+        Dataset::default()
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::new().fg(Color::Yellow))
+            .data(&p95_line),
+    ];
+
+    let chart = Chart::new(datasets)
+        .block(Block::new().title(Span::styled(
+            format!(" latency · {}   p95 {p95:.0}ms ", t.label),
+            Style::new().fg(Color::DarkGray),
+        )))
+        .x_axis(Axis::default().bounds([0.0, xmax]))
+        .y_axis(
+            Axis::default()
+                .bounds([0.0, ymax])
+                .labels([Line::from("0"), Line::from(format!("{ymax:.0}ms"))]),
+        );
+    f.render_widget(chart, area);
 }
 
 /// One-line summary above the table: stats window, and jitter / stddev /
@@ -259,7 +308,52 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
         )));
     f.render_widget(up, graphs[1]);
 
-    top_talkers(f, s, rows[2], talkers);
+    // Full-screen reveals the last speed-test results beside the talkers.
+    if s.fullscreen {
+        let cols = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).split(rows[2]);
+        top_talkers(f, s, cols[0], talkers);
+        speedtest_results(f, s, cols[1]);
+    } else {
+        top_talkers(f, s, rows[2], talkers);
+    }
+}
+
+/// Detailed last-speed-test results (shown beside top talkers in full-screen).
+fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect) {
+    let st = &s.speedtest;
+    let outer = Block::new().title(Span::styled(" last speed test ", Style::new().fg(Color::DarkGray)));
+    let inner = outer.inner(area);
+    f.render_widget(outer, area);
+
+    let kv = |k: &str, v: String, c: Color| {
+        Line::from(vec![
+            Span::styled(format!("{k:<9}"), Style::new().fg(Color::DarkGray)),
+            Span::styled(v, Style::new().fg(c)),
+        ])
+    };
+    let mut lines = vec![
+        kv("download", fmt_mbps(st.down_mbps), Color::Green),
+        kv("upload", fmt_mbps(st.up_mbps), Color::Magenta),
+    ];
+    if let Some(idle) = st.idle_latency_ms {
+        lines.push(kv("idle rtt", format!("{idle:.0} ms"), Color::Gray));
+    }
+    if let (Some(idle), Some(loaded)) = (st.idle_latency_ms, st.loaded_latency_ms) {
+        let bloat = (loaded - idle).max(0.0);
+        let (grade, color) = bufferbloat_grade(bloat);
+        lines.push(kv("loaded rtt", format!("{loaded:.0} ms"), Color::Gray));
+        lines.push(kv("bufferbloat", format!("+{bloat:.0} ms ({grade})"), color));
+    }
+    if let Some(t) = st.last_run {
+        lines.push(kv("ran", format!("{}s ago", t.elapsed().as_secs()), Color::DarkGray));
+    }
+    if matches!(st.status, SpeedStatus::Failed(_)) {
+        lines.push(Line::from(Span::styled(
+            "last run failed — [s] retry",
+            Style::new().fg(Color::Red),
+        )));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 /// The speed-test row: a live progress gauge while running, else a status line.
@@ -305,9 +399,40 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
         ProcStatus::Supported => {}
     }
 
-    let header = Row::new(["process", "↓", "↑", "total", "retx"])
-        .style(Style::new().fg(Color::DarkGray));
-    let rows = s.processes.iter().take(limit).map(|p| {
+    // Header with the column cursor highlighted and a sort-direction arrow.
+    let focused = s.focus == Panel::Bandwidth;
+    let labels = ["process", "↓", "↑", "total", "retx"];
+    let header = Row::new(labels.iter().enumerate().map(|(i, l)| {
+        let mut txt = (*l).to_string();
+        if let Some((c, desc)) = s.bw_sort
+            && c == i
+        {
+            txt.push(if desc { '▼' } else { '▲' });
+        }
+        let style = if focused && i == s.bw_col {
+            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::new().fg(Color::DarkGray)
+        };
+        Cell::from(Span::styled(txt, style))
+    }));
+
+    // Apply the active sort (a copy — the collector keeps its own order).
+    let mut procs: Vec<&crate::app::ProcBandwidth> = s.processes.iter().collect();
+    if let Some((col, desc)) = s.bw_sort {
+        procs.sort_by(|a, b| {
+            let o = match col {
+                0 => a.name.cmp(&b.name),
+                2 => a.up_bps.total_cmp(&b.up_bps),
+                3 => a.total_bytes.cmp(&b.total_bytes),
+                4 => a.retx_per_sec.total_cmp(&b.retx_per_sec),
+                _ => a.down_bps.total_cmp(&b.down_bps),
+            };
+            if desc { o.reverse() } else { o }
+        });
+    }
+
+    let rows = procs.into_iter().take(limit).map(|p| {
         let name: String = p.name.chars().take(18).collect();
         let (retx, retx_style) = if p.retx_per_sec >= 1.0 {
             (format!("{:.0}/s", p.retx_per_sec), Style::new().fg(Color::Red))
@@ -350,7 +475,7 @@ fn help_overlay(f: &mut Frame, area: Rect) {
     };
     let lines = vec![
         Line::from(Span::styled("  Global", Style::new().fg(Color::White).bold())),
-        row("Tab", "cycle panel focus"),
+        row("Tab / ⇧Tab", "cycle panel focus (fwd / back)"),
         row("f", "toggle full-screen of focused panel"),
         row("s", "run speed test"),
         row("p", "pause / resume auto-refresh"),
@@ -363,6 +488,10 @@ fn help_overlay(f: &mut Frame, area: Rect) {
         row("a", "add a target (IP or DNS name)"),
         row("↑/↓ or j/k", "select a target"),
         row("Enter", "graph the selected target's latency"),
+        Line::from(""),
+        Line::from(Span::styled("  Bandwidth", Style::new().fg(Color::White).bold())),
+        row("←/→", "move top-talkers column cursor"),
+        row("Enter", "sort by column (toggles direction)"),
         Line::from(""),
         Line::from(Span::styled("  press ? or Esc to close", Style::new().fg(Color::DarkGray))),
     ];
@@ -407,6 +536,7 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
         kv("ipv6", if n.ipv6.is_empty() { "-".into() } else { n.ipv6.join(", ") }),
         kv("mac", dash(&n.mac)),
         kv("gateway", format!("{}  ({})", dash(&n.gateway_ip), dash(&n.gateway_mac))),
+        kv("dns", if n.dns.is_empty() { "-".into() } else { n.dns.join(", ") }),
     ];
     if let Some(w) = &n.wifi {
         lines.push(kv("ssid", dash(&w.ssid)));

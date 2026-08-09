@@ -258,6 +258,8 @@ pub struct NetInfo {
     pub mac: String,
     pub gateway_ip: String,
     pub gateway_mac: String,
+    /// DNS resolver addresses for this interface.
+    pub dns: Vec<String>,
     /// e.g. "Wi-Fi", "Ethernet", "Loopback" — best-effort.
     pub link_kind: String,
     /// Present when the default interface is Wi-Fi and details are available.
@@ -382,6 +384,10 @@ pub struct AppState {
     pub processes: Vec<ProcBandwidth>,
     /// Availability of per-process attribution on this platform.
     pub proc_status: ProcStatus,
+    /// Column cursor over the top-talkers header (0=proc,1=down,2=up,3=total,4=retx).
+    pub bw_col: usize,
+    /// Active sort of top talkers: (column, descending). None = default order.
+    pub bw_sort: Option<(usize, bool)>,
 
     // --- Connection Quality interaction ---
     /// Cursor over the target list (Quality panel).
@@ -420,6 +426,8 @@ impl AppState {
             speedtest_enabled: true,
             processes: Vec::new(),
             proc_status: ProcStatus::Probing,
+            bw_col: 1,
+            bw_sort: None,
             selected: 0,
             graph_target: 0,
             window_secs: 60,
