@@ -7,3 +7,4 @@ pub mod ping;
 pub mod speedtest;
 pub mod throughput;
 pub mod vitals;
+pub mod wifi;

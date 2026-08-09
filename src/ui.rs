@@ -136,7 +136,7 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
     };
     let dash = |v: &str| if v.is_empty() { "-".to_string() } else { v.to_string() };
 
-    let lines = vec![
+    let mut lines = vec![
         kv("iface", dash(&n.iface)),
         kv("link", dash(&n.link_kind)),
         kv("ipv4", if n.ipv4.is_empty() { "-".into() } else { n.ipv4.join(", ") }),
@@ -144,6 +144,12 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
         kv("mac", dash(&n.mac)),
         kv("gateway", format!("{}  ({})", dash(&n.gateway_ip), dash(&n.gateway_mac))),
     ];
+    if let Some(w) = &n.wifi {
+        lines.push(kv("ssid", dash(&w.ssid)));
+        lines.push(kv("wifi", format!("{}  ch {}", dash(&w.phy), dash(&w.channel))));
+        lines.push(kv("signal", dash(&w.rssi)));
+        lines.push(kv("tx rate", dash(&w.tx_rate)));
+    }
     f.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -196,6 +202,12 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
 fn speedtest_line(s: &AppState) -> Line<'static> {
     let st = &s.speedtest;
     let label = Span::styled("speedtest ", Style::new().fg(Color::DarkGray));
+    if !s.speedtest_enabled {
+        return Line::from(vec![
+            label,
+            Span::styled("disabled", Style::new().fg(Color::DarkGray)),
+        ]);
+    }
     match &st.status {
         SpeedStatus::Idle => Line::from(vec![
             label,
