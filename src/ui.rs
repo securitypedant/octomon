@@ -4,7 +4,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Sparkline, Table};
 
-use crate::app::{AppState, Panel};
+use crate::app::{AppState, Panel, SpeedStatus};
 
 /// Draw the whole dashboard.
 pub fn render(f: &mut Frame, s: &AppState) {
@@ -30,7 +30,9 @@ fn header(f: &mut Frame, s: &AppState, area: Rect) {
         Span::styled("[q]", Style::new().fg(Color::Cyan)),
         Span::raw("uit  "),
         Span::styled("[Tab]", Style::new().fg(Color::Cyan)),
-        Span::raw(" focus"),
+        Span::raw(" focus  "),
+        Span::styled("[s]", Style::new().fg(Color::Cyan)),
+        Span::raw("peedtest"),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
@@ -97,7 +99,9 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let inner = b.inner(area);
     f.render_widget(b, area);
 
-    let parts = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+    f.render_widget(Paragraph::new(speedtest_line(s)), rows[0]);
+    let parts = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
 
     let down = Sparkline::default()
         .data(tp.down_hist.tail_u64(parts[0].width as usize))
@@ -188,11 +192,60 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
     f.render_widget(spark, parts[3]);
 }
 
+/// One-line speed-test status/results shown atop the bandwidth panel.
+fn speedtest_line(s: &AppState) -> Line<'static> {
+    let st = &s.speedtest;
+    let label = Span::styled("speedtest ", Style::new().fg(Color::DarkGray));
+    match &st.status {
+        SpeedStatus::Idle => Line::from(vec![
+            label,
+            Span::styled("[s]", Style::new().fg(Color::Cyan)),
+            Span::raw(" run"),
+        ]),
+        SpeedStatus::Running => Line::from(vec![
+            label,
+            Span::styled("running…", Style::new().fg(Color::Yellow).bold()),
+        ]),
+        SpeedStatus::Done => {
+            let ago = st
+                .last_run
+                .map(|t| format!("  ({}s ago)", t.elapsed().as_secs()))
+                .unwrap_or_default();
+            Line::from(vec![
+                label,
+                Span::styled(
+                    format!("↓ {}", fmt_mbps(st.down_mbps)),
+                    Style::new().fg(Color::Green).bold(),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!("↑ {}", fmt_mbps(st.up_mbps)),
+                    Style::new().fg(Color::Magenta).bold(),
+                ),
+                Span::styled(ago, Style::new().fg(Color::DarkGray)),
+                Span::styled("  [s] rerun", Style::new().fg(Color::DarkGray)),
+            ])
+        }
+        SpeedStatus::Failed(_) => Line::from(vec![
+            label,
+            Span::styled("failed", Style::new().fg(Color::Red).bold()),
+            Span::styled("  [s] retry", Style::new().fg(Color::DarkGray)),
+        ]),
+    }
+}
+
 // --- formatting & color helpers -------------------------------------------
 
 fn fmt_ms(v: Option<f64>) -> String {
     match v {
         Some(ms) => format!("{ms:.1}ms"),
+        None => "—".to_string(),
+    }
+}
+
+fn fmt_mbps(v: Option<f64>) -> String {
+    match v {
+        Some(m) => format!("{m:.1} Mbps"),
         None => "—".to_string(),
     }
 }

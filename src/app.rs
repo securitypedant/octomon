@@ -144,6 +144,25 @@ pub struct Throughput {
     pub up_hist: History,
 }
 
+/// Lifecycle of an on-demand speed test.
+#[derive(Clone, Default)]
+pub enum SpeedStatus {
+    #[default]
+    Idle,
+    Running,
+    Done,
+    Failed(String),
+}
+
+/// Results of the most recent Cloudflare speed test.
+#[derive(Clone, Default)]
+pub struct SpeedTest {
+    pub status: SpeedStatus,
+    pub down_mbps: Option<f64>,
+    pub up_mbps: Option<f64>,
+    pub last_run: Option<Instant>,
+}
+
 /// Basic network identity: addresses, gateway, link.
 #[derive(Clone, Default)]
 pub struct NetInfo {
@@ -186,6 +205,7 @@ pub enum Panel {
 pub struct AppState {
     pub targets: Vec<TargetStat>,
     pub throughput: Throughput,
+    pub speedtest: SpeedTest,
     pub netinfo: NetInfo,
     pub vitals: Vitals,
     pub focus: Panel,
@@ -198,6 +218,7 @@ impl AppState {
         Self {
             targets,
             throughput: Throughput::default(),
+            speedtest: SpeedTest::default(),
             netinfo: NetInfo::default(),
             vitals: Vitals::default(),
             focus: Panel::Quality,

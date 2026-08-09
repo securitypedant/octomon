@@ -8,8 +8,10 @@ anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
 crossterm = "0.29.0"
 directories = "6.0.0"
+futures-util = "0.3.33"
 netdev = "0.46.0"
 ratatui = "0.30.2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"] }
 serde = { version = "1.0.229", features = ["derive"] }
 surge-ping = "0.9.0"
 sysinfo = "0.39.6"
