@@ -98,7 +98,7 @@ fn footer(f: &mut Frame, s: &AppState, area: Rect) {
         Line::from(Span::styled(format!(" {n}"), Style::new().fg(Color::Yellow)))
     } else {
         Line::from(Span::styled(
-            " [Tab] focus  [f] full  [p] pause  [r] refresh  [s] speedtest  [?] help  [q] quit",
+            " [Tab] focus  [f] full  [p] pause  [r] refresh  [w] window  [s] speedtest  [?] help  [q] quit",
             Style::new().fg(Color::DarkGray),
         ))
     };
@@ -117,17 +117,25 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let inner = b.inner(area);
     f.render_widget(b, area);
 
-    // Table of targets on top; latency sparkline for the graphed target below.
+    // Summary line, target table, then the latency sparkline for the graphed target.
     let spark_h = if s.fullscreen { 12 } else { 6 };
-    let parts = Layout::vertical([Constraint::Min(3), Constraint::Length(spark_h)]).split(inner);
+    let parts = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(spark_h),
+    ])
+    .split(inner);
+
+    let n = s.window_samples();
+    quality_summary(f, s, n, parts[0]);
 
     let focused = s.focus == Panel::Quality;
-    let header = Row::new(["", "Target", "Address", "last", "avg", "jitter", "loss"])
+    let header = Row::new(["", "Target", "Address", "last", "avg", "p95", "max", "loss"])
         .style(Style::new().fg(Color::Gray).bold());
     let rows = s.targets.iter().enumerate().map(|(i, t)| {
         let loss = t.loss_pct();
+        let st = t.stats(n);
         let color = latency_color(t.last_rtt_ms, loss);
-        // '►' marks the target currently driving the graph.
         let marker = if i == s.graph_target { "►" } else { "" };
         let mut style = Style::new().fg(color);
         if focused && i == s.selected {
@@ -138,25 +146,27 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
             Cell::from(t.label.clone()),
             Cell::from(t.addr.to_string()),
             Cell::from(fmt_ms(t.last_rtt_ms)),
-            Cell::from(fmt_ms(t.avg_ms)),
-            Cell::from(format!("{:.1}", t.jitter_ms)),
+            Cell::from(fmt_ms(st.mean)),
+            Cell::from(fmt_ms(st.p95)),
+            Cell::from(fmt_ms(st.max)),
             Cell::from(format!("{loss:.0}%")),
         ])
         .style(style)
     });
     let widths = [
         Constraint::Length(2),
-        Constraint::Length(14),
-        Constraint::Length(18),
+        Constraint::Length(13),
+        Constraint::Length(16),
         Constraint::Length(8),
         Constraint::Length(8),
-        Constraint::Length(7),
+        Constraint::Length(8),
+        Constraint::Length(8),
         Constraint::Length(6),
     ];
-    f.render_widget(Table::new(rows, widths).header(header), parts[0]);
+    f.render_widget(Table::new(rows, widths).header(header), parts[1]);
 
     if let Some(t) = s.targets.get(s.graph_target) {
-        let data = t.history.tail_u64(parts[1].width as usize);
+        let data = t.history.tail_u64(parts[2].width as usize);
         let spark = Sparkline::default()
             .data(data)
             .style(Style::new().fg(Color::Cyan))
@@ -164,7 +174,48 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
                 format!(" latency · {} ", t.label),
                 Style::new().fg(Color::DarkGray),
             )));
-        f.render_widget(spark, parts[1]);
+        f.render_widget(spark, parts[2]);
+    }
+}
+
+/// One-line summary above the table: stats window, and jitter / stddev /
+/// bufferbloat for the graphed target.
+fn quality_summary(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
+    let mut spans = vec![
+        Span::styled(format!("window {}s ", s.window_secs), Style::new().fg(Color::Gray)),
+        Span::styled("[w]", Style::new().fg(Color::Cyan)),
+        Span::raw("  "),
+    ];
+    if let Some(t) = s.targets.get(s.graph_target) {
+        let st = t.stats(n);
+        spans.push(Span::styled(
+            format!("{}: ", t.label),
+            Style::new().fg(Color::DarkGray),
+        ));
+        spans.push(Span::styled(
+            format!("jitter {:.1} · stddev {:.1}  ", t.jitter_ms, st.stddev),
+            Style::new().fg(Color::Gray),
+        ));
+        if let Some(bloat) = t.bufferbloat_ms(n) {
+            let (grade, color) = bufferbloat_grade(bloat);
+            spans.push(Span::styled("bufferbloat ", Style::new().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                format!("+{bloat:.0}ms ({grade})"),
+                Style::new().fg(color).bold(),
+            ));
+        }
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Grade latency inflation under load, à la the Waveform/Cloudflare scale.
+fn bufferbloat_grade(bloat_ms: f64) -> (&'static str, Color) {
+    match bloat_ms {
+        b if b < 5.0 => ("excellent", Color::Green),
+        b if b < 30.0 => ("good", Color::Green),
+        b if b < 60.0 => ("moderate", Color::Yellow),
+        b if b < 200.0 => ("poor", Color::Red),
+        _ => ("bad", Color::Red),
     }
 }
 
@@ -293,6 +344,7 @@ fn help_overlay(f: &mut Frame, area: Rect) {
         row("s", "run speed test"),
         row("p", "pause / resume auto-refresh"),
         row("r", "re-probe network info"),
+        row("w", "cycle stats window (30/60/300s)"),
         row("?", "toggle this help"),
         row("q / Esc", "quit"),
         Line::from(""),

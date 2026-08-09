@@ -25,6 +25,12 @@ pub fn spawn_for(
         pinger.timeout(cfg.ping_timeout());
         let payload = [0u8; 56];
         let mut seq: u16 = 0;
+
+        // Stagger targets across the interval so their probes don't all fire on
+        // the same tick (which bunches sends and can distort timing).
+        let offset = cfg.ping_interval_ms.saturating_mul(idx as u64 % 10) / 10;
+        tokio::time::sleep(std::time::Duration::from_millis(offset)).await;
+
         let mut ticker = tokio::time::interval(cfg.ping_interval());
         loop {
             ticker.tick().await;

@@ -51,15 +51,25 @@ impl History {
 }
 
 /// Per-target ICMP statistics. Jitter follows the RFC 3550 mean-deviation form.
+/// Windowed distribution summary of recent round-trip times.
+#[derive(Clone, Default)]
+pub struct RttStats {
+    pub min: Option<f64>,
+    pub mean: Option<f64>,
+    pub p95: Option<f64>,
+    pub max: Option<f64>,
+    pub stddev: f64,
+}
+
 #[derive(Clone)]
 pub struct TargetStat {
     pub label: String,
     pub addr: IpAddr,
     pub last_rtt_ms: Option<f64>,
-    pub min_ms: Option<f64>,
-    pub max_ms: Option<f64>,
-    pub avg_ms: Option<f64>, // EWMA
+    /// RFC 3550 interarrival jitter (smoothed).
     pub jitter_ms: f64,
+    /// All-time minimum RTT — the idle baseline for bufferbloat.
+    pub min_ever_ms: Option<f64>,
     pub sent: u64,
     pub recv: u64,
     /// Sliding window of recent outcomes (`true` = reply received).
@@ -73,14 +83,12 @@ impl TargetStat {
             label,
             addr,
             last_rtt_ms: None,
-            min_ms: None,
-            max_ms: None,
-            avg_ms: None,
             jitter_ms: 0.0,
+            min_ever_ms: None,
             sent: 0,
             recv: 0,
             window: VecDeque::with_capacity(WINDOW),
-            history: History::new(300),
+            history: History::new(1000),
         }
     }
 
@@ -91,14 +99,7 @@ impl TargetStat {
         self.push_window(true);
 
         self.last_rtt_ms = Some(rtt_ms);
-        self.min_ms = Some(self.min_ms.map_or(rtt_ms, |m| m.min(rtt_ms)));
-        self.max_ms = Some(self.max_ms.map_or(rtt_ms, |m| m.max(rtt_ms)));
-
-        // EWMA average (alpha = 0.2).
-        self.avg_ms = Some(match self.avg_ms {
-            Some(a) => a + 0.2 * (rtt_ms - a),
-            None => rtt_ms,
-        });
+        self.min_ever_ms = Some(self.min_ever_ms.map_or(rtt_ms, |m| m.min(rtt_ms)));
 
         // RFC 3550 interarrival jitter: J += (|D| - J) / 16.
         if let Some(prev) = self.history.last() {
@@ -129,6 +130,37 @@ impl TargetStat {
         }
         let lost = self.window.iter().filter(|ok| !**ok).count();
         lost as f64 / self.window.len() as f64 * 100.0
+    }
+
+    /// Distribution over the most recent `n` successful samples.
+    pub fn stats(&self, n: usize) -> RttStats {
+        let mut v: Vec<f64> = self.history.data.iter().rev().take(n.max(1)).copied().collect();
+        if v.is_empty() {
+            return RttStats::default();
+        }
+        let samples = v.len();
+        let mean = v.iter().sum::<f64>() / samples as f64;
+        let var = v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / samples as f64;
+        v.sort_by(f64::total_cmp);
+        let pct = |p: f64| v[(((samples - 1) as f64) * p).round() as usize];
+        RttStats {
+            min: Some(v[0]),
+            mean: Some(mean),
+            p95: Some(pct(0.95)),
+            max: Some(v[samples - 1]),
+            stddev: var.sqrt(),
+        }
+    }
+
+    /// Latency inflation over the idle baseline (mean-over-window − all-time
+    /// min). Mean (not median) is used so intermittent spikes — the "jumps" a
+    /// user feels — pull the figure up. Under sustained load this is the
+    /// bufferbloat magnitude.
+    pub fn bufferbloat_ms(&self, n: usize) -> Option<f64> {
+        match (self.stats(n).mean, self.min_ever_ms) {
+            (Some(mean), Some(min)) => Some((mean - min).max(0.0)),
+            _ => None,
+        }
     }
 }
 
@@ -229,6 +261,76 @@ impl Default for History {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn target_with(samples: &[f64]) -> TargetStat {
+        let mut t = TargetStat::new("t".into(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        for &s in samples {
+            t.record_reply(s);
+        }
+        t
+    }
+
+    #[test]
+    fn stats_distribution() {
+        // 1..=100 ms
+        let samples: Vec<f64> = (1..=100).map(|x| x as f64).collect();
+        let t = target_with(&samples);
+        let st = t.stats(100);
+        assert_eq!(st.min, Some(1.0));
+        assert_eq!(st.max, Some(100.0));
+        assert_eq!(st.mean, Some(50.5));
+        // p95 index = round(99 * 0.95) = 94 -> value 95
+        assert_eq!(st.p95, Some(95.0));
+        assert!((st.stddev - 28.866).abs() < 0.01);
+    }
+
+    #[test]
+    fn stats_respects_window() {
+        let samples: Vec<f64> = (1..=100).map(|x| x as f64).collect();
+        let t = target_with(&samples);
+        // Only the most recent 10 samples (91..=100).
+        let st = t.stats(10);
+        assert_eq!(st.min, Some(91.0));
+        assert_eq!(st.max, Some(100.0));
+    }
+
+    #[test]
+    fn bufferbloat_is_mean_over_idle_floor() {
+        // Idle floor 10ms, then a burst of 110ms spikes.
+        let mut samples = vec![10.0; 5];
+        samples.extend(vec![110.0; 5]);
+        let t = target_with(&samples);
+        // min_ever = 10; mean over window = 60 => bloat = 50.
+        assert_eq!(t.bufferbloat_ms(10), Some(50.0));
+    }
+
+    #[test]
+    fn window_cycles_30_60_300() {
+        let mut s = AppState::new(vec![]);
+        assert_eq!(s.window_secs, 60);
+        s.cycle_window();
+        assert_eq!(s.window_secs, 300);
+        s.cycle_window();
+        assert_eq!(s.window_secs, 30);
+        s.cycle_window();
+        assert_eq!(s.window_secs, 60);
+    }
+
+    #[test]
+    fn loss_pct_counts_window() {
+        let mut t = TargetStat::new("t".into(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        t.record_reply(10.0);
+        t.record_loss();
+        t.record_reply(12.0);
+        t.record_loss();
+        assert_eq!(t.loss_pct(), 50.0);
+    }
+}
+
 /// Which panel currently has focus (for future keyboard interactions).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
@@ -267,6 +369,10 @@ pub struct AppState {
     pub selected: usize,
     /// Target index whose latency history drives the sparkline.
     pub graph_target: usize,
+    /// Smoothing/stats window in seconds (cycled with 'w').
+    pub window_secs: u64,
+    /// Samples per second (1000 / ping interval); converts window to samples.
+    pub samples_per_sec: f64,
 
     // --- Modal / global UI state ---
     pub input_mode: InputMode,
@@ -297,6 +403,8 @@ impl AppState {
             proc_supported: false,
             selected: 0,
             graph_target: 0,
+            window_secs: 60,
+            samples_per_sec: 1.0,
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
             notice: None,
@@ -305,5 +413,19 @@ impl AppState {
             should_quit: false,
             started: Instant::now(),
         }
+    }
+
+    /// Number of recent samples covered by the current window.
+    pub fn window_samples(&self) -> usize {
+        ((self.window_secs as f64 * self.samples_per_sec).round() as usize).max(1)
+    }
+
+    /// Cycle the stats window: 30s → 60s → 300s → 30s.
+    pub fn cycle_window(&mut self) {
+        self.window_secs = match self.window_secs {
+            w if w < 60 => 60,
+            w if w < 300 => 300,
+            _ => 30,
+        };
     }
 }
