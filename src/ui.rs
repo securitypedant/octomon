@@ -1,39 +1,107 @@
 //! Rendering. A single [`render`] entry point draws the four panels from an
 //! immutable snapshot of [`AppState`]. No data collection happens here.
 
+use ratatui::layout::Alignment;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Sparkline, Table};
+use ratatui::style::Modifier;
+use ratatui::widgets::{Block, Cell, Clear, Gauge, Paragraph, Row, Sparkline, Table};
 
-use crate::app::{AppState, Panel, SpeedStatus};
+use crate::app::{AppState, InputMode, Panel, SpeedStatus};
 
 /// Draw the whole dashboard.
 pub fn render(f: &mut Frame, s: &AppState) {
-    let root = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(f.area());
+    let root = Layout::vertical([
+        Constraint::Length(1), // header
+        Constraint::Min(0),    // body
+        Constraint::Length(1), // footer (input / notice / hints)
+    ])
+    .split(f.area());
     header(f, s, root[0]);
 
-    let rows = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(root[1]);
-    let top = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[0]);
-    let bottom = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[1]);
+    if s.fullscreen {
+        // Single focused panel fills the body.
+        match s.focus {
+            Panel::Quality => quality_panel(f, s, root[1]),
+            Panel::Bandwidth => bandwidth_panel(f, s, root[1]),
+            Panel::NetInfo => netinfo_panel(f, s, root[1]),
+            Panel::Vitals => vitals_panel(f, s, root[1]),
+        }
+    } else {
+        let rows = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(root[1]);
+        let top = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[0]);
+        let bottom = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[1]);
+        quality_panel(f, s, top[0]);
+        bandwidth_panel(f, s, top[1]);
+        netinfo_panel(f, s, bottom[0]);
+        vitals_panel(f, s, bottom[1]);
+    }
 
-    quality_panel(f, s, top[0]);
-    bandwidth_panel(f, s, top[1]);
-    netinfo_panel(f, s, bottom[0]);
-    vitals_panel(f, s, bottom[1]);
+    footer(f, s, root[2]);
+
+    if s.show_help {
+        help_overlay(f, f.area());
+    }
 }
 
 fn header(f: &mut Frame, s: &AppState, area: Rect) {
+    let cols = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(area);
+
     let up = s.started.elapsed().as_secs();
-    let line = Line::from(vec![
+    let mut left = vec![
         Span::styled(" octomon ", Style::new().fg(Color::Black).bg(Color::Cyan).bold()),
-        Span::raw(format!("  uptime {:02}:{:02}:{:02}", up / 3600, (up % 3600) / 60, up % 60)),
-        Span::raw("   "),
-        Span::styled("[q]", Style::new().fg(Color::Cyan)),
-        Span::raw("uit  "),
-        Span::styled("[Tab]", Style::new().fg(Color::Cyan)),
-        Span::raw(" focus  "),
-        Span::styled("[s]", Style::new().fg(Color::Cyan)),
-        Span::raw("peedtest"),
-    ]);
+        Span::raw(format!("  {:02}:{:02}:{:02}", up / 3600, (up % 3600) / 60, up % 60)),
+    ];
+    if s.paused {
+        left.push(Span::styled(
+            "  PAUSED",
+            Style::new().fg(Color::Black).bg(Color::Yellow).bold(),
+        ));
+    }
+    if s.fullscreen {
+        left.push(Span::styled("  ⛶ full", Style::new().fg(Color::DarkGray)));
+    }
+    f.render_widget(Paragraph::new(Line::from(left)), cols[0]);
+
+    // Context-sensitive actions, top-right.
+    f.render_widget(
+        Paragraph::new(context_line(s)).alignment(Alignment::Right),
+        cols[1],
+    );
+}
+
+/// Panel-specific action hints shown at top-right.
+fn context_line(s: &AppState) -> Line<'static> {
+    let key = |k: &str| Span::styled(k.to_string(), Style::new().fg(Color::Cyan));
+    let txt = |t: &str| Span::styled(t.to_string(), Style::new().fg(Color::Gray));
+    let mut spans = match s.focus {
+        Panel::Quality => vec![
+            key("[a]"), txt("dd "), key("[↑↓]"), txt("sel "), key("[↵]"), txt("graph "),
+        ],
+        Panel::Bandwidth => vec![key("[s]"), txt("peedtest "), key("[f]"), txt("ull ")],
+        Panel::NetInfo => vec![key("[r]"), txt("efresh ")],
+        Panel::Vitals => vec![],
+    };
+    spans.push(key("[?]"));
+    spans.push(txt("help "));
+    Line::from(spans)
+}
+
+fn footer(f: &mut Frame, s: &AppState, area: Rect) {
+    let line = if s.input_mode == InputMode::AddTarget {
+        Line::from(vec![
+            Span::styled(" add target (IP or DNS): ", Style::new().fg(Color::Yellow).bold()),
+            Span::styled(s.input_buffer.clone(), Style::new().fg(Color::White)),
+            Span::styled("▏", Style::new().fg(Color::Yellow)),
+            Span::styled("   [Enter] add  [Esc] cancel", Style::new().fg(Color::DarkGray)),
+        ])
+    } else if let Some(n) = &s.notice {
+        Line::from(Span::styled(format!(" {n}"), Style::new().fg(Color::Yellow)))
+    } else {
+        Line::from(Span::styled(
+            " [Tab] focus  [f] full  [p] pause  [r] refresh  [s] speedtest  [?] help  [q] quit",
+            Style::new().fg(Color::DarkGray),
+        ))
+    };
     f.render_widget(Paragraph::new(line), area);
 }
 
@@ -49,15 +117,24 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let inner = b.inner(area);
     f.render_widget(b, area);
 
-    // Table of targets on top, latency sparkline for the first target below.
-    let parts = Layout::vertical([Constraint::Min(3), Constraint::Length(5)]).split(inner);
+    // Table of targets on top; latency sparkline for the graphed target below.
+    let spark_h = if s.fullscreen { 12 } else { 6 };
+    let parts = Layout::vertical([Constraint::Min(3), Constraint::Length(spark_h)]).split(inner);
 
-    let header = Row::new(["Target", "Address", "last", "avg", "jitter", "loss"])
+    let focused = s.focus == Panel::Quality;
+    let header = Row::new(["", "Target", "Address", "last", "avg", "jitter", "loss"])
         .style(Style::new().fg(Color::Gray).bold());
-    let rows = s.targets.iter().map(|t| {
+    let rows = s.targets.iter().enumerate().map(|(i, t)| {
         let loss = t.loss_pct();
         let color = latency_color(t.last_rtt_ms, loss);
+        // '►' marks the target currently driving the graph.
+        let marker = if i == s.graph_target { "►" } else { "" };
+        let mut style = Style::new().fg(color);
+        if focused && i == s.selected {
+            style = style.bg(Color::Rgb(40, 40, 55)).add_modifier(Modifier::BOLD);
+        }
         Row::new(vec![
+            Cell::from(Span::styled(marker, Style::new().fg(Color::Cyan))),
             Cell::from(t.label.clone()),
             Cell::from(t.addr.to_string()),
             Cell::from(fmt_ms(t.last_rtt_ms)),
@@ -65,11 +142,12 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
             Cell::from(format!("{:.1}", t.jitter_ms)),
             Cell::from(format!("{loss:.0}%")),
         ])
-        .style(Style::new().fg(color))
+        .style(style)
     });
     let widths = [
-        Constraint::Length(11),
-        Constraint::Length(16),
+        Constraint::Length(2),
+        Constraint::Length(14),
+        Constraint::Length(18),
         Constraint::Length(8),
         Constraint::Length(8),
         Constraint::Length(7),
@@ -77,7 +155,7 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     ];
     f.render_widget(Table::new(rows, widths).header(header), parts[0]);
 
-    if let Some(t) = s.targets.first() {
+    if let Some(t) = s.targets.get(s.graph_target) {
         let data = t.history.tail_u64(parts[1].width as usize);
         let spark = Sparkline::default()
             .data(data)
@@ -99,38 +177,65 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let inner = b.inner(area);
     f.render_widget(b, area);
 
-    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
-    f.render_widget(Paragraph::new(speedtest_line(s)), rows[0]);
-    let parts = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Length(3),
-        Constraint::Min(0),
+    // Split view shows 5 talkers, full-screen shows 10; the graphs take the rest.
+    let talkers = if s.fullscreen { 10 } else { 5 };
+    let talker_h = talkers as u16 + 1; // +1 for the section title
+    let rows = Layout::vertical([
+        Constraint::Length(1),        // speedtest status / progress
+        Constraint::Min(6),           // throughput graphs (given the most room)
+        Constraint::Length(talker_h), // top talkers pinned to the bottom
     ])
-    .split(rows[1]);
+    .split(inner);
 
+    render_speedtest(f, s, rows[0]);
+
+    let graphs = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
     let down = Sparkline::default()
-        .data(tp.down_hist.tail_u64(parts[0].width as usize))
+        .data(tp.down_hist.tail_u64(graphs[0].width as usize))
         .style(Style::new().fg(Color::Green))
         .block(Block::new().title(Span::styled(
             format!(" ↓ down  {}", fmt_rate(tp.down_bps)),
             Style::new().fg(Color::Green).bold(),
         )));
-    f.render_widget(down, parts[0]);
+    f.render_widget(down, graphs[0]);
 
     let up = Sparkline::default()
-        .data(tp.up_hist.tail_u64(parts[1].width as usize))
+        .data(tp.up_hist.tail_u64(graphs[1].width as usize))
         .style(Style::new().fg(Color::Magenta))
         .block(Block::new().title(Span::styled(
             format!(" ↑ up    {}", fmt_rate(tp.up_bps)),
             Style::new().fg(Color::Magenta).bold(),
         )));
-    f.render_widget(up, parts[1]);
+    f.render_widget(up, graphs[1]);
 
-    top_talkers(f, s, parts[2]);
+    top_talkers(f, s, rows[2], talkers);
+}
+
+/// The speed-test row: a live progress gauge while running, else a status line.
+fn render_speedtest(f: &mut Frame, s: &AppState, area: Rect) {
+    let st = &s.speedtest;
+    if s.speedtest_enabled && matches!(st.status, SpeedStatus::Running) {
+        let label = format!(
+            "speedtest · {} {:.0}%  {:.1} Mbps",
+            st.phase,
+            st.progress * 100.0,
+            st.live_mbps
+        );
+        let color = if st.phase == "upload" { Color::Magenta } else { Color::Green };
+        f.render_widget(
+            Gauge::default()
+                .ratio(st.progress.clamp(0.0, 1.0))
+                .label(label)
+                .gauge_style(Style::new().fg(color)),
+            area,
+        );
+    } else {
+        f.render_widget(Paragraph::new(speedtest_line(s)), area);
+    }
 }
 
 /// Compact "top processes by bandwidth" list beneath the throughput sparklines.
-fn top_talkers(f: &mut Frame, s: &AppState, area: Rect) {
+fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
     let outer = Block::new().title(Span::styled(" top talkers ", Style::new().fg(Color::DarkGray)));
     let inner = outer.inner(area);
     f.render_widget(outer, area);
@@ -153,7 +258,7 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect) {
         return;
     }
 
-    let rows = s.processes.iter().map(|p| {
+    let rows = s.processes.iter().take(limit).map(|p| {
         let name: String = p.name.chars().take(18).collect();
         Row::new(vec![
             Cell::from(name),
@@ -163,6 +268,50 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect) {
     });
     let widths = [Constraint::Length(19), Constraint::Length(13), Constraint::Length(13)];
     f.render_widget(Table::new(rows, widths), inner);
+}
+
+/// Centered modal listing all keyboard shortcuts.
+fn help_overlay(f: &mut Frame, area: Rect) {
+    let w = 54u16.min(area.width);
+    let h = 20u16.min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    let row = |k: &str, d: &str| {
+        Line::from(vec![
+            Span::styled(format!("  {k:<10}"), Style::new().fg(Color::Cyan)),
+            Span::styled(d.to_string(), Style::new().fg(Color::Gray)),
+        ])
+    };
+    let lines = vec![
+        Line::from(Span::styled("  Global", Style::new().fg(Color::White).bold())),
+        row("Tab", "cycle panel focus"),
+        row("f", "toggle full-screen of focused panel"),
+        row("s", "run speed test"),
+        row("p", "pause / resume auto-refresh"),
+        row("r", "re-probe network info"),
+        row("?", "toggle this help"),
+        row("q / Esc", "quit"),
+        Line::from(""),
+        Line::from(Span::styled("  Connection Quality", Style::new().fg(Color::White).bold())),
+        row("a", "add a target (IP or DNS name)"),
+        row("↑/↓ or j/k", "select a target"),
+        row("Enter", "graph the selected target's latency"),
+        Line::from(""),
+        Line::from(Span::styled("  press ? or Esc to close", Style::new().fg(Color::DarkGray))),
+    ];
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .title(Span::styled(" Keyboard Shortcuts ", Style::new().bold()))
+                .border_style(Style::new().fg(Color::Cyan)),
+        ),
+        rect,
+    );
 }
 
 fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {

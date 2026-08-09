@@ -6,16 +6,22 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio::sync::Notify;
+
 use crate::app::AppState;
 
-pub async fn run(state: Arc<Mutex<AppState>>) {
+pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>) {
     // Let the netinfo collector populate `link_kind` first so we can skip the
     // expensive probe on non-Wi-Fi links.
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let mut ticker = tokio::time::interval(Duration::from_secs(60));
     loop {
-        ticker.tick().await;
+        // Re-probe on the timer or when the user presses 'r'.
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = refresh.notified() => {}
+        }
 
         let is_wifi = {
             let s = state.lock().unwrap();

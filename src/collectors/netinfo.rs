@@ -4,12 +4,18 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio::sync::Notify;
+
 use crate::app::{AppState, NetInfo};
 
-pub async fn run(state: Arc<Mutex<AppState>>) {
+pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>) {
     let mut ticker = tokio::time::interval(Duration::from_secs(5));
     loop {
-        ticker.tick().await;
+        // Re-probe on the timer or when the user presses 'r'.
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = refresh.notified() => {}
+        }
         if let Ok(iface) = netdev::get_default_interface() {
             let info = build(&iface);
             // Preserve Wi-Fi details, which are populated on a slower cadence by

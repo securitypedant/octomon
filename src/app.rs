@@ -154,13 +154,29 @@ pub enum SpeedStatus {
     Failed(String),
 }
 
-/// Results of the most recent Cloudflare speed test.
+/// Results of the most recent Cloudflare speed test, plus live progress.
 #[derive(Clone, Default)]
 pub struct SpeedTest {
     pub status: SpeedStatus,
     pub down_mbps: Option<f64>,
     pub up_mbps: Option<f64>,
     pub last_run: Option<Instant>,
+    /// Current phase label while running: "connect", "download", "upload".
+    pub phase: String,
+    /// Progress within the current phase, 0.0..=1.0.
+    pub progress: f64,
+    /// Instantaneous throughput (Mbps) during the active phase.
+    pub live_mbps: f64,
+}
+
+impl SpeedTest {
+    /// Reset live fields when (re)starting a run.
+    pub fn begin(&mut self) {
+        self.status = SpeedStatus::Running;
+        self.phase = "connect".to_string();
+        self.progress = 0.0;
+        self.live_mbps = 0.0;
+    }
 }
 
 /// Per-process network throughput (bytes/sec), derived from successive samples.
@@ -222,6 +238,14 @@ pub enum Panel {
     Vitals,
 }
 
+/// Keyboard input mode: normal navigation vs. modal text entry.
+#[derive(Clone, PartialEq, Eq)]
+pub enum InputMode {
+    Normal,
+    /// Typing a new ICMP target (IP or DNS name).
+    AddTarget,
+}
+
 /// Root shared state.
 pub struct AppState {
     pub targets: Vec<TargetStat>,
@@ -230,11 +254,30 @@ pub struct AppState {
     pub netinfo: NetInfo,
     pub vitals: Vitals,
     pub focus: Panel,
+    /// When set, the focused panel is drawn full-screen instead of the 2x2 grid.
+    pub fullscreen: bool,
     pub speedtest_enabled: bool,
     /// Top processes by current network throughput (highest first).
     pub processes: Vec<ProcBandwidth>,
     /// Whether per-process attribution is available on this platform.
     pub proc_supported: bool,
+
+    // --- Connection Quality interaction ---
+    /// Cursor over the target list (Quality panel).
+    pub selected: usize,
+    /// Target index whose latency history drives the sparkline.
+    pub graph_target: usize,
+
+    // --- Modal / global UI state ---
+    pub input_mode: InputMode,
+    pub input_buffer: String,
+    /// Optional transient status/error message (e.g. failed DNS lookup).
+    pub notice: Option<String>,
+    /// Auto-refresh paused: the periodic redraw is suppressed.
+    pub paused: bool,
+    /// Help overlay visible.
+    pub show_help: bool,
+
     pub should_quit: bool,
     pub started: Instant,
 }
@@ -248,9 +291,17 @@ impl AppState {
             netinfo: NetInfo::default(),
             vitals: Vitals::default(),
             focus: Panel::Quality,
+            fullscreen: false,
             speedtest_enabled: true,
             processes: Vec::new(),
             proc_supported: false,
+            selected: 0,
+            graph_target: 0,
+            input_mode: InputMode::Normal,
+            input_buffer: String::new(),
+            notice: None,
+            paused: false,
+            show_help: false,
             should_quit: false,
             started: Instant::now(),
         }

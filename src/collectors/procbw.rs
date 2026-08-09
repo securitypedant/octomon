@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use crate::app::{AppState, ProcBandwidth};
 use crate::platform;
 
-const TOP_N: usize = 6;
+// Keep enough for the full-screen view (10); the split view shows fewer.
+const TOP_N: usize = 10;
 
 pub async fn run(state: Arc<Mutex<AppState>>) {
     // Probe support once; bail (leaving proc_supported = false) if unavailable.
