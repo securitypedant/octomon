@@ -70,6 +70,8 @@ fn build(iface: &netdev::Interface) -> NetInfo {
         link_kind.push_str(" · DHCP");
     }
 
+    let dns = iface.dns_servers.iter().map(|d| d.to_string()).collect();
+
     NetInfo {
         iface: iface.name.clone(),
         ipv4,
@@ -77,6 +79,7 @@ fn build(iface: &netdev::Interface) -> NetInfo {
         mac,
         gateway_ip,
         gateway_mac,
+        dns,
         link_kind,
         wifi: None, // filled in by the caller for Wi-Fi links
     }

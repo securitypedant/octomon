@@ -20,7 +20,7 @@ use crate::app::{AppState, SpeedStatus};
 const DOWN_URL: &str = "https://speed.cloudflare.com/__down";
 const UP_URL: &str = "https://speed.cloudflare.com/__up";
 
-const STREAMS: usize = 6; // parallel connections per direction
+const STREAMS: usize = 4; // parallel connections per direction
 const WARMUP: Duration = Duration::from_secs(2); // discarded (slow-start ramp)
 const MEASURE: Duration = Duration::from_secs(6); // steady-state window
 // Per-request size; streams reconnect if exhausted, so this bounds reconnect
@@ -137,7 +137,10 @@ async fn measure(
     }
 
     if total.load(Ordering::Relaxed) == 0 {
-        return Err(format!("{} transfer produced no data", dir.label()));
+        return Err(format!(
+            "{} got no data (endpoint may be rate-limiting — retry shortly)",
+            dir.label()
+        ));
     }
     Ok((mbps, rtts))
 }
@@ -198,19 +201,25 @@ async fn controller(
     }
 }
 
-/// Repeatedly download large responses, counting bytes, until stopped.
+/// Repeatedly download large responses, counting bytes, until stopped. Backs
+/// off exponentially on errors so a rate-limit (429) isn't hammered.
 async fn down_stream(client: reqwest::Client, total: Arc<AtomicU64>, stop: Arc<AtomicBool>) {
+    let mut backoff = Duration::from_millis(200);
     while !stop.load(Ordering::Relaxed) {
         let resp = client
             .get(DOWN_URL)
             .query(&[("bytes", REQ_BYTES.to_string())])
             .send()
-            .await;
-        let resp = match resp.and_then(|r| r.error_for_status()) {
-            Ok(r) => r,
+            .await
+            .and_then(|r| r.error_for_status());
+        let resp = match resp {
+            Ok(r) => {
+                backoff = Duration::from_millis(200);
+                r
+            }
             Err(_) => {
-                // e.g. an oversized `bytes` value → 403; back off briefly.
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(3));
                 continue;
             }
         };
@@ -229,6 +238,7 @@ async fn down_stream(client: reqwest::Client, total: Arc<AtomicU64>, stop: Arc<A
 
 /// Repeatedly upload a streamed body, counting bytes handed to the socket.
 async fn up_stream(client: reqwest::Client, total: Arc<AtomicU64>, stop: Arc<AtomicBool>) {
+    let mut backoff = Duration::from_millis(200);
     while !stop.load(Ordering::Relaxed) {
         let (t, s) = (total.clone(), stop.clone());
         let body = reqwest::Body::wrap_stream(stream::unfold(0u64, move |sent| {
@@ -241,7 +251,13 @@ async fn up_stream(client: reqwest::Client, total: Arc<AtomicU64>, stop: Arc<Ato
                 Some((Ok::<_, std::io::Error>(vec![0u8; UP_CHUNK]), sent + UP_CHUNK as u64))
             }
         }));
-        let _ = client.post(UP_URL).body(body).send().await;
+        match client.post(UP_URL).body(body).send().await.and_then(|r| r.error_for_status()) {
+            Ok(_) => backoff = Duration::from_millis(200),
+            Err(_) => {
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(3));
+            }
+        }
     }
 }
 
