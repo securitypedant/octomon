@@ -7,20 +7,22 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::app::{AppState, ProcBandwidth};
+use crate::app::{AppState, ProcBandwidth, ProcStatus};
 use crate::platform;
 
 // Keep enough for the full-screen view (10); the split view shows fewer.
 const TOP_N: usize = 10;
 
 pub async fn run(state: Arc<Mutex<AppState>>) {
-    // Probe support once; bail (leaving proc_supported = false) if unavailable.
+    // Probe support once; mark unsupported (not just "empty") if unavailable.
     if platform::proc_net_sample().await.is_none() {
+        state.lock().unwrap().proc_status = ProcStatus::Unsupported;
         return;
     }
-    state.lock().unwrap().proc_supported = true;
+    state.lock().unwrap().proc_status = ProcStatus::Supported;
 
-    let mut prev: HashMap<u32, (u64, u64)> = HashMap::new();
+    // pid -> (bytes_in, bytes_out, retx) from the previous sample.
+    let mut prev: HashMap<u32, (u64, u64, u64)> = HashMap::new();
     let mut prev_at = Instant::now();
     let mut ticker = tokio::time::interval(Duration::from_secs(2));
 
@@ -34,7 +36,7 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
 
         let mut list: Vec<ProcBandwidth> = Vec::new();
         for s in &sample {
-            if let Some((pin, pout)) = prev.get(&s.pid) {
+            if let Some((pin, pout, pretx)) = prev.get(&s.pid) {
                 let down = s.bytes_in.saturating_sub(*pin) as f64 / secs;
                 let up = s.bytes_out.saturating_sub(*pout) as f64 / secs;
                 if down + up > 0.0 {
@@ -43,19 +45,18 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
                         pid: s.pid,
                         down_bps: down,
                         up_bps: up,
+                        total_bytes: s.bytes_in.saturating_add(s.bytes_out),
+                        retx_per_sec: s.retx.saturating_sub(*pretx) as f64 / secs,
                     });
                 }
             }
         }
-        list.sort_by(|a, b| {
-            (b.down_bps + b.up_bps)
-                .total_cmp(&(a.down_bps + a.up_bps))
-        });
+        list.sort_by(|a, b| (b.down_bps + b.up_bps).total_cmp(&(a.down_bps + a.up_bps)));
         list.truncate(TOP_N);
 
         prev = sample
             .iter()
-            .map(|s| (s.pid, (s.bytes_in, s.bytes_out)))
+            .map(|s| (s.pid, (s.bytes_in, s.bytes_out, s.retx)))
             .collect();
         prev_at = now;
 

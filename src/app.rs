@@ -193,12 +193,16 @@ pub struct SpeedTest {
     pub down_mbps: Option<f64>,
     pub up_mbps: Option<f64>,
     pub last_run: Option<Instant>,
-    /// Current phase label while running: "connect", "download", "upload".
+    /// Current phase label while running: "latency", "download", "upload".
     pub phase: String,
     /// Progress within the current phase, 0.0..=1.0.
     pub progress: f64,
     /// Instantaneous throughput (Mbps) during the active phase.
     pub live_mbps: f64,
+    /// Unloaded (idle) latency measured just before the test, in ms.
+    pub idle_latency_ms: Option<f64>,
+    /// Latency measured while the link was saturated, in ms.
+    pub loaded_latency_ms: Option<f64>,
 }
 
 impl SpeedTest {
@@ -211,13 +215,28 @@ impl SpeedTest {
     }
 }
 
-/// Per-process network throughput (bytes/sec), derived from successive samples.
+/// Availability of per-process attribution, so the UI can distinguish "still
+/// probing" from "not supported here".
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProcStatus {
+    #[default]
+    Probing,
+    Supported,
+    Unsupported,
+}
+
+/// Per-process network throughput (bytes/sec), derived from successive samples,
+/// plus a couple of connection-health signals.
 #[derive(Clone)]
 pub struct ProcBandwidth {
     pub name: String,
     pub pid: u32,
     pub down_bps: f64,
     pub up_bps: f64,
+    /// Cumulative bytes (in+out) this process has transferred this session.
+    pub total_bytes: u64,
+    /// TCP retransmissions per second (connection-health signal).
+    pub retx_per_sec: f64,
 }
 
 /// Wi-Fi radio details (best-effort, platform-specific).
@@ -361,8 +380,8 @@ pub struct AppState {
     pub speedtest_enabled: bool,
     /// Top processes by current network throughput (highest first).
     pub processes: Vec<ProcBandwidth>,
-    /// Whether per-process attribution is available on this platform.
-    pub proc_supported: bool,
+    /// Availability of per-process attribution on this platform.
+    pub proc_status: ProcStatus,
 
     // --- Connection Quality interaction ---
     /// Cursor over the target list (Quality panel).
@@ -400,7 +419,7 @@ impl AppState {
             fullscreen: false,
             speedtest_enabled: true,
             processes: Vec::new(),
-            proc_supported: false,
+            proc_status: ProcStatus::Probing,
             selected: 0,
             graph_target: 0,
             window_secs: 60,
