@@ -53,6 +53,16 @@ impl Default for Config {
     }
 }
 
+/// Parse a CLI target string: `"LABEL=IP"` or bare `"IP"` (label = the IP).
+pub fn parse_target(s: &str) -> Result<Target, String> {
+    let (label, ip) = match s.split_once('=') {
+        Some((l, ip)) => (l.trim().to_string(), ip.trim()),
+        None => (s.trim().to_string(), s.trim()),
+    };
+    let addr = ip.parse().map_err(|_| format!("invalid IP in target '{s}'"))?;
+    Ok(Target { label, addr })
+}
+
 impl Config {
     pub fn ping_interval(&self) -> Duration {
         Duration::from_millis(self.ping_interval_ms)

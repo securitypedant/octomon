@@ -12,7 +12,12 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
         ticker.tick().await;
         if let Ok(iface) = netdev::get_default_interface() {
             let info = build(&iface);
-            state.lock().unwrap().netinfo = info;
+            // Preserve Wi-Fi details, which are populated on a slower cadence by
+            // the dedicated wifi collector, across these frequent base refreshes.
+            let mut s = state.lock().unwrap();
+            let prev_wifi = s.netinfo.wifi.take();
+            s.netinfo = info;
+            s.netinfo.wifi = prev_wifi;
         }
     }
 }
@@ -67,5 +72,6 @@ fn build(iface: &netdev::Interface) -> NetInfo {
         gateway_ip,
         gateway_mac,
         link_kind,
+        wifi: None, // filled in by the caller for Wi-Fi links
     }
 }

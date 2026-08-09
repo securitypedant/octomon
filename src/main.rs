@@ -7,21 +7,59 @@
 mod app;
 mod collectors;
 mod config;
+mod platform;
 mod ui;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
+use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use tokio::sync::{mpsc, Notify};
 
 use app::{AppState, Panel, SpeedStatus, TargetStat};
 use config::Config;
 
+/// Terminal dashboard for network performance.
+#[derive(Parser, Debug)]
+#[command(name = "octomon", version, about)]
+struct Cli {
+    /// Run collectors briefly, print a text snapshot, then exit (no TUI).
+    #[arg(long)]
+    check: bool,
+
+    /// Disable the on-demand speed test.
+    #[arg(long)]
+    no_speedtest: bool,
+
+    /// Add an ICMP target: `LABEL=IP` or bare `IP`. Repeatable.
+    #[arg(short = 't', long = "target", value_name = "[LABEL=]IP")]
+    targets: Vec<String>,
+
+    /// Override the ICMP ping interval, in milliseconds.
+    #[arg(long, value_name = "MS")]
+    ping_interval: Option<u64>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cfg = Config::load();
+    let cli = Cli::parse();
+
+    // Base config from file/defaults, then apply CLI overrides.
+    let mut cfg = Config::load();
+    if let Some(ms) = cli.ping_interval {
+        cfg.ping_interval_ms = ms;
+    }
+    for t in &cli.targets {
+        match config::parse_target(t) {
+            Ok(target) => cfg.targets.push(target),
+            Err(e) => {
+                eprintln!("octomon: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
 
     let targets = cfg
         .targets
@@ -29,6 +67,7 @@ async fn main() -> Result<()> {
         .map(|t| TargetStat::new(t.label.clone(), t.addr))
         .collect();
     let state = Arc::new(Mutex::new(AppState::new(targets)));
+    state.lock().unwrap().speedtest_enabled = !cli.no_speedtest;
 
     // Trigger for the on-demand speed test (fired by the 's' key).
     let speedtest_trigger = Arc::new(Notify::new());
@@ -38,17 +77,25 @@ async fn main() -> Result<()> {
     tokio::spawn(collectors::throughput::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::vitals::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::netinfo::run(state.clone()));
-    tokio::spawn(collectors::speedtest::run(
-        state.clone(),
-        speedtest_trigger.clone(),
-    ));
+    tokio::spawn(collectors::wifi::run(state.clone()));
+    if !cli.no_speedtest {
+        tokio::spawn(collectors::speedtest::run(
+            state.clone(),
+            speedtest_trigger.clone(),
+        ));
+    }
 
     // Headless verification mode: collect for a few seconds, run one speed test,
     // print a text snapshot, and exit. Exercises collectors without a TTY.
-    if std::env::args().any(|a| a == "--check") {
+    if cli.check {
         tokio::time::sleep(Duration::from_secs(3)).await;
-        speedtest_trigger.notify_one();
-        tokio::time::sleep(Duration::from_secs(20)).await;
+        if !cli.no_speedtest {
+            speedtest_trigger.notify_one();
+            tokio::time::sleep(Duration::from_secs(20)).await;
+        } else {
+            // The macOS Wi-Fi probe (system_profiler) is slow; wait for it.
+            tokio::time::sleep(Duration::from_secs(17)).await;
+        }
         print_snapshot(&state.lock().unwrap());
         return Ok(());
     }
@@ -106,12 +153,12 @@ fn handle_key(state: &Arc<Mutex<AppState>>, key: KeyEvent, speedtest_trigger: &A
         KeyCode::Char('q') | KeyCode::Esc => s.should_quit = true,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => s.should_quit = true,
         KeyCode::Tab => s.focus = next_panel(s.focus),
-        KeyCode::Char('s') => {
-            // Ignore if a test is already in flight.
-            if !matches!(s.speedtest.status, SpeedStatus::Running) {
-                s.speedtest.status = SpeedStatus::Running;
-                speedtest_trigger.notify_one();
-            }
+        // Ignore if disabled or a test is already in flight.
+        KeyCode::Char('s')
+            if s.speedtest_enabled && !matches!(s.speedtest.status, SpeedStatus::Running) =>
+        {
+            s.speedtest.status = SpeedStatus::Running;
+            speedtest_trigger.notify_one();
         }
         _ => {}
     }
@@ -151,6 +198,12 @@ fn print_snapshot(s: &AppState) {
     println!("  iface={}  link={}", n.iface, n.link_kind);
     println!("  ipv4={:?}", n.ipv4);
     println!("  mac={}  gateway={} ({})", n.mac, n.gateway_ip, n.gateway_mac);
+    if let Some(w) = &n.wifi {
+        println!(
+            "  wifi: ssid={} phy={} ch={} signal={} tx={}",
+            w.ssid, w.phy, w.channel, w.rssi, w.tx_rate
+        );
+    }
 
     let v = &s.vitals;
     println!("\n[Machine]");

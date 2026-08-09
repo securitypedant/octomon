@@ -163,6 +163,16 @@ pub struct SpeedTest {
     pub last_run: Option<Instant>,
 }
 
+/// Wi-Fi radio details (best-effort, platform-specific).
+#[derive(Clone, Default)]
+pub struct WifiInfo {
+    pub ssid: String,
+    pub phy: String,
+    pub channel: String,
+    pub rssi: String,
+    pub tx_rate: String,
+}
+
 /// Basic network identity: addresses, gateway, link.
 #[derive(Clone, Default)]
 pub struct NetInfo {
@@ -174,6 +184,8 @@ pub struct NetInfo {
     pub gateway_mac: String,
     /// e.g. "Wi-Fi", "Ethernet", "Loopback" — best-effort.
     pub link_kind: String,
+    /// Present when the default interface is Wi-Fi and details are available.
+    pub wifi: Option<WifiInfo>,
 }
 
 /// Machine vitals, framed only as a "is my box the bottleneck?" signal.
@@ -209,6 +221,7 @@ pub struct AppState {
     pub netinfo: NetInfo,
     pub vitals: Vitals,
     pub focus: Panel,
+    pub speedtest_enabled: bool,
     pub should_quit: bool,
     pub started: Instant,
 }
@@ -222,6 +235,7 @@ impl AppState {
             netinfo: NetInfo::default(),
             vitals: Vitals::default(),
             focus: Panel::Quality,
+            speedtest_enabled: true,
             should_quit: false,
             started: Instant::now(),
         }
