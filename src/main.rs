@@ -119,7 +119,7 @@ async fn main() -> Result<()> {
         tokio::time::sleep(Duration::from_secs(3)).await;
         if !cli.no_speedtest {
             speedtest_trigger.notify_one();
-            tokio::time::sleep(Duration::from_secs(20)).await;
+            tokio::time::sleep(Duration::from_secs(25)).await;
         } else {
             // The macOS Wi-Fi probe (system_profiler) is slow; wait for it.
             tokio::time::sleep(Duration::from_secs(17)).await;
@@ -352,24 +352,35 @@ fn print_snapshot(s: &AppState) {
         SpeedStatus::Done => "done".to_string(),
         SpeedStatus::Failed(e) => format!("failed: {e}"),
     };
+    let lat = match (st.idle_latency_ms, st.loaded_latency_ms) {
+        (Some(i), Some(l)) => format!(" latency idle={i:.0}ms loaded={l:.0}ms (+{:.0}ms)", (l - i).max(0.0)),
+        _ => String::new(),
+    };
     println!(
-        "  speedtest[{status}]: down={} up={}",
+        "  speedtest[{status}]: down={} up={}{lat}",
         st.down_mbps.map(|v| format!("{v:.1} Mbps")).unwrap_or_else(|| "—".into()),
         st.up_mbps.map(|v| format!("{v:.1} Mbps")).unwrap_or_else(|| "—".into()),
     );
-    if s.proc_supported {
-        println!("  top processes by bandwidth:");
-        if s.processes.is_empty() {
-            println!("    (no active talkers)");
+    match s.proc_status {
+        app::ProcStatus::Supported => {
+            println!("  top processes by bandwidth:");
+            if s.processes.is_empty() {
+                println!("    (no active talkers)");
+            }
+            for p in &s.processes {
+                println!(
+                    "    {:<20} pid={:<6} ↓{:>10.0} ↑{:>10.0} B/s  total={:<10} retx={:.1}/s",
+                    p.name,
+                    p.pid,
+                    p.down_bps,
+                    p.up_bps,
+                    p.total_bytes,
+                    p.retx_per_sec
+                );
+            }
         }
-        for p in &s.processes {
-            println!(
-                "    {:<20} pid={:<6} ↓{:>10.0} B/s  ↑{:>10.0} B/s",
-                p.name, p.pid, p.down_bps, p.up_bps
-            );
-        }
-    } else {
-        println!("  per-process bandwidth: unsupported on this platform");
+        app::ProcStatus::Probing => println!("  per-process bandwidth: probing…"),
+        app::ProcStatus::Unsupported => println!("  per-process bandwidth: unsupported"),
     }
 
     let n = &s.netinfo;

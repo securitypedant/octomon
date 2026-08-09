@@ -6,7 +6,7 @@ use ratatui::prelude::*;
 use ratatui::style::Modifier;
 use ratatui::widgets::{Block, Cell, Clear, Gauge, Paragraph, Row, Sparkline, Table};
 
-use crate::app::{AppState, InputMode, Panel, SpeedStatus};
+use crate::app::{AppState, InputMode, Panel, ProcStatus, SpeedStatus};
 
 /// Draw the whole dashboard.
 pub fn render(f: &mut Frame, s: &AppState) {
@@ -285,40 +285,51 @@ fn render_speedtest(f: &mut Frame, s: &AppState, area: Rect) {
     }
 }
 
-/// Compact "top processes by bandwidth" list beneath the throughput sparklines.
+/// Compact "top processes by bandwidth" list beneath the throughput sparklines,
+/// with per-process rtt and retransmit-rate for connection health.
 fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
     let outer = Block::new().title(Span::styled(" top talkers ", Style::new().fg(Color::DarkGray)));
     let inner = outer.inner(area);
     f.render_widget(outer, area);
 
-    if !s.proc_supported {
+    let dim = |f: &mut Frame, msg: &str| {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "per-process bandwidth unavailable on this platform",
-                Style::new().fg(Color::DarkGray),
-            )),
+            Paragraph::new(Span::styled(msg.to_string(), Style::new().fg(Color::DarkGray))),
             inner,
         );
-        return;
-    }
-    if s.processes.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled("…", Style::new().fg(Color::DarkGray))),
-            inner,
-        );
-        return;
+    };
+    match s.proc_status {
+        ProcStatus::Unsupported => return dim(f, "per-process bandwidth unavailable on this platform"),
+        ProcStatus::Probing => return dim(f, "detecting per-process bandwidth… (~5s)"),
+        ProcStatus::Supported if s.processes.is_empty() => return dim(f, "sampling processes…"),
+        ProcStatus::Supported => {}
     }
 
+    let header = Row::new(["process", "↓", "↑", "total", "retx"])
+        .style(Style::new().fg(Color::DarkGray));
     let rows = s.processes.iter().take(limit).map(|p| {
         let name: String = p.name.chars().take(18).collect();
+        let (retx, retx_style) = if p.retx_per_sec >= 1.0 {
+            (format!("{:.0}/s", p.retx_per_sec), Style::new().fg(Color::Red))
+        } else {
+            ("·".to_string(), Style::new().fg(Color::DarkGray))
+        };
         Row::new(vec![
             Cell::from(name),
-            Cell::from(Span::styled(format!("↓{}", fmt_rate(p.down_bps)), Style::new().fg(Color::Green))),
-            Cell::from(Span::styled(format!("↑{}", fmt_rate(p.up_bps)), Style::new().fg(Color::Magenta))),
+            Cell::from(Span::styled(fmt_rate(p.down_bps), Style::new().fg(Color::Green))),
+            Cell::from(Span::styled(fmt_rate(p.up_bps), Style::new().fg(Color::Magenta))),
+            Cell::from(Span::styled(fmt_bytes(p.total_bytes), Style::new().fg(Color::Gray))),
+            Cell::from(Span::styled(retx, retx_style)),
         ])
     });
-    let widths = [Constraint::Length(19), Constraint::Length(13), Constraint::Length(13)];
-    f.render_widget(Table::new(rows, widths), inner);
+    let widths = [
+        Constraint::Length(19),
+        Constraint::Length(12),
+        Constraint::Length(12),
+        Constraint::Length(8),
+        Constraint::Length(8),
+    ];
+    f.render_widget(Table::new(rows, widths).header(header), inner);
 }
 
 /// Centered modal listing all keyboard shortcuts.
@@ -380,6 +391,15 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
     };
     let dash = |v: &str| if v.is_empty() { "-".to_string() } else { v.to_string() };
 
+    // Before the first netinfo sample lands.
+    if n.iface.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled("detecting network…", Style::new().fg(Color::DarkGray))),
+            inner,
+        );
+        return;
+    }
+
     let mut lines = vec![
         kv("iface", dash(&n.iface)),
         kv("link", dash(&n.link_kind)),
@@ -393,6 +413,12 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
         lines.push(kv("wifi", format!("{}  ch {}", dash(&w.phy), dash(&w.channel))));
         lines.push(kv("signal", dash(&w.rssi)));
         lines.push(kv("tx rate", dash(&w.tx_rate)));
+    } else if n.link_kind.contains("Wi-Fi") || n.link_kind.contains("Wireless") {
+        // The Wi-Fi probe (system_profiler) is slow; show that more is coming.
+        lines.push(Line::from(Span::styled(
+            "gathering Wi-Fi details…",
+            Style::new().fg(Color::DarkGray),
+        )));
     }
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -467,7 +493,7 @@ fn speedtest_line(s: &AppState) -> Line<'static> {
                 .last_run
                 .map(|t| format!("  ({}s ago)", t.elapsed().as_secs()))
                 .unwrap_or_default();
-            Line::from(vec![
+            let mut spans = vec![
                 label,
                 Span::styled(
                     format!("↓ {}", fmt_mbps(st.down_mbps)),
@@ -478,9 +504,19 @@ fn speedtest_line(s: &AppState) -> Line<'static> {
                     format!("↑ {}", fmt_mbps(st.up_mbps)),
                     Style::new().fg(Color::Magenta).bold(),
                 ),
-                Span::styled(ago, Style::new().fg(Color::DarkGray)),
-                Span::styled("  [s] rerun", Style::new().fg(Color::DarkGray)),
-            ])
+            ];
+            // Loaded-latency bufferbloat, if measured.
+            if let (Some(idle), Some(loaded)) = (st.idle_latency_ms, st.loaded_latency_ms) {
+                let bloat = (loaded - idle).max(0.0);
+                let (grade, color) = bufferbloat_grade(bloat);
+                spans.push(Span::styled(
+                    format!("  bloat +{bloat:.0}ms ({grade})"),
+                    Style::new().fg(color),
+                ));
+            }
+            spans.push(Span::styled(ago, Style::new().fg(Color::DarkGray)));
+            spans.push(Span::styled("  [s] rerun", Style::new().fg(Color::DarkGray)));
+            Line::from(spans)
         }
         SpeedStatus::Failed(_) => Line::from(vec![
             label,
