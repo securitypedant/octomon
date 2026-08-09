@@ -101,7 +101,12 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
 
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
     f.render_widget(Paragraph::new(speedtest_line(s)), rows[0]);
-    let parts = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
+    let parts = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(0),
+    ])
+    .split(rows[1]);
 
     let down = Sparkline::default()
         .data(tp.down_hist.tail_u64(parts[0].width as usize))
@@ -120,6 +125,44 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
             Style::new().fg(Color::Magenta).bold(),
         )));
     f.render_widget(up, parts[1]);
+
+    top_talkers(f, s, parts[2]);
+}
+
+/// Compact "top processes by bandwidth" list beneath the throughput sparklines.
+fn top_talkers(f: &mut Frame, s: &AppState, area: Rect) {
+    let outer = Block::new().title(Span::styled(" top talkers ", Style::new().fg(Color::DarkGray)));
+    let inner = outer.inner(area);
+    f.render_widget(outer, area);
+
+    if !s.proc_supported {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "per-process bandwidth unavailable on this platform",
+                Style::new().fg(Color::DarkGray),
+            )),
+            inner,
+        );
+        return;
+    }
+    if s.processes.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled("…", Style::new().fg(Color::DarkGray))),
+            inner,
+        );
+        return;
+    }
+
+    let rows = s.processes.iter().map(|p| {
+        let name: String = p.name.chars().take(18).collect();
+        Row::new(vec![
+            Cell::from(name),
+            Cell::from(Span::styled(format!("↓{}", fmt_rate(p.down_bps)), Style::new().fg(Color::Green))),
+            Cell::from(Span::styled(format!("↑{}", fmt_rate(p.up_bps)), Style::new().fg(Color::Magenta))),
+        ])
+    });
+    let widths = [Constraint::Length(19), Constraint::Length(13), Constraint::Length(13)];
+    f.render_widget(Table::new(rows, widths), inner);
 }
 
 fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {

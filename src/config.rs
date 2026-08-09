@@ -44,7 +44,6 @@ impl Default for Config {
                 t("Cloudflare", "1.1.1.1"),
                 t("Google", "8.8.8.8"),
                 t("Quad9", "9.9.9.9"),
-                t("OpenDNS", "208.67.222.222"),
             ],
             ping_interval_ms: 1000,
             ping_timeout_ms: 1000,

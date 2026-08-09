@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
     tokio::spawn(collectors::vitals::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::netinfo::run(state.clone()));
     tokio::spawn(collectors::wifi::run(state.clone()));
+    tokio::spawn(collectors::procbw::run(state.clone()));
     if !cli.no_speedtest {
         tokio::spawn(collectors::speedtest::run(
             state.clone(),
@@ -192,6 +193,20 @@ fn print_snapshot(s: &AppState) {
         st.down_mbps.map(|v| format!("{v:.1} Mbps")).unwrap_or_else(|| "—".into()),
         st.up_mbps.map(|v| format!("{v:.1} Mbps")).unwrap_or_else(|| "—".into()),
     );
+    if s.proc_supported {
+        println!("  top processes by bandwidth:");
+        if s.processes.is_empty() {
+            println!("    (no active talkers)");
+        }
+        for p in &s.processes {
+            println!(
+                "    {:<20} pid={:<6} ↓{:>10.0} B/s  ↑{:>10.0} B/s",
+                p.name, p.pid, p.down_bps, p.up_bps
+            );
+        }
+    } else {
+        println!("  per-process bandwidth: unsupported on this platform");
+    }
 
     let n = &s.netinfo;
     println!("\n[Network]");

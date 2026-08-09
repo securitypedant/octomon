@@ -4,6 +4,7 @@
 
 pub mod netinfo;
 pub mod ping;
+pub mod procbw;
 pub mod speedtest;
 pub mod throughput;
 pub mod vitals;

@@ -163,6 +163,15 @@ pub struct SpeedTest {
     pub last_run: Option<Instant>,
 }
 
+/// Per-process network throughput (bytes/sec), derived from successive samples.
+#[derive(Clone)]
+pub struct ProcBandwidth {
+    pub name: String,
+    pub pid: u32,
+    pub down_bps: f64,
+    pub up_bps: f64,
+}
+
 /// Wi-Fi radio details (best-effort, platform-specific).
 #[derive(Clone, Default)]
 pub struct WifiInfo {
@@ -222,6 +231,10 @@ pub struct AppState {
     pub vitals: Vitals,
     pub focus: Panel,
     pub speedtest_enabled: bool,
+    /// Top processes by current network throughput (highest first).
+    pub processes: Vec<ProcBandwidth>,
+    /// Whether per-process attribution is available on this platform.
+    pub proc_supported: bool,
     pub should_quit: bool,
     pub started: Instant,
 }
@@ -236,6 +249,8 @@ impl AppState {
             vitals: Vitals::default(),
             focus: Panel::Quality,
             speedtest_enabled: true,
+            processes: Vec::new(),
+            proc_supported: false,
             should_quit: false,
             started: Instant::now(),
         }
