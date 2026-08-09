@@ -239,6 +239,23 @@ pub struct ProcBandwidth {
     pub retx_per_sec: f64,
 }
 
+/// A single traceroute hop.
+#[derive(Clone)]
+pub struct Hop {
+    pub ttl: u8,
+    /// Responding address, or `None` for a timed-out hop (`*`).
+    pub addr: Option<String>,
+    pub rtt_ms: Option<f64>,
+}
+
+/// State of a traceroute run to a target.
+#[derive(Clone)]
+pub struct Traceroute {
+    pub target: String,
+    pub running: bool,
+    pub hops: Vec<Hop>,
+}
+
 /// Wi-Fi radio details (best-effort, platform-specific).
 #[derive(Clone, Default)]
 pub struct WifiInfo {
@@ -398,6 +415,16 @@ pub struct AppState {
     pub window_secs: u64,
     /// Samples per second (1000 / ping interval); converts window to samples.
     pub samples_per_sec: f64,
+    /// Column cursor over the target table (0=target,1=last,2=avg,3=p95,4=max,5=loss).
+    pub q_col: usize,
+    /// Active target sort: (column, descending). None = insertion order.
+    pub q_sort: Option<(usize, bool)>,
+    /// Traceroute result for the current target, when requested.
+    pub traceroute: Option<Traceroute>,
+    /// Show the traceroute view instead of the latency graph.
+    pub show_traceroute: bool,
+    /// When 'r' was last pressed, for a transient "re-probing" note.
+    pub refresh_at: Option<Instant>,
 
     // --- Modal / global UI state ---
     pub input_mode: InputMode,
@@ -432,6 +459,11 @@ impl AppState {
             graph_target: 0,
             window_secs: 60,
             samples_per_sec: 1.0,
+            q_col: 0,
+            q_sort: None,
+            traceroute: None,
+            show_traceroute: false,
+            refresh_at: None,
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
             notice: None,
@@ -454,5 +486,38 @@ impl AppState {
             w if w < 300 => 300,
             _ => 30,
         };
+    }
+
+    /// Display order of target indices, honouring the active sort. Indices stay
+    /// stable (ping tasks reference them); only the display order changes.
+    pub fn quality_order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.targets.len()).collect();
+        let Some((col, desc)) = self.q_sort else {
+            return order;
+        };
+        let n = self.window_samples();
+        // Sort key: missing latency → +∞ so dead targets rank "worst".
+        let key = |t: &TargetStat| -> f64 {
+            let st = t.stats(n);
+            match col {
+                1 => t.last_rtt_ms.unwrap_or(f64::INFINITY),
+                2 => st.mean.unwrap_or(f64::INFINITY),
+                3 => st.p95.unwrap_or(f64::INFINITY),
+                4 => st.max.unwrap_or(f64::INFINITY),
+                5 => t.loss_pct(),
+                _ => 0.0,
+            }
+        };
+        order.sort_by(|&a, &b| {
+            let ta = &self.targets[a];
+            let tb = &self.targets[b];
+            let o = if col == 0 {
+                ta.label.to_lowercase().cmp(&tb.label.to_lowercase())
+            } else {
+                key(ta).total_cmp(&key(tb))
+            };
+            if desc { o.reverse() } else { o }
+        });
+        order
     }
 }

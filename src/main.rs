@@ -191,6 +191,17 @@ enum Side {
     Speedtest,
     Refresh,
     AddTarget(String),
+    Traceroute(IpAddr, String),
+}
+
+/// Move the target cursor by `delta` through the current display order.
+fn move_selection(s: &mut AppState, delta: isize) {
+    let order = s.quality_order();
+    let Some(pos) = order.iter().position(|&i| i == s.selected) else {
+        return;
+    };
+    let new = (pos as isize + delta).clamp(0, order.len().saturating_sub(1) as isize) as usize;
+    s.selected = order[new];
 }
 
 fn handle_key(ctx: &Ctx, key: KeyEvent) {
@@ -244,7 +255,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 KeyCode::Char('f') => s.fullscreen = !s.fullscreen,
                 KeyCode::Char('p') => s.paused = !s.paused,
                 KeyCode::Char('r') => {
-                    s.notice = Some("re-probing network info…".to_string());
+                    s.refresh_at = Some(std::time::Instant::now());
                     side = Side::Refresh;
                 }
                 KeyCode::Char('w') => s.cycle_window(),
@@ -275,13 +286,35 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.input_buffer.clear();
                 }
                 KeyCode::Up | KeyCode::Char('k') if s.focus == Panel::Quality => {
-                    s.selected = s.selected.saturating_sub(1);
+                    move_selection(&mut s, -1);
                 }
                 KeyCode::Down | KeyCode::Char('j') if s.focus == Panel::Quality => {
-                    let max = s.targets.len().saturating_sub(1);
-                    s.selected = (s.selected + 1).min(max);
+                    move_selection(&mut s, 1);
                 }
-                KeyCode::Enter if s.focus == Panel::Quality => s.graph_target = s.selected,
+                // ←/→ pick the sort column and sort immediately.
+                KeyCode::Left if s.focus == Panel::Quality => {
+                    s.q_col = s.q_col.saturating_sub(1);
+                    s.q_sort = Some((s.q_col, s.q_col != 0));
+                }
+                KeyCode::Right if s.focus == Panel::Quality => {
+                    s.q_col = (s.q_col + 1).min(5);
+                    s.q_sort = Some((s.q_col, s.q_col != 0));
+                }
+                KeyCode::Enter if s.focus == Panel::Quality => {
+                    s.graph_target = s.selected;
+                    s.show_traceroute = false;
+                }
+                // Run a traceroute to the selected target.
+                KeyCode::Char('t') if s.focus == Panel::Quality => {
+                    let running = s.traceroute.as_ref().is_some_and(|t| t.running);
+                    if !running
+                        && let Some(t) = s.targets.get(s.selected)
+                    {
+                        let (addr, label) = (t.addr, t.label.clone());
+                        s.show_traceroute = true;
+                        side = Side::Traceroute(addr, label);
+                    }
+                }
                 _ => {}
             },
         }
@@ -297,6 +330,9 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
             }
             None => ctx.state.lock().unwrap().notice = Some("ICMP unavailable".to_string()),
         },
+        Side::Traceroute(addr, label) => {
+            collectors::traceroute::start(ctx.state.clone(), addr, label);
+        }
     }
 }
 

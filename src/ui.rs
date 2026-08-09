@@ -79,6 +79,7 @@ fn context_line(s: &AppState) -> Line<'static> {
     let mut spans = match s.focus {
         Panel::Quality => vec![
             key("[a]"), txt("dd "), key("[↑↓]"), txt("sel "), key("[↵]"), txt("graph "),
+            key("[t]"), txt("race "), key("[←→]"), txt("sort "),
         ],
         Panel::Bandwidth => vec![key("[s]"), txt("peedtest "), key("[f]"), txt("ull ")],
         Panel::NetInfo => vec![key("[r]"), txt("efresh ")],
@@ -120,22 +121,58 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let inner = b.inner(area);
     f.render_widget(b, area);
 
-    // Summary line, target table, then the latency sparkline for the graphed target.
-    let spark_h = if s.fullscreen { 12 } else { 6 };
-    let parts = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(3),
-        Constraint::Length(spark_h),
-    ])
-    .split(inner);
+    // When showing traceroute, shrink the table so hops get the room.
+    let bottom_h = if s.fullscreen { 12 } else { 6 };
+    let parts = if s.show_traceroute {
+        let table_h = (s.targets.len() as u16 + 2).min(9);
+        Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(table_h),
+            Constraint::Min(0),
+        ])
+        .split(inner)
+    } else {
+        Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(bottom_h),
+        ])
+        .split(inner)
+    };
 
     let n = s.window_samples();
     quality_summary(f, s, n, parts[0]);
 
     let focused = s.focus == Panel::Quality;
-    let header = Row::new(["", "Target", "Address", "last", "avg", "p95", "max", "loss"])
-        .style(Style::new().fg(Color::Gray).bold());
-    let rows = s.targets.iter().enumerate().map(|(i, t)| {
+    // Sortable header: highlight the column cursor, mark the active sort ▲/▼.
+    let hcell = |sort_col: usize, label: &str| {
+        let mut txt = label.to_string();
+        if let Some((c, desc)) = s.q_sort
+            && c == sort_col
+        {
+            txt.push(if desc { '▼' } else { '▲' });
+        }
+        let style = if focused && s.q_col == sort_col {
+            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::new().fg(Color::Gray).bold()
+        };
+        Cell::from(Span::styled(txt, style))
+    };
+    let header = Row::new(vec![
+        Cell::from(""),
+        hcell(0, "Target"),
+        Cell::from(Span::styled("Address", Style::new().fg(Color::Gray).bold())),
+        hcell(1, "last"),
+        hcell(2, "avg"),
+        hcell(3, "p95"),
+        hcell(4, "max"),
+        hcell(5, "loss"),
+    ]);
+
+    let order = s.quality_order();
+    let rows = order.iter().map(|&i| {
+        let t = &s.targets[i];
         let loss = t.loss_pct();
         let st = t.stats(n);
         let color = latency_color(t.last_rtt_ms, loss);
@@ -168,7 +205,51 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     ];
     f.render_widget(Table::new(rows, widths).header(header), parts[1]);
 
-    latency_graph(f, s, n, parts[2]);
+    if s.show_traceroute {
+        traceroute_view(f, s, parts[2]);
+    } else {
+        latency_graph(f, s, n, parts[2]);
+    }
+}
+
+/// Live traceroute hop list for the current target.
+fn traceroute_view(f: &mut Frame, s: &AppState, area: Rect) {
+    let Some(tr) = &s.traceroute else {
+        return;
+    };
+    let status = if tr.running { "running…" } else { "done" };
+    let outer = Block::new().title(Span::styled(
+        format!(" traceroute · {}  ({status})  [Enter] back ", tr.target),
+        Style::new().fg(Color::DarkGray),
+    ));
+    let inner = outer.inner(area);
+    f.render_widget(outer, area);
+
+    let lines: Vec<Line> = tr
+        .hops
+        .iter()
+        .map(|h| {
+            let addr = h.addr.clone().unwrap_or_else(|| "*".to_string());
+            let color = match h.rtt_ms {
+                Some(v) if v >= 150.0 => Color::Red,
+                Some(v) if v >= 60.0 => Color::Yellow,
+                Some(_) => Color::Green,
+                None => Color::DarkGray,
+            };
+            let rtt = h.rtt_ms.map(|v| format!("{v:.1}ms")).unwrap_or_default();
+            Line::from(vec![
+                Span::styled(format!("{:>2}  ", h.ttl), Style::new().fg(Color::DarkGray)),
+                Span::styled(format!("{addr:<18}"), Style::new().fg(color)),
+                Span::styled(rtt, Style::new().fg(color)),
+            ])
+        })
+        .collect();
+    let body = if lines.is_empty() {
+        vec![Line::from(Span::styled("probing…", Style::new().fg(Color::DarkGray)))]
+    } else {
+        lines
+    };
+    f.render_widget(Paragraph::new(body), inner);
 }
 
 /// Latency line chart for the graphed target, with a p95 reference line.
@@ -459,8 +540,8 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
 
 /// Centered modal listing all keyboard shortcuts.
 fn help_overlay(f: &mut Frame, area: Rect) {
-    let w = 54u16.min(area.width);
-    let h = 20u16.min(area.height);
+    let w = 60u16.min(area.width);
+    let h = 22u16.min(area.height);
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -468,9 +549,10 @@ fn help_overlay(f: &mut Frame, area: Rect) {
         height: h,
     };
     let row = |k: &str, d: &str| {
+        // Pad generously so long key combos keep a gap before the description.
         Line::from(vec![
-            Span::styled(format!("  {k:<10}"), Style::new().fg(Color::Cyan)),
-            Span::styled(d.to_string(), Style::new().fg(Color::Gray)),
+            Span::styled(format!("  {k:<15}"), Style::new().fg(Color::Cyan)),
+            Span::styled(format!("  {d}"), Style::new().fg(Color::Gray)),
         ])
     };
     let lines = vec![
@@ -487,7 +569,9 @@ fn help_overlay(f: &mut Frame, area: Rect) {
         Line::from(Span::styled("  Connection Quality", Style::new().fg(Color::White).bold())),
         row("a", "add a target (IP or DNS name)"),
         row("↑/↓ or j/k", "select a target"),
-        row("Enter", "graph the selected target's latency"),
+        row("←/→", "sort targets by column"),
+        row("t", "traceroute the selected target"),
+        row("Enter", "graph selected target (exits traceroute)"),
         Line::from(""),
         Line::from(Span::styled("  Bandwidth", Style::new().fg(Color::White).bold())),
         row("←/→", "move top-talkers column cursor"),
@@ -551,6 +635,24 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
         )));
     }
     f.render_widget(Paragraph::new(lines), inner);
+
+    // Transient "re-probing" note pinned to the bottom of this panel (the only
+    // thing 'r' affects).
+    if s.refresh_at.is_some_and(|t| t.elapsed().as_secs() < 3) {
+        let bottom = Rect {
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "re-probing network info…",
+                Style::new().fg(Color::Yellow),
+            )),
+            bottom,
+        );
+    }
 }
 
 fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
@@ -648,11 +750,20 @@ fn speedtest_line(s: &AppState) -> Line<'static> {
             spans.push(Span::styled("  [s] rerun", Style::new().fg(Color::DarkGray)));
             Line::from(spans)
         }
-        SpeedStatus::Failed(_) => Line::from(vec![
-            label,
-            Span::styled("failed", Style::new().fg(Color::Red).bold()),
-            Span::styled("  [s] retry", Style::new().fg(Color::DarkGray)),
-        ]),
+        SpeedStatus::Failed(e) => {
+            // Surface the reason; flag rate limiting explicitly.
+            let msg = if e.contains("rate-limit") || e.contains("429") {
+                "rate-limited — wait a moment".to_string()
+            } else {
+                e.chars().take(48).collect()
+            };
+            Line::from(vec![
+                label,
+                Span::styled("failed: ", Style::new().fg(Color::Red).bold()),
+                Span::styled(msg, Style::new().fg(Color::Red)),
+                Span::styled("  [s] retry", Style::new().fg(Color::DarkGray)),
+            ])
+        }
     }
 }
 
