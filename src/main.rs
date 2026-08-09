@@ -10,16 +10,27 @@ mod config;
 mod platform;
 mod ui;
 
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use surge_ping::Client;
 use tokio::sync::{mpsc, Notify};
 
-use app::{AppState, Panel, SpeedStatus, TargetStat};
+use app::{AppState, InputMode, Panel, SpeedStatus, TargetStat};
 use config::Config;
+
+/// Handles shared with the input loop for issuing side effects.
+struct Ctx {
+    state: Arc<Mutex<AppState>>,
+    speedtest_trigger: Arc<Notify>,
+    netinfo_refresh: Arc<Notify>,
+    ping_client: Option<Arc<Client>>,
+    cfg: Config,
+}
 
 /// Terminal dashboard for network performance.
 #[derive(Parser, Debug)]
@@ -69,15 +80,27 @@ async fn main() -> Result<()> {
     let state = Arc::new(Mutex::new(AppState::new(targets)));
     state.lock().unwrap().speedtest_enabled = !cli.no_speedtest;
 
-    // Trigger for the on-demand speed test (fired by the 's' key).
-    let speedtest_trigger = Arc::new(Notify::new());
+    // Triggers fired by key presses.
+    let speedtest_trigger = Arc::new(Notify::new()); // 's'
+    let netinfo_refresh = Arc::new(Notify::new()); // 'r'
+
+    // Shared ICMP client so targets can be added at runtime.
+    let ping_client = match Client::new(&surge_ping::Config::default()) {
+        Ok(c) => Some(Arc::new(c)),
+        Err(e) => {
+            tracing::error!("failed to create ICMP client: {e}");
+            None
+        }
+    };
+    if let Some(client) = ping_client.clone() {
+        collectors::ping::spawn_all(state.clone(), client, cfg.clone());
+    }
 
     // Spawn collectors, each on its own cadence.
-    tokio::spawn(collectors::ping::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::throughput::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::vitals::run(state.clone(), cfg.clone()));
-    tokio::spawn(collectors::netinfo::run(state.clone()));
-    tokio::spawn(collectors::wifi::run(state.clone()));
+    tokio::spawn(collectors::netinfo::run(state.clone(), netinfo_refresh.clone()));
+    tokio::spawn(collectors::wifi::run(state.clone(), netinfo_refresh.clone()));
     tokio::spawn(collectors::procbw::run(state.clone()));
     if !cli.no_speedtest {
         tokio::spawn(collectors::speedtest::run(
@@ -118,51 +141,171 @@ async fn main() -> Result<()> {
     // ratatui::init() enables raw mode + alt screen and installs a panic hook
     // that restores the terminal, so a panic never leaves it wedged.
     let mut terminal = ratatui::init();
-    let result = run_ui(&mut terminal, state, rx, speedtest_trigger).await;
+    let ctx = Ctx {
+        state,
+        speedtest_trigger,
+        netinfo_refresh,
+        ping_client,
+        cfg,
+    };
+    let result = run_ui(&mut terminal, &ctx, rx).await;
     ratatui::restore();
     result
 }
 
 async fn run_ui(
     terminal: &mut ratatui::DefaultTerminal,
-    state: Arc<Mutex<AppState>>,
+    ctx: &Ctx,
     mut rx: mpsc::UnboundedReceiver<KeyEvent>,
-    speedtest_trigger: Arc<Notify>,
 ) -> Result<()> {
     let mut ticker = tokio::time::interval(Duration::from_millis(200));
     loop {
-        tokio::select! {
-            _ = ticker.tick() => {}
-            Some(key) = rx.recv() => handle_key(&state, key, &speedtest_trigger),
-        }
+        // Track whether this iteration was driven by a key press; while paused,
+        // only key-driven iterations redraw (the periodic refresh is suppressed).
+        let by_key = tokio::select! {
+            _ = ticker.tick() => false,
+            Some(key) = rx.recv() => {
+                handle_key(ctx, key);
+                true
+            }
+        };
 
-        let s = state.lock().unwrap();
+        let s = ctx.state.lock().unwrap();
         if s.should_quit {
             break;
         }
-        terminal.draw(|f| ui::render(f, &s))?;
+        if by_key || !s.paused {
+            terminal.draw(|f| ui::render(f, &s))?;
+        }
     }
     Ok(())
 }
 
-fn handle_key(state: &Arc<Mutex<AppState>>, key: KeyEvent, speedtest_trigger: &Arc<Notify>) {
+/// Side effects to run after releasing the state lock.
+enum Side {
+    None,
+    Speedtest,
+    Refresh,
+    AddTarget(String),
+}
+
+fn handle_key(ctx: &Ctx, key: KeyEvent) {
     if key.kind == KeyEventKind::Release {
         return;
     }
-    let mut s = state.lock().unwrap();
-    match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => s.should_quit = true,
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => s.should_quit = true,
-        KeyCode::Tab => s.focus = next_panel(s.focus),
-        // Ignore if disabled or a test is already in flight.
-        KeyCode::Char('s')
-            if s.speedtest_enabled && !matches!(s.speedtest.status, SpeedStatus::Running) =>
-        {
-            s.speedtest.status = SpeedStatus::Running;
-            speedtest_trigger.notify_one();
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let mut side = Side::None;
+
+    {
+        let mut s = ctx.state.lock().unwrap();
+        s.notice = None; // any key clears a transient notice
+
+        match s.input_mode {
+            // --- modal text entry: adding a target ---
+            InputMode::AddTarget => match key.code {
+                KeyCode::Enter => {
+                    let buf = s.input_buffer.trim().to_string();
+                    s.input_mode = InputMode::Normal;
+                    s.input_buffer.clear();
+                    if !buf.is_empty() {
+                        side = Side::AddTarget(buf);
+                    }
+                }
+                KeyCode::Esc => {
+                    s.input_mode = InputMode::Normal;
+                    s.input_buffer.clear();
+                }
+                KeyCode::Backspace => {
+                    s.input_buffer.pop();
+                }
+                KeyCode::Char(c) if s.input_buffer.len() < 253 => s.input_buffer.push(c),
+                _ => {}
+            },
+
+            // --- help overlay: swallow most keys ---
+            InputMode::Normal if s.show_help => match key.code {
+                KeyCode::Char('q') => s.should_quit = true,
+                KeyCode::Char('c') if ctrl => s.should_quit = true,
+                KeyCode::Esc | KeyCode::Char('?') => s.show_help = false,
+                _ => {}
+            },
+
+            // --- normal navigation ---
+            InputMode::Normal => match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => s.should_quit = true,
+                KeyCode::Char('c') if ctrl => s.should_quit = true,
+                KeyCode::Char('?') => s.show_help = true,
+                KeyCode::Tab => s.focus = next_panel(s.focus),
+                KeyCode::Char('f') => s.fullscreen = !s.fullscreen,
+                KeyCode::Char('p') => s.paused = !s.paused,
+                KeyCode::Char('r') => side = Side::Refresh,
+                KeyCode::Char('s')
+                    if s.speedtest_enabled
+                        && !matches!(s.speedtest.status, SpeedStatus::Running) =>
+                {
+                    s.speedtest.begin();
+                    side = Side::Speedtest;
+                }
+                // Quality-panel actions.
+                KeyCode::Char('a') if s.focus == Panel::Quality => {
+                    s.input_mode = InputMode::AddTarget;
+                    s.input_buffer.clear();
+                }
+                KeyCode::Up | KeyCode::Char('k') if s.focus == Panel::Quality => {
+                    s.selected = s.selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') if s.focus == Panel::Quality => {
+                    let max = s.targets.len().saturating_sub(1);
+                    s.selected = (s.selected + 1).min(max);
+                }
+                KeyCode::Enter if s.focus == Panel::Quality => s.graph_target = s.selected,
+                _ => {}
+            },
         }
-        _ => {}
     }
+
+    match side {
+        Side::None => {}
+        Side::Speedtest => ctx.speedtest_trigger.notify_one(),
+        Side::Refresh => ctx.netinfo_refresh.notify_one(),
+        Side::AddTarget(input) => match ctx.ping_client.clone() {
+            Some(client) => {
+                tokio::spawn(add_target(ctx.state.clone(), client, ctx.cfg.clone(), input));
+            }
+            None => ctx.state.lock().unwrap().notice = Some("ICMP unavailable".to_string()),
+        },
+    }
+}
+
+/// Resolve a user-entered IP or DNS name, append it as a target, and start
+/// pinging it. Reports failures via the transient `notice`.
+async fn add_target(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config, input: String) {
+    let addr: IpAddr = match input.parse() {
+        Ok(ip) => ip,
+        Err(_) => match tokio::net::lookup_host((input.as_str(), 0)).await {
+            Ok(mut addrs) => match addrs.next() {
+                Some(sa) => sa.ip(),
+                None => {
+                    state.lock().unwrap().notice = Some(format!("no address for {input}"));
+                    return;
+                }
+            },
+            Err(_) => {
+                state.lock().unwrap().notice = Some(format!("could not resolve {input}"));
+                return;
+            }
+        },
+    };
+
+    let idx = {
+        let mut s = state.lock().unwrap();
+        let idx = s.targets.len();
+        s.targets.push(TargetStat::new(input.clone(), addr));
+        s.selected = idx;
+        s.graph_target = idx;
+        idx
+    };
+    collectors::ping::spawn_for(state, client, cfg, idx, addr);
 }
 
 /// Text dump of the current state for `--check` / debugging.
