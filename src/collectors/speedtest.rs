@@ -34,14 +34,6 @@ pub enum Provider {
 }
 
 impl Provider {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Provider::Cloudflare(_) => "Cloudflare",
-            Provider::LibreSpeed(_) => "LibreSpeed",
-            Provider::Mlab(_) => "M-Lab",
-        }
-    }
-
     /// Resolve a provider name against config. LibreSpeed needs a server URL, so
     /// it is skipped when unset.
     pub fn from_name(name: &str, cfg: &crate::config::Config) -> Option<Provider> {
@@ -97,7 +89,7 @@ fn librespeed_spec(base: &str) -> HttpSpec {
     }
 }
 
-pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>, providers: Vec<Provider>) {
+pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>, cfg: crate::config::Config) {
     let client = match reqwest::Client::builder()
         .pool_max_idle_per_host(STREAMS)
         .timeout(Duration::from_secs(30))
@@ -113,25 +105,35 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>, providers: V
     loop {
         trigger.notified().await;
 
-        let mut last_err = "no speed-test providers configured".to_string();
-        let mut report = None;
-        for provider in &providers {
-            set_phase(&state, &format!("{} · connect", provider.name()));
-            match run_provider(&client, &state, provider).await {
-                Ok(r) => {
-                    report = Some(r);
-                    break;
-                }
-                Err(e) => last_err = format!("{}: {e}", provider.name()),
-            }
-        }
+        // Run only the user-selected provider (no fallback).
+        let selected = {
+            let s = state.lock().unwrap();
+            s.speedtest_provider_names
+                .get(s.speedtest_provider_idx)
+                .cloned()
+        };
+        let result = match selected.as_deref().and_then(|n| Provider::from_name(n, &cfg)) {
+            Some(provider) => run_provider(&client, &state, &provider).await,
+            None => Err("no provider selected".to_string()),
+        };
 
         let mut s = state.lock().unwrap();
         s.speedtest.progress = 0.0;
         s.speedtest.live_mbps = 0.0;
         s.speedtest.last_run = Some(Instant::now());
-        match report {
-            Some(r) => {
+        match result {
+            Ok(r) => {
+                let record = crate::store::SpeedRecord {
+                    at: chrono::Utc::now().timestamp(),
+                    provider: r.provider.clone(),
+                    down_mbps: r.down_mbps,
+                    up_mbps: r.up_mbps,
+                    idle_ms: r.idle_ms,
+                    loaded_ms: r.loaded_ms,
+                };
+                crate::store::append(&record);
+                s.speed_history.push(record);
+
                 s.speedtest.status = SpeedStatus::Done;
                 s.speedtest.provider = r.provider;
                 s.speedtest.down_mbps = Some(r.down_mbps);
@@ -140,9 +142,9 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>, providers: V
                 s.speedtest.loaded_latency_ms = r.loaded_ms;
                 s.speedtest.phase = "done".to_string();
             }
-            None => {
-                s.speedtest.status = SpeedStatus::Failed(last_err.clone());
-                s.speedtest.phase = format!("failed: {last_err}");
+            Err(e) => {
+                s.speedtest.status = SpeedStatus::Failed(e.clone());
+                s.speedtest.phase = format!("failed: {e}");
             }
         }
     }

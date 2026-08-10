@@ -80,9 +80,20 @@ fn context_line(s: &AppState) -> Line<'static> {
     let mut spans = match s.focus {
         Panel::Quality => vec![
             key("[a]"), txt("dd "), key("[d]"), txt("el "), key("[↑↓]"), txt("sel "),
-            key("[↵]"), txt("graph "), key("[t]"), txt("race "), key("[←→]"), txt("sort "),
+            key("[g]"), txt("raph "), key("[t]"), txt("race "),
+            key("[←→↵]"), txt("sort "), key("[R]"), txt("eset "),
         ],
-        Panel::Bandwidth => vec![key("[s]"), txt("peedtest "), key("[f]"), txt("ull ")],
+        Panel::Bandwidth => {
+            let p = s
+                .speedtest_provider_names
+                .get(s.speedtest_provider_idx)
+                .map(String::as_str)
+                .unwrap_or("—");
+            vec![
+                key("[s]"), txt("peed "), key("[v]"), txt(p), Span::raw(" "),
+                key("[R]"), txt("eset "), key("[f]"), txt("ull "),
+            ]
+        }
         Panel::NetInfo => vec![key("[r]"), txt("efresh ")],
         Panel::Vitals => vec![],
     };
@@ -226,7 +237,7 @@ fn traceroute_view(f: &mut Frame, s: &AppState, area: Rect) {
     };
     let status = if tr.running { "running…" } else { "done" };
     let outer = Block::new().title(Span::styled(
-        format!(" traceroute · {}  ({status})  [Enter] back ", tr.target),
+        format!(" traceroute · {}  ({status})  [g] graph ", tr.target),
         Style::new().fg(Color::DarkGray),
     ));
     let inner = outer.inner(area);
@@ -407,53 +418,61 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
         )));
     f.render_widget(up, graphs[1]);
 
-    // Full-screen reveals the last speed-test results beside the talkers.
+    // Full-screen: processes and speed-test history each get their own panel.
     if s.fullscreen {
-        let cols = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).split(rows[2]);
-        top_talkers(f, s, cols[0], talkers);
-        speedtest_results(f, s, cols[1]);
+        let cols = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).split(rows[2]);
+
+        let pblock = block("Processes", false);
+        let pinner = pblock.inner(cols[0]);
+        f.render_widget(pblock, cols[0]);
+        top_talkers(f, s, pinner, talkers);
+
+        let sblock = block("Speed Test History", false);
+        let sinner = sblock.inner(cols[1]);
+        f.render_widget(sblock, cols[1]);
+        speedtest_results(f, s, sinner);
     } else {
         top_talkers(f, s, rows[2], talkers);
     }
 }
 
-/// Detailed last-speed-test results (shown beside top talkers in full-screen).
+/// Table of recent speed-test results (full-screen only).
 fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect) {
-    let st = &s.speedtest;
-    let outer = Block::new().title(Span::styled(" last speed test ", Style::new().fg(Color::DarkGray)));
-    let inner = outer.inner(area);
-    f.render_widget(outer, area);
+    if s.speed_history.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "no speed tests yet — [s] to run",
+                Style::new().fg(Color::DarkGray),
+            )),
+            area,
+        );
+        return;
+    }
 
-    let kv = |k: &str, v: String, c: Color| {
-        Line::from(vec![
-            Span::styled(format!("{k:<9}"), Style::new().fg(Color::DarkGray)),
-            Span::styled(v, Style::new().fg(c)),
+    let header = Row::new(["time", "provider", "↓Mbps", "↑Mbps", "bloat"])
+        .style(Style::new().fg(Color::DarkGray));
+    let n = (area.height.saturating_sub(1)) as usize;
+    let rows = s.speed_history.iter().rev().take(n).map(|r| {
+        let bloat = match (r.idle_ms, r.loaded_ms) {
+            (Some(i), Some(l)) => format!("+{:.0}ms", (l - i).max(0.0)),
+            _ => "—".to_string(),
+        };
+        Row::new(vec![
+            Cell::from(r.when()),
+            Cell::from(r.provider.clone()),
+            Cell::from(Span::styled(format!("{:.0}", r.down_mbps), Style::new().fg(Color::Green))),
+            Cell::from(Span::styled(format!("{:.0}", r.up_mbps), Style::new().fg(Color::Magenta))),
+            Cell::from(bloat),
         ])
-    };
-    let mut lines = vec![
-        kv("provider", if st.provider.is_empty() { "—".into() } else { st.provider.clone() }, Color::Cyan),
-        kv("download", fmt_mbps(st.down_mbps), Color::Green),
-        kv("upload", fmt_mbps(st.up_mbps), Color::Magenta),
+    });
+    let widths = [
+        Constraint::Length(12),
+        Constraint::Length(11),
+        Constraint::Length(7),
+        Constraint::Length(7),
+        Constraint::Length(8),
     ];
-    if let Some(idle) = st.idle_latency_ms {
-        lines.push(kv("idle rtt", format!("{idle:.0} ms"), Color::Gray));
-    }
-    if let (Some(idle), Some(loaded)) = (st.idle_latency_ms, st.loaded_latency_ms) {
-        let bloat = (loaded - idle).max(0.0);
-        let (grade, color) = bufferbloat_grade(bloat);
-        lines.push(kv("loaded rtt", format!("{loaded:.0} ms"), Color::Gray));
-        lines.push(kv("bufferbloat", format!("+{bloat:.0} ms ({grade})"), color));
-    }
-    if let Some(t) = st.last_run {
-        lines.push(kv("ran", format!("{}s ago", t.elapsed().as_secs()), Color::DarkGray));
-    }
-    if matches!(st.status, SpeedStatus::Failed(_)) {
-        lines.push(Line::from(Span::styled(
-            "last run failed — [s] retry",
-            Style::new().fg(Color::Red),
-        )));
-    }
-    f.render_widget(Paragraph::new(lines), inner);
+    f.render_widget(Table::new(rows, widths).header(header), area);
 }
 
 /// Sparkline data that guarantees any non-zero sample renders at least one
@@ -549,7 +568,7 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
     }
 
     let rows = procs.into_iter().take(limit).map(|p| {
-        let name: String = p.name.chars().take(18).collect();
+        let name: String = p.name.chars().take(36).collect();
         let (retx, retx_style) = if p.retx_per_sec >= 1.0 {
             (format!("{:.0}/s", p.retx_per_sec), Style::new().fg(Color::Red))
         } else {
@@ -564,7 +583,7 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
         ])
     });
     let widths = [
-        Constraint::Length(19),
+        Constraint::Length(38),
         Constraint::Length(12),
         Constraint::Length(12),
         Constraint::Length(8),
@@ -604,15 +623,19 @@ fn help_overlay(f: &mut Frame, area: Rect) {
         Line::from(Span::styled("  Connection Quality", Style::new().fg(Color::White).bold())),
         row("a", "add a target (IP or DNS name)"),
         row("d / Del", "delete the selected target"),
-        row("↑/↓ or j/k", "select a target"),
-        row("←/→", "sort targets by column"),
-        row("Space", "toggle sort direction"),
+        row("g", "graph selected target (exits traceroute)"),
         row("t", "traceroute the selected target"),
-        row("Enter", "graph selected target (exits traceroute)"),
+        row("↑/↓ or j/k", "select a target"),
+        row("←/→", "move sort-column cursor"),
+        row("Enter", "sort by the cursor column"),
+        row("Space", "toggle sort direction"),
+        row("Shift+R", "reset this panel's data"),
         Line::from(""),
         Line::from(Span::styled("  Bandwidth", Style::new().fg(Color::White).bold())),
+        row("v", "cycle speed-test provider (saved)"),
         row("←/→", "move top-talkers column cursor"),
         row("Enter / Space", "sort by column / toggle direction"),
+        row("Shift+R", "reset this panel's data"),
         Line::from(""),
         Line::from(Span::styled("  press ? or Esc to close", Style::new().fg(Color::DarkGray))),
     ];

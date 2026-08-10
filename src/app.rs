@@ -133,6 +133,17 @@ impl TargetStat {
         self.window.push_back(ok);
     }
 
+    /// Clear all accumulated stats (keeps identity, label, address).
+    pub fn reset(&mut self) {
+        self.last_rtt_ms = None;
+        self.jitter_ms = 0.0;
+        self.min_ever_ms = None;
+        self.sent = 0;
+        self.recv = 0;
+        self.window.clear();
+        self.history.data.clear();
+    }
+
     /// Packet loss over the sliding window, as a percentage.
     pub fn loss_pct(&self) -> f64 {
         if self.window.is_empty() {
@@ -409,6 +420,12 @@ pub struct AppState {
     /// When set, the focused panel is drawn full-screen instead of the 2x2 grid.
     pub fullscreen: bool,
     pub speedtest_enabled: bool,
+    /// Available speed-test provider display names (e.g. "Cloudflare", "M-Lab").
+    pub speedtest_provider_names: Vec<String>,
+    /// Index of the selected provider into `speedtest_provider_names`.
+    pub speedtest_provider_idx: usize,
+    /// Recent speed-test results (oldest → newest), persisted to disk.
+    pub speed_history: Vec<crate::store::SpeedRecord>,
     /// Top processes by current network throughput (highest first).
     pub processes: Vec<ProcBandwidth>,
     /// Availability of per-process attribution on this platform.
@@ -463,6 +480,9 @@ impl AppState {
             focus: Panel::Quality,
             fullscreen: false,
             speedtest_enabled: true,
+            speedtest_provider_names: Vec::new(),
+            speedtest_provider_idx: 0,
+            speed_history: Vec::new(),
             processes: Vec::new(),
             proc_status: ProcStatus::Probing,
             bw_col: 1,

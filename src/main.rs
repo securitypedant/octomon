@@ -8,6 +8,7 @@ mod app;
 mod collectors;
 mod config;
 mod platform;
+mod store;
 mod ui;
 
 use std::net::IpAddr;
@@ -79,9 +80,23 @@ async fn main() -> Result<()> {
         .collect();
     let state = Arc::new(Mutex::new(AppState::new(targets)));
     {
+        // Available speed-test providers (LibreSpeed only if a server is set).
+        let mut provider_names = vec!["Cloudflare".to_string(), "M-Lab".to_string()];
+        if cfg.librespeed_server.is_some() {
+            provider_names.push("LibreSpeed".to_string());
+        }
+        let norm = |s: &str| s.to_lowercase().replace('-', "");
+        let sel = provider_names
+            .iter()
+            .position(|n| norm(n) == norm(&cfg.speedtest_provider))
+            .unwrap_or(0);
+
         let mut s = state.lock().unwrap();
         s.speedtest_enabled = !cli.no_speedtest;
         s.samples_per_sec = 1000.0 / cfg.ping_interval_ms.max(1) as f64;
+        s.speedtest_provider_names = provider_names;
+        s.speedtest_provider_idx = sel;
+        s.speed_history = store::load_recent(50);
     }
 
     // Triggers fired by key presses.
@@ -111,16 +126,10 @@ async fn main() -> Result<()> {
     tokio::spawn(collectors::wifi::run(state.clone(), netinfo_refresh.clone()));
     tokio::spawn(collectors::procbw::run(state.clone()));
     if !cli.no_speedtest {
-        // Resolve the configured provider order (skipping any that need setup).
-        let providers: Vec<_> = cfg
-            .speedtest_providers
-            .iter()
-            .filter_map(|n| collectors::speedtest::Provider::from_name(n, &cfg))
-            .collect();
         tokio::spawn(collectors::speedtest::run(
             state.clone(),
             speedtest_trigger.clone(),
-            providers,
+            cfg.clone(),
         ));
     }
 
@@ -203,6 +212,7 @@ enum Side {
     Refresh,
     AddTarget(String),
     Traceroute(IpAddr, String),
+    SaveProvider(String),
 }
 
 /// Move the target cursor by `delta` through the current display order.
@@ -270,6 +280,30 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     side = Side::Refresh;
                 }
                 KeyCode::Char('w') => s.cycle_window(),
+                // Shift+R resets the focused panel's accumulated data.
+                KeyCode::Char('R') => match s.focus {
+                    Panel::Quality => {
+                        for t in &mut s.targets {
+                            t.reset();
+                        }
+                    }
+                    Panel::Bandwidth => {
+                        s.throughput.down_hist.data.clear();
+                        s.throughput.up_hist.data.clear();
+                        s.processes.clear();
+                    }
+                    _ => {}
+                },
+                // 'v' cycles the speed-test provider (Bandwidth panel) + persists.
+                KeyCode::Char('v') if s.focus == Panel::Bandwidth => {
+                    let n = s.speedtest_provider_names.len();
+                    if n > 0 {
+                        s.speedtest_provider_idx = (s.speedtest_provider_idx + 1) % n;
+                        side = Side::SaveProvider(
+                            s.speedtest_provider_names[s.speedtest_provider_idx].clone(),
+                        );
+                    }
+                }
                 // Space toggles the active sort direction in the focused panel.
                 KeyCode::Char(' ') => match s.focus {
                     Panel::Quality => {
@@ -329,16 +363,22 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 KeyCode::Down | KeyCode::Char('j') if s.focus == Panel::Quality => {
                     move_selection(&mut s, 1);
                 }
-                // ←/→ pick the sort column and sort immediately.
+                // ←/→ move the column cursor; Enter sorts by it (Space toggles).
                 KeyCode::Left if s.focus == Panel::Quality => {
                     s.q_col = s.q_col.saturating_sub(1);
-                    s.q_sort = Some((s.q_col, s.q_col != 0));
                 }
                 KeyCode::Right if s.focus == Panel::Quality => {
                     s.q_col = (s.q_col + 1).min(5);
-                    s.q_sort = Some((s.q_col, s.q_col != 0));
                 }
                 KeyCode::Enter if s.focus == Panel::Quality => {
+                    let col = s.q_col;
+                    s.q_sort = match s.q_sort {
+                        Some((c, d)) if c == col => Some((c, d)), // keep direction
+                        _ => Some((col, col != 0)),
+                    };
+                }
+                // 'g' graphs the selected target (and exits the traceroute view).
+                KeyCode::Char('g') if s.focus == Panel::Quality => {
                     s.graph_target = s.selected;
                     s.show_traceroute = false;
                 }
@@ -370,6 +410,9 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
         },
         Side::Traceroute(addr, label) => {
             collectors::traceroute::start(ctx.state.clone(), addr, label);
+        }
+        Side::SaveProvider(name) => {
+            tokio::task::spawn_blocking(move || config::Config::persist_provider(&name));
         }
     }
 }
