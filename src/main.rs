@@ -111,9 +111,16 @@ async fn main() -> Result<()> {
     tokio::spawn(collectors::wifi::run(state.clone(), netinfo_refresh.clone()));
     tokio::spawn(collectors::procbw::run(state.clone()));
     if !cli.no_speedtest {
+        // Resolve the configured provider order (skipping any that need setup).
+        let providers: Vec<_> = cfg
+            .speedtest_providers
+            .iter()
+            .filter_map(|n| collectors::speedtest::Provider::from_name(n, &cfg))
+            .collect();
         tokio::spawn(collectors::speedtest::run(
             state.clone(),
             speedtest_trigger.clone(),
+            providers,
         ));
     }
 
@@ -123,7 +130,7 @@ async fn main() -> Result<()> {
         tokio::time::sleep(Duration::from_secs(3)).await;
         if !cli.no_speedtest {
             speedtest_trigger.notify_one();
-            tokio::time::sleep(Duration::from_secs(25)).await;
+            tokio::time::sleep(Duration::from_secs(40)).await;
         } else {
             // The macOS Wi-Fi probe (system_profiler) is slow; wait for it.
             tokio::time::sleep(Duration::from_secs(17)).await;
@@ -444,7 +451,8 @@ fn print_snapshot(s: &AppState) {
         _ => String::new(),
     };
     println!(
-        "  speedtest[{status}]: down={} up={}{lat}",
+        "  speedtest[{status}] via {}: down={} up={}{lat}",
+        if st.provider.is_empty() { "—" } else { &st.provider },
         st.down_mbps.map(|v| format!("{v:.1} Mbps")).unwrap_or_else(|| "—".into()),
         st.up_mbps.map(|v| format!("{v:.1} Mbps")).unwrap_or_else(|| "—".into()),
     );
