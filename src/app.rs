@@ -370,6 +370,27 @@ mod tests {
     }
 
     #[test]
+    fn name_sort_groups_discovered_first() {
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let mut s = AppState::new(vec![
+            TargetStat::new("Zebra".into(), ip),
+            TargetStat::new("Alpha".into(), ip),
+        ]);
+        let mut gw = TargetStat::new("gateway".into(), ip);
+        gw.discovered = true;
+        let mut h2 = TargetStat::new("hop 2".into(), ip);
+        h2.discovered = true;
+        s.targets.push(gw);
+        s.targets.push(h2);
+
+        s.q_sort = Some((0, false)); // sort by name
+        let order = s.quality_order();
+        let labels: Vec<&str> = order.iter().map(|&i| s.targets[i].label.as_str()).collect();
+        // Discovered grouped first (gateway before hop, by id), then alphabetical.
+        assert_eq!(labels, vec!["gateway", "hop 2", "Alpha", "Zebra"]);
+    }
+
+    #[test]
     fn window_cycles_30_60_300() {
         let mut s = AppState::new(vec![]);
         assert_eq!(s.window_secs, 60);
@@ -543,11 +564,21 @@ impl AppState {
         order.sort_by(|&a, &b| {
             let ta = &self.targets[a];
             let tb = &self.targets[b];
-            let o = if col == 0 {
-                ta.label.to_lowercase().cmp(&tb.label.to_lowercase())
-            } else {
-                key(ta).total_cmp(&key(tb))
-            };
+            if col == 0 {
+                // Name sort keeps auto-discovered targets grouped together
+                // (gateway first, then hops in discovery order), unaffected by
+                // the sort direction; only the rest sorts alphabetically.
+                return match (ta.discovered, tb.discovered) {
+                    (true, true) => ta.id.cmp(&tb.id),
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    (false, false) => {
+                        let o = ta.label.to_lowercase().cmp(&tb.label.to_lowercase());
+                        if desc { o.reverse() } else { o }
+                    }
+                };
+            }
+            let o = key(ta).total_cmp(&key(tb));
             if desc { o.reverse() } else { o }
         });
         order

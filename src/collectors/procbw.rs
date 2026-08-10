@@ -13,6 +13,30 @@ use crate::platform;
 // Keep enough for the full-screen view (10); the split view shows fewer.
 const TOP_N: usize = 10;
 
+/// Map pid → full process name via `ps` (nettop truncates names to ~15 chars).
+/// `comm` on macOS is the full executable path, so its basename is the name.
+async fn full_names() -> HashMap<u32, String> {
+    let mut map = HashMap::new();
+    let Ok(out) = tokio::process::Command::new("ps")
+        .args(["-axo", "pid=,comm="])
+        .output()
+        .await
+    else {
+        return map;
+    };
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let line = line.trim_start();
+        if let Some((pid_s, comm)) = line.split_once(char::is_whitespace)
+            && let Ok(pid) = pid_s.parse::<u32>()
+        {
+            let comm = comm.trim();
+            let name = comm.rsplit('/').next().unwrap_or(comm).to_string();
+            map.insert(pid, name);
+        }
+    }
+    map
+}
+
 pub async fn run(state: Arc<Mutex<AppState>>) {
     // Probe support once; mark unsupported (not just "empty") if unavailable.
     if platform::proc_net_sample().await.is_none() {
@@ -31,6 +55,8 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
         let Some(sample) = platform::proc_net_sample().await else {
             continue;
         };
+        // nettop truncates process names to ~15 chars; enrich with full names.
+        let full_names = full_names().await;
         let now = Instant::now();
         let secs = now.duration_since(prev_at).as_secs_f64().max(0.001);
 
@@ -40,8 +66,12 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
                 let down = s.bytes_in.saturating_sub(*pin) as f64 / secs;
                 let up = s.bytes_out.saturating_sub(*pout) as f64 / secs;
                 if down + up > 0.0 {
+                    let name = full_names
+                        .get(&s.pid)
+                        .cloned()
+                        .unwrap_or_else(|| s.name.clone());
                     list.push(ProcBandwidth {
-                        name: s.name.clone(),
+                        name,
                         pid: s.pid,
                         down_bps: down,
                         up_bps: up,

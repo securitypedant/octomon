@@ -112,8 +112,12 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>, cfg: crate::
                 .get(s.speedtest_provider_idx)
                 .cloned()
         };
-        let result = match selected.as_deref().and_then(|n| Provider::from_name(n, &cfg)) {
-            Some(provider) => run_provider(&client, &state, &provider).await,
+        let result = match selected.as_deref() {
+            Some(name) => match Provider::from_name(name, &cfg) {
+                Some(provider) => run_provider(&client, &state, &provider).await,
+                // Only a known-but-unconfigured provider (LibreSpeed) lands here.
+                None => Err(format!("{name} needs 'librespeed_server' set in config.toml")),
+            },
             None => Err("no provider selected".to_string()),
         };
 
