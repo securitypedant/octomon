@@ -97,7 +97,11 @@ async fn main() -> Result<()> {
         }
     };
     if let Some(client) = ping_client.clone() {
-        collectors::ping::spawn_all(state.clone(), client, cfg.clone());
+        collectors::ping::spawn_all(state.clone(), client.clone(), cfg.clone());
+        // Auto-discover the gateway + next hops as targets (skipped in --check).
+        if !cli.check {
+            tokio::spawn(collectors::discovery::run(state.clone(), client, cfg.clone()));
+        }
     }
 
     // Spawn collectors, each on its own cadence.
@@ -259,6 +263,33 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     side = Side::Refresh;
                 }
                 KeyCode::Char('w') => s.cycle_window(),
+                // Space toggles the active sort direction in the focused panel.
+                KeyCode::Char(' ') => match s.focus {
+                    Panel::Quality => {
+                        if let Some((c, d)) = s.q_sort {
+                            s.q_sort = Some((c, !d));
+                        }
+                    }
+                    Panel::Bandwidth => {
+                        if let Some((c, d)) = s.bw_sort {
+                            s.bw_sort = Some((c, !d));
+                        }
+                    }
+                    _ => {}
+                },
+                // Delete the selected target.
+                KeyCode::Char('d') | KeyCode::Delete if s.focus == Panel::Quality => {
+                    if s.selected < s.targets.len() {
+                        let idx = s.selected;
+                        s.targets.remove(idx);
+                        let last = s.targets.len().saturating_sub(1);
+                        s.selected = s.selected.min(last);
+                        if s.graph_target >= idx {
+                            s.graph_target = s.graph_target.saturating_sub(1);
+                        }
+                        s.graph_target = s.graph_target.min(last);
+                    }
+                }
                 // Bandwidth: move the top-talkers column cursor and sort.
                 KeyCode::Left if s.focus == Panel::Bandwidth => {
                     s.bw_col = s.bw_col.saturating_sub(1);
@@ -356,15 +387,17 @@ async fn add_target(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Confi
         },
     };
 
-    let idx = {
+    let id = {
         let mut s = state.lock().unwrap();
         let idx = s.targets.len();
-        s.targets.push(TargetStat::new(input.clone(), addr));
+        let target = TargetStat::new(input.clone(), addr);
+        let id = target.id;
+        s.targets.push(target);
         s.selected = idx;
         s.graph_target = idx;
-        idx
+        id
     };
-    collectors::ping::spawn_for(state, client, cfg, idx, addr);
+    collectors::ping::spawn_for(state, client, cfg, id, addr);
 }
 
 /// Text dump of the current state for `--check` / debugging.

@@ -61,8 +61,16 @@ pub struct RttStats {
     pub stddev: f64,
 }
 
+/// Monotonic id source so targets have a stable identity independent of their
+/// position (ping tasks look up by id, making insertion/deletion safe).
+static NEXT_TARGET_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Clone)]
 pub struct TargetStat {
+    /// Stable identity, independent of index in the targets vec.
+    pub id: u64,
+    /// True when auto-added by hop discovery at startup.
+    pub discovered: bool,
     pub label: String,
     pub addr: IpAddr,
     pub last_rtt_ms: Option<f64>,
@@ -80,6 +88,8 @@ pub struct TargetStat {
 impl TargetStat {
     pub fn new(label: String, addr: IpAddr) -> Self {
         Self {
+            id: NEXT_TARGET_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            discovered: false,
             label,
             addr,
             last_rtt_ms: None,

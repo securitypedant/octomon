@@ -6,7 +6,8 @@ use ratatui::prelude::*;
 use ratatui::style::Modifier;
 use ratatui::symbols::Marker;
 use ratatui::widgets::{
-    Axis, Block, Cell, Chart, Clear, Dataset, Gauge, GraphType, Paragraph, Row, Sparkline, Table,
+    Axis, Block, Cell, Chart, Clear, Dataset, Gauge, GraphType, LineGauge, Paragraph, Row,
+    Sparkline, Table,
 };
 
 use crate::app::{AppState, InputMode, Panel, ProcStatus, SpeedStatus};
@@ -78,8 +79,8 @@ fn context_line(s: &AppState) -> Line<'static> {
     let txt = |t: &str| Span::styled(t.to_string(), Style::new().fg(Color::Gray));
     let mut spans = match s.focus {
         Panel::Quality => vec![
-            key("[a]"), txt("dd "), key("[↑↓]"), txt("sel "), key("[↵]"), txt("graph "),
-            key("[t]"), txt("race "), key("[←→]"), txt("sort "),
+            key("[a]"), txt("dd "), key("[d]"), txt("el "), key("[↑↓]"), txt("sel "),
+            key("[↵]"), txt("graph "), key("[t]"), txt("race "), key("[←→]"), txt("sort "),
         ],
         Panel::Bandwidth => vec![key("[s]"), txt("peedtest "), key("[f]"), txt("ull ")],
         Panel::NetInfo => vec![key("[r]"), txt("efresh ")],
@@ -181,9 +182,15 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         if focused && i == s.selected {
             style = style.bg(Color::Rgb(40, 40, 55)).add_modifier(Modifier::BOLD);
         }
+        // '⇢' marks auto-discovered (gateway / hop) targets.
+        let label = if t.discovered {
+            format!("⇢ {}", t.label)
+        } else {
+            t.label.clone()
+        };
         Row::new(vec![
             Cell::from(Span::styled(marker, Style::new().fg(Color::Cyan))),
-            Cell::from(t.label.clone()),
+            Cell::from(label),
             Cell::from(t.addr.to_string()),
             Cell::from(fmt_ms(t.last_rtt_ms)),
             Cell::from(fmt_ms(st.mean)),
@@ -225,29 +232,36 @@ fn traceroute_view(f: &mut Frame, s: &AppState, area: Rect) {
     let inner = outer.inner(area);
     f.render_widget(outer, area);
 
-    let lines: Vec<Line> = tr
-        .hops
-        .iter()
-        .map(|h| {
-            let addr = h.addr.clone().unwrap_or_else(|| "*".to_string());
-            let color = match h.rtt_ms {
-                Some(v) if v >= 150.0 => Color::Red,
-                Some(v) if v >= 60.0 => Color::Yellow,
-                Some(_) => Color::Green,
-                None => Color::DarkGray,
-            };
-            let rtt = h.rtt_ms.map(|v| format!("{v:.1}ms")).unwrap_or_default();
-            Line::from(vec![
-                Span::styled(format!("{:>2}  ", h.ttl), Style::new().fg(Color::DarkGray)),
-                Span::styled(format!("{addr:<18}"), Style::new().fg(color)),
-                Span::styled(rtt, Style::new().fg(color)),
-            ])
-        })
-        .collect();
-    let body = if lines.is_empty() {
+    let hop_line = |h: &crate::app::Hop| {
+        let addr = h.addr.clone().unwrap_or_else(|| "*".to_string());
+        let color = match h.rtt_ms {
+            Some(v) if v >= 150.0 => Color::Red,
+            Some(v) if v >= 60.0 => Color::Yellow,
+            Some(_) => Color::Green,
+            None => Color::DarkGray,
+        };
+        let rtt = h.rtt_ms.map(|v| format!("{v:.1}ms")).unwrap_or_default();
+        Line::from(vec![
+            Span::styled(format!("{:>2}  ", h.ttl), Style::new().fg(Color::DarkGray)),
+            Span::styled(format!("{addr:<18}"), Style::new().fg(color)),
+            Span::styled(rtt, Style::new().fg(color)),
+        ])
+    };
+
+    let rows = inner.height as usize;
+    let body: Vec<Line> = if tr.hops.is_empty() {
         vec![Line::from(Span::styled("probing…", Style::new().fg(Color::DarkGray)))]
+    } else if tr.hops.len() > rows {
+        // Not enough room: show what fits, then point to full-screen.
+        let mut v: Vec<Line> = tr.hops.iter().take(rows.saturating_sub(1)).map(hop_line).collect();
+        let remaining = tr.hops.len() - rows.saturating_sub(1);
+        v.push(Line::from(Span::styled(
+            format!("… +{remaining} more — press [f] for full screen"),
+            Style::new().fg(Color::Yellow),
+        )));
+        v
     } else {
-        lines
+        tr.hops.iter().map(hop_line).collect()
     };
     f.render_widget(Paragraph::new(body), inner);
 }
@@ -463,10 +477,9 @@ fn render_speedtest(f: &mut Frame, s: &AppState, area: Rect) {
 /// Compact "top processes by bandwidth" list beneath the throughput sparklines,
 /// with per-process rtt and retransmit-rate for connection health.
 fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
-    let outer = Block::new().title(Span::styled(" top talkers ", Style::new().fg(Color::DarkGray)));
-    let inner = outer.inner(area);
-    f.render_widget(outer, area);
-
+    // No section title (the column header makes the list self-explanatory),
+    // reclaiming a row for data.
+    let inner = area;
     let dim = |f: &mut Frame, msg: &str| {
         f.render_widget(
             Paragraph::new(Span::styled(msg.to_string(), Style::new().fg(Color::DarkGray))),
@@ -568,14 +581,16 @@ fn help_overlay(f: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled("  Connection Quality", Style::new().fg(Color::White).bold())),
         row("a", "add a target (IP or DNS name)"),
+        row("d / Del", "delete the selected target"),
         row("↑/↓ or j/k", "select a target"),
         row("←/→", "sort targets by column"),
+        row("Space", "toggle sort direction"),
         row("t", "traceroute the selected target"),
         row("Enter", "graph selected target (exits traceroute)"),
         Line::from(""),
         Line::from(Span::styled("  Bandwidth", Style::new().fg(Color::White).bold())),
         row("←/→", "move top-talkers column cursor"),
-        row("Enter", "sort by column (toggles direction)"),
+        row("Enter / Space", "sort by column / toggle direction"),
         Line::from(""),
         Line::from(Span::styled("  press ? or Esc to close", Style::new().fg(Color::DarkGray))),
     ];
@@ -669,12 +684,15 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
     ])
     .split(inner);
 
+    // LineGauge keeps the label to the left of the bar, so it stays legible
+    // (a Gauge draws the label over the fill, which is unreadable on yellow).
     let cpu = v.cpu_pct.clamp(0.0, 100.0);
     f.render_widget(
-        Gauge::default()
+        LineGauge::default()
             .ratio((cpu / 100.0) as f64)
-            .label(format!("CPU {cpu:.0}%"))
-            .gauge_style(Style::new().fg(usage_color(cpu))),
+            .label(format!("CPU {cpu:>3.0}%"))
+            .filled_style(Style::new().fg(usage_color(cpu)))
+            .unfilled_style(Style::new().fg(Color::DarkGray)),
         parts[0],
     );
 
@@ -684,10 +702,11 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
         0.0
     };
     f.render_widget(
-        Gauge::default()
+        LineGauge::default()
             .ratio((mem_pct / 100.0).clamp(0.0, 1.0) as f64)
             .label(format!("MEM {}/{}", fmt_bytes(v.mem_used), fmt_bytes(v.mem_total)))
-            .gauge_style(Style::new().fg(usage_color(mem_pct))),
+            .filled_style(Style::new().fg(usage_color(mem_pct)))
+            .unfilled_style(Style::new().fg(Color::DarkGray)),
         parts[1],
     );
 
