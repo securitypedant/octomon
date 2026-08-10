@@ -889,14 +889,21 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
         kv("mac", dash(&n.mac)),
     ];
 
-    // A tunnelled default route hides the real path: the encapsulated hops never
-    // answer ICMP, so an unreachable gateway and an empty traceroute are expected
-    // rather than a fault. Say so instead of leaving a bare red address.
+    // A tunnel hides the real path: the encapsulated hops never answer ICMP, so
+    // an empty traceroute is expected rather than a fault. Say so instead of
+    // leaving a bare red gateway unexplained.
     if let Some(vendor) = n.tunnel_label() {
-        lines.push(Line::from(vec![
+        let mut row = vec![
             Span::styled(format!("{:<9}", "tunnel"), Style::new().fg(Color::DarkGray)),
             Span::styled(vendor, Style::new().fg(Color::Yellow).bold()),
-        ]));
+        ];
+        if !n.tunnel_iface.is_empty() {
+            row.push(Span::styled(
+                format!("  ({})", n.tunnel_iface),
+                Style::new().fg(Color::Gray),
+            ));
+        }
+        lines.push(Line::from(row));
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{:<9}", "gateway"),
@@ -908,8 +915,15 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
                 dash(&n.gateway_mac)
             )),
         ]));
+        // A split tunnel leaves the default route on the physical NIC, so the
+        // gateway above is the real, reachable LAN gateway — internet traffic
+        // simply never uses it. Don't mislabel it as the tunnel endpoint.
         lines.push(Line::from(Span::styled(
-            "         tunnel endpoint — hops beyond it are encapsulated",
+            if n.tunnel_is_split {
+                "         LAN gateway — internet traffic bypasses it via the tunnel"
+            } else {
+                "         tunnel endpoint — hops beyond it are encapsulated"
+            },
             Style::new().fg(Color::DarkGray),
         )));
     } else {
@@ -1418,11 +1432,31 @@ mod tests {
     fn tunnel_is_called_out() {
         let mut s = state_with_medium(LinkMedium::Tunnel);
         s.netinfo.tunnel = Some("Cloudflare WARP".to_string());
+        s.netinfo.tunnel_iface = "utun0".to_string();
         s.netinfo.gateway_ip = "172.16.0.1".to_string();
         let out = draw(&s, 200, 60);
         assert!(out.contains("Cloudflare WARP"));
         assert!(out.contains("Tunnel (VPN)"));
         assert!(out.contains("encapsulated"));
+    }
+
+    /// WARP's usual shape: `default` still points at Wi-Fi, but 0.0.0.0/1 sends
+    /// internet traffic down utun0. The LAN gateway is real and reachable, so it
+    /// must not be described as the tunnel endpoint.
+    #[test]
+    fn split_tunnel_keeps_the_lan_gateway_honest() {
+        let mut s = state_with_medium(LinkMedium::WiFi);
+        s.netinfo.tunnel = Some("Cloudflare WARP".to_string());
+        s.netinfo.tunnel_iface = "utun0".to_string();
+        s.netinfo.tunnel_is_split = true;
+        s.netinfo.gateway_ip = "192.168.1.1".to_string();
+        let out = draw(&s, 200, 60);
+        assert!(out.contains("Cloudflare WARP"));
+        assert!(out.contains("(utun0)"));
+        assert!(out.contains("bypasses it via the tunnel"));
+        assert!(!out.contains("tunnel endpoint"));
+        // The physical medium is still Wi-Fi, so the signal graph stays useful.
+        assert!(out.contains("Wi-Fi (wireless)"));
     }
 
     #[test]

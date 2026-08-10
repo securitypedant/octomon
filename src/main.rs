@@ -566,7 +566,15 @@ fn print_snapshot(s: &AppState) {
         n.mac, n.gateway_ip, n.gateway_mac
     );
     if let Some(t) = n.tunnel_label() {
-        println!("  tunnel={t} — hops beyond the endpoint are encapsulated");
+        println!(
+            "  tunnel={t} ({}){}",
+            n.tunnel_iface,
+            if n.tunnel_is_split {
+                " — split route: internet traffic bypasses the LAN gateway"
+            } else {
+                " — hops beyond the endpoint are encapsulated"
+            }
+        );
     }
     println!("  dns={:?}", n.dns);
     if let Some(w) = &n.wifi {

@@ -354,9 +354,15 @@ pub struct NetInfo {
     pub medium: LinkMedium,
     /// Negotiated link speed in bits/sec, when the OS reports it.
     pub link_speed_bps: Option<u64>,
-    /// Set when the default route is a tunnel device. Carries the VPN's name
-    /// when it can be identified (e.g. "Cloudflare WARP"), else empty.
+    /// Set when internet traffic leaves through a tunnel device. Carries the
+    /// VPN's name when it can be identified (e.g. "Cloudflare WARP"), else empty.
     pub tunnel: Option<String>,
+    /// The tunnel's interface name ("utun0"), when one was detected.
+    pub tunnel_iface: String,
+    /// True when the tunnel is a split route: the kernel's default route still
+    /// points at a physical NIC, but internet traffic egresses via the tunnel.
+    /// The gateway shown is then the real LAN gateway, not the tunnel endpoint.
+    pub tunnel_is_split: bool,
     /// Present when the default interface is Wi-Fi and details are available.
     pub wifi: Option<WifiInfo>,
 }
