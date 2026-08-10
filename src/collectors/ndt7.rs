@@ -12,10 +12,10 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::{Bytes, Message};
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use crate::app::AppState;
-use crate::collectors::speedtest::{mbps, set_phase, update, Report, TICK};
+use crate::collectors::speedtest::{Report, TICK, mbps, set_phase, update};
 
 const SUBPROTOCOL: &str = "net.measurementlab.ndt.v7";
 const DURATION: Duration = Duration::from_secs(10);
@@ -98,7 +98,11 @@ async fn download(state: &Arc<Mutex<AppState>>, url: &str) -> Result<f64, String
         }
         if last.elapsed() >= TICK {
             let secs = start.elapsed();
-            update(state, secs.as_secs_f64() / DURATION.as_secs_f64(), mbps(bytes, secs));
+            update(
+                state,
+                secs.as_secs_f64() / DURATION.as_secs_f64(),
+                mbps(bytes, secs),
+            );
             last = Instant::now();
         }
     }
@@ -129,7 +133,11 @@ async fn upload(state: &Arc<Mutex<AppState>>, url: &str) -> Result<f64, String> 
         }
         if last.elapsed() >= TICK {
             let secs = start.elapsed();
-            update(state, secs.as_secs_f64() / DURATION.as_secs_f64(), mbps(sent, secs));
+            update(
+                state,
+                secs.as_secs_f64() / DURATION.as_secs_f64(),
+                mbps(sent, secs),
+            );
             last = Instant::now();
         }
     }

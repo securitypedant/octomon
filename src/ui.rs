@@ -31,9 +31,12 @@ pub fn render(f: &mut Frame, s: &AppState) {
             Panel::Vitals => vitals_panel(f, s, root[1]),
         }
     } else {
-        let rows = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(root[1]);
-        let top = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[0]);
-        let bottom = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
+        let rows = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(root[1]);
+        let top = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[0]);
+        let bottom = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[1]);
         quality_panel(f, s, top[0]);
         bandwidth_panel(f, s, top[1]);
         netinfo_panel(f, s, bottom[0]);
@@ -48,12 +51,21 @@ pub fn render(f: &mut Frame, s: &AppState) {
 }
 
 fn header(f: &mut Frame, s: &AppState, area: Rect) {
-    let cols = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(area);
+    let cols =
+        Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(area);
 
     let up = s.started.elapsed().as_secs();
     let mut left = vec![
-        Span::styled(" octomon ", Style::new().fg(Color::Black).bg(Color::Cyan).bold()),
-        Span::raw(format!("  {:02}:{:02}:{:02}", up / 3600, (up % 3600) / 60, up % 60)),
+        Span::styled(
+            " octomon ",
+            Style::new().fg(Color::Black).bg(Color::Cyan).bold(),
+        ),
+        Span::raw(format!(
+            "  {:02}:{:02}:{:02}",
+            up / 3600,
+            (up % 3600) / 60,
+            up % 60
+        )),
     ];
     if s.paused {
         left.push(Span::styled(
@@ -79,9 +91,20 @@ fn context_line(s: &AppState) -> Line<'static> {
     let txt = |t: &str| Span::styled(t.to_string(), Style::new().fg(Color::Gray));
     let mut spans = match s.focus {
         Panel::Quality => vec![
-            key("[a]"), txt("dd "), key("[d]"), txt("el "), key("[↑↓]"), txt("sel "),
-            key("[g]"), txt("raph "), key("[t]"), txt("race "),
-            key("[←→↵]"), txt("sort "), key("[R]"), txt("eset "),
+            key("[a]"),
+            txt("dd "),
+            key("[d]"),
+            txt("el "),
+            key("[↑↓]"),
+            txt("sel "),
+            key("[g]"),
+            txt("raph "),
+            key("[t]"),
+            txt("race "),
+            key("[←→↵]"),
+            txt("sort "),
+            key("[R]"),
+            txt("eset "),
         ],
         Panel::Bandwidth => {
             let p = s
@@ -90,8 +113,15 @@ fn context_line(s: &AppState) -> Line<'static> {
                 .map(String::as_str)
                 .unwrap_or("—");
             vec![
-                key("[s]"), txt("peed "), key("[v]"), txt(p), Span::raw(" "),
-                key("[R]"), txt("eset "), key("[f]"), txt("ull "),
+                key("[s]"),
+                txt("peed "),
+                key("[v]"),
+                txt(p),
+                Span::raw(" "),
+                key("[R]"),
+                txt("eset "),
+                key("[f]"),
+                txt("ull "),
             ]
         }
         Panel::NetInfo => vec![key("[r]"), txt("efresh ")],
@@ -105,13 +135,22 @@ fn context_line(s: &AppState) -> Line<'static> {
 fn footer(f: &mut Frame, s: &AppState, area: Rect) {
     let line = if s.input_mode == InputMode::AddTarget {
         Line::from(vec![
-            Span::styled(" add target (IP or DNS): ", Style::new().fg(Color::Yellow).bold()),
+            Span::styled(
+                " add target (IP or DNS): ",
+                Style::new().fg(Color::Yellow).bold(),
+            ),
             Span::styled(s.input_buffer.clone(), Style::new().fg(Color::White)),
             Span::styled("▏", Style::new().fg(Color::Yellow)),
-            Span::styled("   [Enter] add  [Esc] cancel", Style::new().fg(Color::DarkGray)),
+            Span::styled(
+                "   [Enter] add  [Esc] cancel",
+                Style::new().fg(Color::DarkGray),
+            ),
         ])
     } else if let Some(n) = &s.notice {
-        Line::from(Span::styled(format!(" {n}"), Style::new().fg(Color::Yellow)))
+        Line::from(Span::styled(
+            format!(" {n}"),
+            Style::new().fg(Color::Yellow),
+        ))
     } else {
         Line::from(Span::styled(
             " [Tab] focus  [f] full  [p] pause  [r] refresh  [w] window  [s] speedtest  [?] help  [q] quit",
@@ -122,7 +161,11 @@ fn footer(f: &mut Frame, s: &AppState, area: Rect) {
 }
 
 fn block(title: &str, focused: bool) -> Block<'static> {
-    let border = if focused { Color::Cyan } else { Color::DarkGray };
+    let border = if focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
     Block::bordered()
         .title(Span::styled(format!(" {title} "), Style::new().bold()))
         .border_style(Style::new().fg(border))
@@ -165,7 +208,9 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
             txt.push(if desc { '▼' } else { '▲' });
         }
         let style = if focused && s.q_col == sort_col {
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            Style::new()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             Style::new().fg(Color::Gray).bold()
         };
@@ -191,7 +236,9 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         let marker = if i == s.graph_target { "►" } else { "" };
         let mut style = Style::new().fg(color);
         if focused && i == s.selected {
-            style = style.bg(Color::Rgb(40, 40, 55)).add_modifier(Modifier::BOLD);
+            style = style
+                .bg(Color::Rgb(40, 40, 55))
+                .add_modifier(Modifier::BOLD);
         }
         // '⇢' marks auto-discovered (gateway / hop) targets.
         let label = if t.discovered {
@@ -261,10 +308,18 @@ fn traceroute_view(f: &mut Frame, s: &AppState, area: Rect) {
 
     let rows = inner.height as usize;
     let body: Vec<Line> = if tr.hops.is_empty() {
-        vec![Line::from(Span::styled("probing…", Style::new().fg(Color::DarkGray)))]
+        vec![Line::from(Span::styled(
+            "probing…",
+            Style::new().fg(Color::DarkGray),
+        ))]
     } else if tr.hops.len() > rows {
         // Not enough room: show what fits, then point to full-screen.
-        let mut v: Vec<Line> = tr.hops.iter().take(rows.saturating_sub(1)).map(hop_line).collect();
+        let mut v: Vec<Line> = tr
+            .hops
+            .iter()
+            .take(rows.saturating_sub(1))
+            .map(hop_line)
+            .collect();
         let remaining = tr.hops.len() - rows.saturating_sub(1);
         v.push(Line::from(Span::styled(
             format!("… +{remaining} more — press [f] for full screen"),
@@ -300,7 +355,11 @@ fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
         return;
     }
 
-    let series: Vec<(f64, f64)> = raw.iter().enumerate().map(|(i, &v)| (i as f64, v)).collect();
+    let series: Vec<(f64, f64)> = raw
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (i as f64, v))
+        .collect();
     let xmax = (series.len().saturating_sub(1)).max(1) as f64;
     let p95 = t.stats(n).p95.unwrap_or(0.0);
     let ymax = raw.iter().copied().fold(0.0_f64, f64::max).max(p95) * 1.15 + 1.0;
@@ -337,7 +396,10 @@ fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
 /// bufferbloat for the graphed target.
 fn quality_summary(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
     let mut spans = vec![
-        Span::styled(format!("window {}s ", s.window_secs), Style::new().fg(Color::Gray)),
+        Span::styled(
+            format!("window {}s ", s.window_secs),
+            Style::new().fg(Color::Gray),
+        ),
         Span::styled("[w]", Style::new().fg(Color::Cyan)),
         Span::raw("  "),
     ];
@@ -353,7 +415,10 @@ fn quality_summary(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
         ));
         if let Some(bloat) = t.bufferbloat_ms(n) {
             let (grade, color) = bufferbloat_grade(bloat);
-            spans.push(Span::styled("bufferbloat ", Style::new().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                "bufferbloat ",
+                Style::new().fg(Color::DarkGray),
+            ));
             spans.push(Span::styled(
                 format!("+{bloat:.0}ms ({grade})"),
                 Style::new().fg(color).bold(),
@@ -377,7 +442,14 @@ fn bufferbloat_grade(bloat_ms: f64) -> (&'static str, Color) {
 fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let tp = &s.throughput;
     let b = block(
-        &format!("Bandwidth · {}", if tp.iface.is_empty() { "…" } else { &tp.iface }),
+        &format!(
+            "Bandwidth · {}",
+            if tp.iface.is_empty() {
+                "…"
+            } else {
+                &tp.iface
+            }
+        ),
         s.focus == Panel::Bandwidth,
     );
     let inner = b.inner(area);
@@ -395,7 +467,8 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
 
     render_speedtest(f, s, rows[0]);
 
-    let graphs = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
+    let graphs =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
     let (ddata, dmax) = spark_floor(&tp.down_hist, graphs[0].width, graphs[0].height);
     let down = Sparkline::default()
         .data(ddata)
@@ -420,7 +493,8 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
 
     // Full-screen: processes and speed-test history each get their own panel.
     if s.fullscreen {
-        let cols = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).split(rows[2]);
+        let cols = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(rows[2]);
 
         let pblock = block("Processes", false);
         let pinner = pblock.inner(cols[0]);
@@ -460,8 +534,14 @@ fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect) {
         Row::new(vec![
             Cell::from(r.when()),
             Cell::from(r.provider.clone()),
-            Cell::from(Span::styled(format!("{:.0}", r.down_mbps), Style::new().fg(Color::Green))),
-            Cell::from(Span::styled(format!("{:.0}", r.up_mbps), Style::new().fg(Color::Magenta))),
+            Cell::from(Span::styled(
+                format!("{:.0}", r.down_mbps),
+                Style::new().fg(Color::Green),
+            )),
+            Cell::from(Span::styled(
+                format!("{:.0}", r.up_mbps),
+                Style::new().fg(Color::Magenta),
+            )),
             Cell::from(bloat),
         ])
     });
@@ -488,7 +568,10 @@ fn spark_floor(hist: &crate::app::History, width: u16, height: u16) -> (Vec<u64>
     // max / (rows*8). Floor non-zero samples to that so they show a pixel.
     let levels = (height as u64).saturating_mul(8).max(8);
     let floor = (max / levels).max(1);
-    let data = data.iter().map(|&v| if v > 0 { v.max(floor) } else { 0 }).collect();
+    let data = data
+        .iter()
+        .map(|&v| if v > 0 { v.max(floor) } else { 0 })
+        .collect();
     (data, max)
 }
 
@@ -502,7 +585,11 @@ fn render_speedtest(f: &mut Frame, s: &AppState, area: Rect) {
             st.progress * 100.0,
             st.live_mbps
         );
-        let color = if st.phase == "upload" { Color::Magenta } else { Color::Green };
+        let color = if st.phase == "upload" {
+            Color::Magenta
+        } else {
+            Color::Green
+        };
         f.render_widget(
             Gauge::default()
                 .ratio(st.progress.clamp(0.0, 1.0))
@@ -523,12 +610,17 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
     let inner = area;
     let dim = |f: &mut Frame, msg: &str| {
         f.render_widget(
-            Paragraph::new(Span::styled(msg.to_string(), Style::new().fg(Color::DarkGray))),
+            Paragraph::new(Span::styled(
+                msg.to_string(),
+                Style::new().fg(Color::DarkGray),
+            )),
             inner,
         );
     };
     match s.proc_status {
-        ProcStatus::Unsupported => return dim(f, "per-process bandwidth unavailable on this platform"),
+        ProcStatus::Unsupported => {
+            return dim(f, "per-process bandwidth unavailable on this platform");
+        }
         ProcStatus::Probing => return dim(f, "detecting per-process bandwidth… (~5s)"),
         ProcStatus::Supported if s.processes.is_empty() => return dim(f, "sampling processes…"),
         ProcStatus::Supported => {}
@@ -545,7 +637,9 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
             txt.push(if desc { '▼' } else { '▲' });
         }
         let style = if focused && i == s.bw_col {
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            Style::new()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             Style::new().fg(Color::DarkGray)
         };
@@ -570,15 +664,27 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
     let rows = procs.into_iter().take(limit).map(|p| {
         let name: String = p.name.chars().take(36).collect();
         let (retx, retx_style) = if p.retx_per_sec >= 1.0 {
-            (format!("{:.0}/s", p.retx_per_sec), Style::new().fg(Color::Red))
+            (
+                format!("{:.0}/s", p.retx_per_sec),
+                Style::new().fg(Color::Red),
+            )
         } else {
             ("·".to_string(), Style::new().fg(Color::DarkGray))
         };
         Row::new(vec![
             Cell::from(name),
-            Cell::from(Span::styled(fmt_rate(p.down_bps), Style::new().fg(Color::Green))),
-            Cell::from(Span::styled(fmt_rate(p.up_bps), Style::new().fg(Color::Magenta))),
-            Cell::from(Span::styled(fmt_bytes(p.total_bytes), Style::new().fg(Color::Gray))),
+            Cell::from(Span::styled(
+                fmt_rate(p.down_bps),
+                Style::new().fg(Color::Green),
+            )),
+            Cell::from(Span::styled(
+                fmt_rate(p.up_bps),
+                Style::new().fg(Color::Magenta),
+            )),
+            Cell::from(Span::styled(
+                fmt_bytes(p.total_bytes),
+                Style::new().fg(Color::Gray),
+            )),
             Cell::from(Span::styled(retx, retx_style)),
         ])
     });
@@ -610,7 +716,10 @@ fn help_overlay(f: &mut Frame, area: Rect) {
         ])
     };
     let lines = vec![
-        Line::from(Span::styled("  Global", Style::new().fg(Color::White).bold())),
+        Line::from(Span::styled(
+            "  Global",
+            Style::new().fg(Color::White).bold(),
+        )),
         row("Tab / ⇧Tab", "cycle panel focus (fwd / back)"),
         row("f", "toggle full-screen of focused panel"),
         row("s", "run speed test"),
@@ -620,7 +729,10 @@ fn help_overlay(f: &mut Frame, area: Rect) {
         row("?", "toggle this help"),
         row("q / Esc", "quit"),
         Line::from(""),
-        Line::from(Span::styled("  Connection Quality", Style::new().fg(Color::White).bold())),
+        Line::from(Span::styled(
+            "  Connection Quality",
+            Style::new().fg(Color::White).bold(),
+        )),
         row("a", "add a target (IP or DNS name)"),
         row("d / Del", "delete the selected target"),
         row("g", "graph selected target (exits traceroute)"),
@@ -631,13 +743,19 @@ fn help_overlay(f: &mut Frame, area: Rect) {
         row("Space", "toggle sort direction"),
         row("Shift+R", "reset this panel's data"),
         Line::from(""),
-        Line::from(Span::styled("  Bandwidth", Style::new().fg(Color::White).bold())),
+        Line::from(Span::styled(
+            "  Bandwidth",
+            Style::new().fg(Color::White).bold(),
+        )),
         row("v", "cycle speed-test provider (saved)"),
         row("←/→", "move top-talkers column cursor"),
         row("Enter / Space", "sort by column / toggle direction"),
         row("Shift+R", "reset this panel's data"),
         Line::from(""),
-        Line::from(Span::styled("  press ? or Esc to close", Style::new().fg(Color::DarkGray))),
+        Line::from(Span::styled(
+            "  press ? or Esc to close",
+            Style::new().fg(Color::DarkGray),
+        )),
     ];
     f.render_widget(Clear, rect);
     f.render_widget(
@@ -662,12 +780,21 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
             Span::raw(v),
         ])
     };
-    let dash = |v: &str| if v.is_empty() { "-".to_string() } else { v.to_string() };
+    let dash = |v: &str| {
+        if v.is_empty() {
+            "-".to_string()
+        } else {
+            v.to_string()
+        }
+    };
 
     // Before the first netinfo sample lands.
     if n.iface.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled("detecting network…", Style::new().fg(Color::DarkGray))),
+            Paragraph::new(Span::styled(
+                "detecting network…",
+                Style::new().fg(Color::DarkGray),
+            )),
             inner,
         );
         return;
@@ -676,17 +803,44 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let mut lines = vec![
         kv("iface", dash(&n.iface)),
         kv("link", dash(&n.link_kind)),
-        kv("ipv4", if n.ipv4.is_empty() { "-".into() } else { n.ipv4.join(", ") }),
-        kv("ipv6", if n.ipv6.is_empty() { "-".into() } else { n.ipv6.join(", ") }),
+        kv(
+            "ipv4",
+            if n.ipv4.is_empty() {
+                "-".into()
+            } else {
+                n.ipv4.join(", ")
+            },
+        ),
+        kv(
+            "ipv6",
+            if n.ipv6.is_empty() {
+                "-".into()
+            } else {
+                n.ipv6.join(", ")
+            },
+        ),
         kv("mac", dash(&n.mac)),
-        kv("gateway", format!("{}  ({})", dash(&n.gateway_ip), dash(&n.gateway_mac))),
-        kv("dns", if n.dns.is_empty() { "-".into() } else { n.dns.join(", ") }),
+        kv(
+            "gateway",
+            format!("{}  ({})", dash(&n.gateway_ip), dash(&n.gateway_mac)),
+        ),
+        kv(
+            "dns",
+            if n.dns.is_empty() {
+                "-".into()
+            } else {
+                n.dns.join(", ")
+            },
+        ),
     ];
     if let Some(w) = &n.wifi {
         // Live signal/tx come from the CoreWLAN graph below; keep the slower
         // system_profiler details (SSID / PHY / channel) here.
         lines.push(kv("ssid", dash(&w.ssid)));
-        lines.push(kv("wifi", format!("{}  ch {}", dash(&w.phy), dash(&w.channel))));
+        lines.push(kv(
+            "wifi",
+            format!("{}  ch {}", dash(&w.phy), dash(&w.channel)),
+        ));
     } else if n.link_kind.contains("Wi-Fi") || n.link_kind.contains("Wireless") {
         lines.push(Line::from(Span::styled(
             "gathering Wi-Fi details…",
@@ -791,7 +945,11 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
     f.render_widget(
         LineGauge::default()
             .ratio((mem_pct / 100.0).clamp(0.0, 1.0) as f64)
-            .label(format!("MEM {}/{}", fmt_bytes(v.mem_used), fmt_bytes(v.mem_total)))
+            .label(format!(
+                "MEM {}/{}",
+                fmt_bytes(v.mem_used),
+                fmt_bytes(v.mem_total)
+            ))
             .filled_style(Style::new().fg(usage_color(mem_pct)))
             .unfilled_style(Style::new().fg(Color::DarkGray)),
         parts[1],
@@ -802,7 +960,10 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
         .max(100)
         .data(v.cpu_hist.tail_u64(parts[3].width as usize))
         .style(Style::new().fg(Color::Yellow))
-        .block(Block::new().title(Span::styled(" cpu history ", Style::new().fg(Color::DarkGray))));
+        .block(Block::new().title(Span::styled(
+            " cpu history ",
+            Style::new().fg(Color::DarkGray),
+        )));
     f.render_widget(spark, parts[3]);
 }
 
@@ -833,10 +994,7 @@ fn speedtest_line(s: &AppState) -> Line<'static> {
                 .unwrap_or_default();
             let mut spans = vec![
                 label,
-                Span::styled(
-                    format!("{} ", st.provider),
-                    Style::new().fg(Color::Cyan),
-                ),
+                Span::styled(format!("{} ", st.provider), Style::new().fg(Color::Cyan)),
                 Span::styled(
                     format!("↓ {}", fmt_mbps(st.down_mbps)),
                     Style::new().fg(Color::Green).bold(),
@@ -857,7 +1015,10 @@ fn speedtest_line(s: &AppState) -> Line<'static> {
                 ));
             }
             spans.push(Span::styled(ago, Style::new().fg(Color::DarkGray)));
-            spans.push(Span::styled("  [s] rerun", Style::new().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                "  [s] rerun",
+                Style::new().fg(Color::DarkGray),
+            ));
             Line::from(spans)
         }
         SpeedStatus::Failed(e) => {

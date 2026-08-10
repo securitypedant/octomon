@@ -155,7 +155,14 @@ impl TargetStat {
 
     /// Distribution over the most recent `n` successful samples.
     pub fn stats(&self, n: usize) -> RttStats {
-        let mut v: Vec<f64> = self.history.data.iter().rev().take(n.max(1)).copied().collect();
+        let mut v: Vec<f64> = self
+            .history
+            .data
+            .iter()
+            .rev()
+            .take(n.max(1))
+            .copied()
+            .collect();
         if v.is_empty() {
             return RttStats::default();
         }

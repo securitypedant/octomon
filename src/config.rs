@@ -77,7 +77,9 @@ pub fn parse_target(s: &str) -> Result<Target, String> {
         Some((l, ip)) => (l.trim().to_string(), ip.trim()),
         None => (s.trim().to_string(), s.trim()),
     };
-    let addr = ip.parse().map_err(|_| format!("invalid IP in target '{s}'"))?;
+    let addr = ip
+        .parse()
+        .map_err(|_| format!("invalid IP in target '{s}'"))?;
     Ok(Target { label, addr })
 }
 

@@ -17,7 +17,16 @@ const MAX_HOPS: usize = 4; // gateway (1) + next three
 
 pub async fn run(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) {
     let out = Command::new("traceroute")
-        .args(["-n", "-q", "1", "-w", "1", "-m", &MAX_HOPS.to_string(), PROBE])
+        .args([
+            "-n",
+            "-q",
+            "1",
+            "-w",
+            "1",
+            "-m",
+            &MAX_HOPS.to_string(),
+            PROBE,
+        ])
         .stdin(std::process::Stdio::null())
         .output()
         .await;

@@ -1,15 +1,127 @@
-# Octomon - Monitor your overall network performance
-Nothing is worse than not knowing what your network performance is like. Sitting on plane, 
-airport wifi, or just ta home and wondering what's going on.
+# octomon
 
-This tool is designed to give you a simple view of your network connectivity in the command line.
+**A `btop`-style terminal dashboard for your network.** Think `btop`, `trippy`, and
+`bandwhich` in a single view — so you can tell at a glance whether it's the
+network, the Wi-Fi, the ISP, or your own machine that's misbehaving.
 
-## Prompt to build this.
-A CLI tool for macos and linux that gives the user a dashboard like view of network performance.
+[![CI](https://github.com/securitypedant/octomon/actions/workflows/ci.yml/badge.svg)](https://github.com/securitypedant/octomon/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Think btop, trippy and bandwhich in a single tool. I want to be able to do the following.
+![octomon screenshot](screenshot.png)
 
-1. Understand the current quality of my network connection as determined by ICMP requests showing jitter, packet loss and overall latency to a range of default known endpoints (1.1.1.1, 8.8.8.8) as well as user configurable targets.
-2. View graphs of the current bandwidth capabilities as well as what processes are using my current bandwidth. So imagine a periodic down/up speed test to get some limits, then show what processes are currently using bandwidth.
-3. What my network is. DHCP/IP etc details. Transport info, Wifi? 10/100/1000Mb connection?
-4. A minor view on machine performance. So CPU/memory usage graphs, but only to give me an idea of if my machine performance is possibly impacting network performance.
+## What it shows
+
+Four panels, all updating live, all **unprivileged** (no `sudo`):
+
+- **Connection Quality** — ICMP latency to configurable targets with a full
+  distribution (last / avg / p95 / max), **jitter**, **packet loss**, and a
+  **bufferbloat** grade (latency inflation under load). Auto-discovers your
+  **gateway and the next hops** on startup, and can **traceroute** any target.
+- **Bandwidth** — live up/down throughput, an on-demand **speed test** with a
+  choice of provider (**Cloudflare / M-Lab / LibreSpeed**), and **per-process**
+  talkers showing which apps are using the network (with retransmit rate and
+  session totals).
+- **Network** — interface, IP/DHCP, gateway, DNS, link type, Wi-Fi SSID/PHY/
+  channel, plus a **live Wi-Fi signal graph** (RSSI / noise / tx-rate).
+- **Machine** — CPU and memory, framed only as a "is my box the bottleneck?"
+  signal.
+
+## Platform support
+
+- **macOS** — fully supported (this is the v1 target).
+- **Linux** — planned for **release 2**. The collectors are already behind
+  platform seams, but the macOS-specific probes (per-process bandwidth, Wi-Fi
+  signal/details) are not yet wired up for Linux.
+- **Windows** — later.
+
+## Install
+
+Requires a recent Rust toolchain (1.88+). Build from source:
+
+```sh
+git clone https://github.com/securitypedant/octomon
+cd octomon
+cargo build --release
+./target/release/octomon
+```
+
+## Usage
+
+```sh
+octomon                      # launch the dashboard
+octomon -t Home=192.168.1.1  # add extra ICMP targets (repeatable)
+octomon --no-speedtest       # disable the speed test
+octomon --ping-interval 500  # override the ping interval (ms)
+octomon --check              # print a one-shot text snapshot and exit (no TUI)
+octomon --help
+```
+
+### Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Tab` / `Shift+Tab` | Cycle panel focus (forward / back) |
+| `f` | Full-screen the focused panel |
+| `s` | Run a speed test |
+| `p` | Pause auto-refresh |
+| `r` | Re-probe network info |
+| `w` | Cycle the stats window (30 / 60 / 300s) |
+| `?` | Help overlay |
+| `q` / `Esc` | Quit |
+| **Connection Quality** | |
+| `a` / `d` | Add / delete a target (add accepts an IP or DNS name) |
+| `↑` `↓` (or `j` `k`) | Select a target |
+| `g` | Graph the selected target's latency |
+| `t` | Traceroute the selected target |
+| `←` `→` · `Enter` · `Space` | Move sort column · sort · toggle direction |
+| `Shift+R` | Reset this panel's data |
+| **Bandwidth** | |
+| `v` | Cycle the speed-test provider (saved to config) |
+| `←` `→` · `Enter` · `Space` | Sort top talkers by column |
+| `Shift+R` | Reset this panel's data |
+
+## Speed-test providers
+
+`v` cycles between three providers, all working out of the box:
+
+- **Cloudflare** — `speed.cloudflare.com`.
+- **M-Lab** — NDT7 over WebSockets; a nearby server is chosen via M-Lab's
+  locate service.
+- **LibreSpeed** — a public server is picked automatically from the community
+  server list (or point at your own with `librespeed_server`).
+
+Each run measures download, upload, and **loaded-latency bufferbloat**, and is
+saved to disk (see below).
+
+## Configuration
+
+On first run octomon writes a config file you can edit:
+
+- **Config:** `~/.config/octomon/config.toml` (honours `$XDG_CONFIG_HOME`).
+  Targets, ping timing, the selected speed-test provider, and endpoint URLs.
+- **Data:** `~/.local/share/octomon/speedtests.jsonl` (honours
+  `$XDG_DATA_HOME`). Timestamped speed-test history, one JSON object per line;
+  the recent runs are shown in the full-screen Bandwidth view.
+
+## How it works
+
+Independent async collectors (Tokio) each sample on their own cadence and write
+into a shared state that a Ratatui render loop draws — so a slow speed test
+never stalls the UI. Latency uses unprivileged datagram ICMP (`surge-ping`);
+per-process bandwidth reads `nettop`; Wi-Fi signal reads CoreWLAN directly; the
+rest comes from `sysinfo` and `netdev`. Latency is validated to match the
+system `ping`, so the jitter you see is the network's, not the tool's.
+
+## Contributing
+
+Issues and PRs welcome. `cargo fmt`, `cargo clippy`, and `cargo test` should all
+be clean (CI enforces this).
+
+## License
+
+Licensed under either of
+
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+
+at your option.

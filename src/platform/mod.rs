@@ -94,14 +94,7 @@ mod macos {
     /// own processes.
     pub async fn proc_net_sample() -> Option<Vec<ProcSample>> {
         let out = tokio::process::Command::new("nettop")
-            .args([
-                "-P",
-                "-L",
-                "1",
-                "-x",
-                "-J",
-                "bytes_in,bytes_out,re-tx",
-            ])
+            .args(["-P", "-L", "1", "-x", "-J", "bytes_in,bytes_out,re-tx"])
             .stdin(std::process::Stdio::null())
             .output()
             .await
@@ -132,10 +125,7 @@ mod macos {
         };
         let i_retx = idx("re-tx");
         // The process column is the empty-named one (skip a leading "time").
-        let i_proc = cols
-            .iter()
-            .position(|c| c.is_empty())
-            .unwrap_or(0);
+        let i_proc = cols.iter().position(|c| c.is_empty()).unwrap_or(0);
 
         fn get<'a>(row: &[&'a str], i: usize) -> &'a str {
             row.get(i).map(|s| s.trim()).unwrap_or("")
@@ -154,7 +144,9 @@ mod macos {
                 name: name.to_string(),
                 bytes_in: get(&row, i_in).parse().unwrap_or(0),
                 bytes_out: get(&row, i_out).parse().unwrap_or(0),
-                retx: i_retx.map(|i| get(&row, i).parse().unwrap_or(0)).unwrap_or(0),
+                retx: i_retx
+                    .map(|i| get(&row, i).parse().unwrap_or(0))
+                    .unwrap_or(0),
             });
         }
         samples
@@ -177,14 +169,19 @@ mod macos {
     fn parse(text: &str) -> Option<WifiInfo> {
         let mut lines = text.lines();
         // Advance to the current-network marker.
-        lines.by_ref().find(|l| l.trim() == "Current Network Information:")?;
+        lines
+            .by_ref()
+            .find(|l| l.trim() == "Current Network Information:")?;
 
         // The next non-empty line is the SSID (a "<name>:" header).
         let ssid_line = lines.by_ref().find(|l| !l.trim().is_empty())?;
         let ssid = ssid_line.trim().trim_end_matches(':').to_string();
         let ssid_indent = indent(ssid_line);
 
-        let mut info = WifiInfo { ssid, ..Default::default() };
+        let mut info = WifiInfo {
+            ssid,
+            ..Default::default()
+        };
         for line in lines {
             if line.trim().is_empty() {
                 continue;
@@ -240,6 +237,9 @@ mod linux {
             .lines()
             .find_map(|l| l.trim().strip_prefix("ssid "))
             .map(|s| s.to_string())?;
-        Some(WifiInfo { ssid, ..Default::default() })
+        Some(WifiInfo {
+            ssid,
+            ..Default::default()
+        })
     }
 }
