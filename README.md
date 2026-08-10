@@ -36,7 +36,19 @@ Four panels, all updating live, all **unprivileged** (no `sudo`):
 
 ## Install
 
-Requires a recent Rust toolchain (1.88+). Build from source:
+### Homebrew (macOS)
+
+```sh
+brew tap securitypedant/octomon
+brew trust securitypedant/octomon   # one-time: acknowledge this third-party tap
+brew install octomon
+```
+
+Then just `octomon`. Upgrade later with `brew upgrade octomon`.
+
+### From source
+
+Requires a recent Rust toolchain (1.88+):
 
 ```sh
 git clone https://github.com/securitypedant/octomon
