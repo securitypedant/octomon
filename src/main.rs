@@ -19,7 +19,7 @@ use anyhow::Result;
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use surge_ping::Client;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 
 use app::{AppState, InputMode, Panel, SpeedStatus, TargetStat};
 use config::Config;
@@ -117,15 +117,25 @@ async fn main() -> Result<()> {
         collectors::ping::spawn_all(state.clone(), client.clone(), cfg.clone());
         // Auto-discover the gateway + next hops as targets (skipped in --check).
         if !cli.check {
-            tokio::spawn(collectors::discovery::run(state.clone(), client, cfg.clone()));
+            tokio::spawn(collectors::discovery::run(
+                state.clone(),
+                client,
+                cfg.clone(),
+            ));
         }
     }
 
     // Spawn collectors, each on its own cadence.
     tokio::spawn(collectors::throughput::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::vitals::run(state.clone(), cfg.clone()));
-    tokio::spawn(collectors::netinfo::run(state.clone(), netinfo_refresh.clone()));
-    tokio::spawn(collectors::wifi::run(state.clone(), netinfo_refresh.clone()));
+    tokio::spawn(collectors::netinfo::run(
+        state.clone(),
+        netinfo_refresh.clone(),
+    ));
+    tokio::spawn(collectors::wifi::run(
+        state.clone(),
+        netinfo_refresh.clone(),
+    ));
     tokio::spawn(collectors::signal::run(state.clone()));
     tokio::spawn(collectors::procbw::run(state.clone()));
     if !cli.no_speedtest {
@@ -153,15 +163,17 @@ async fn main() -> Result<()> {
 
     // Read terminal input on a blocking OS thread → async channel.
     let (tx, rx) = mpsc::unbounded_channel::<KeyEvent>();
-    std::thread::spawn(move || loop {
-        match event::read() {
-            Ok(Event::Key(k)) => {
-                if tx.send(k).is_err() {
-                    break;
+    std::thread::spawn(move || {
+        loop {
+            match event::read() {
+                Ok(Event::Key(k)) => {
+                    if tx.send(k).is_err() {
+                        break;
+                    }
                 }
+                Ok(_) => {}
+                Err(_) => break,
             }
-            Ok(_) => {}
-            Err(_) => break,
         }
     });
 
@@ -388,9 +400,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 // Run a traceroute to the selected target.
                 KeyCode::Char('t') if s.focus == Panel::Quality => {
                     let running = s.traceroute.as_ref().is_some_and(|t| t.running);
-                    if !running
-                        && let Some(t) = s.targets.get(s.selected)
-                    {
+                    if !running && let Some(t) = s.targets.get(s.selected) {
                         let (addr, label) = (t.addr, t.label.clone());
                         s.show_traceroute = true;
                         side = Side::Traceroute(addr, label);
@@ -407,7 +417,12 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
         Side::Refresh => ctx.netinfo_refresh.notify_one(),
         Side::AddTarget(input) => match ctx.ping_client.clone() {
             Some(client) => {
-                tokio::spawn(add_target(ctx.state.clone(), client, ctx.cfg.clone(), input));
+                tokio::spawn(add_target(
+                    ctx.state.clone(),
+                    client,
+                    ctx.cfg.clone(),
+                    input,
+                ));
             }
             None => ctx.state.lock().unwrap().notice = Some("ICMP unavailable".to_string()),
         },
@@ -493,14 +508,25 @@ fn print_snapshot(s: &AppState) {
         SpeedStatus::Failed(e) => format!("failed: {e}"),
     };
     let lat = match (st.idle_latency_ms, st.loaded_latency_ms) {
-        (Some(i), Some(l)) => format!(" latency idle={i:.0}ms loaded={l:.0}ms (+{:.0}ms)", (l - i).max(0.0)),
+        (Some(i), Some(l)) => format!(
+            " latency idle={i:.0}ms loaded={l:.0}ms (+{:.0}ms)",
+            (l - i).max(0.0)
+        ),
         _ => String::new(),
     };
     println!(
         "  speedtest[{status}] via {}: down={} up={}{lat}",
-        if st.provider.is_empty() { "—" } else { &st.provider },
-        st.down_mbps.map(|v| format!("{v:.1} Mbps")).unwrap_or_else(|| "—".into()),
-        st.up_mbps.map(|v| format!("{v:.1} Mbps")).unwrap_or_else(|| "—".into()),
+        if st.provider.is_empty() {
+            "—"
+        } else {
+            &st.provider
+        },
+        st.down_mbps
+            .map(|v| format!("{v:.1} Mbps"))
+            .unwrap_or_else(|| "—".into()),
+        st.up_mbps
+            .map(|v| format!("{v:.1} Mbps"))
+            .unwrap_or_else(|| "—".into()),
     );
     match s.proc_status {
         app::ProcStatus::Supported => {
@@ -511,12 +537,7 @@ fn print_snapshot(s: &AppState) {
             for p in &s.processes {
                 println!(
                     "    {:<20} pid={:<6} ↓{:>10.0} ↑{:>10.0} B/s  total={:<10} retx={:.1}/s",
-                    p.name,
-                    p.pid,
-                    p.down_bps,
-                    p.up_bps,
-                    p.total_bytes,
-                    p.retx_per_sec
+                    p.name, p.pid, p.down_bps, p.up_bps, p.total_bytes, p.retx_per_sec
                 );
             }
         }
@@ -528,7 +549,10 @@ fn print_snapshot(s: &AppState) {
     println!("\n[Network]");
     println!("  iface={}  link={}", n.iface, n.link_kind);
     println!("  ipv4={:?}", n.ipv4);
-    println!("  mac={}  gateway={} ({})", n.mac, n.gateway_ip, n.gateway_mac);
+    println!(
+        "  mac={}  gateway={} ({})",
+        n.mac, n.gateway_ip, n.gateway_mac
+    );
     println!("  dns={:?}", n.dns);
     if let Some(w) = &n.wifi {
         println!(

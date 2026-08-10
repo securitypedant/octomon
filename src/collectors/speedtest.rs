@@ -1,16 +1,16 @@
-//! On-demand speed test with pluggable providers and automatic fallback.
+//! On-demand speed test with a user-selectable provider.
 //!
 //! HTTP providers (Cloudflare, LibreSpeed) share one parallel-stream engine:
 //! several connections run for a fixed duration, an initial warm-up is discarded
 //! so TCP slow-start doesn't bias the result, and throughput is the steady-state
 //! bytes/second. M-Lab NDT7 speaks WebSockets and lives in [`crate::collectors::ndt7`].
-//! Providers are tried in order until one succeeds.
+//! Only the selected provider runs (no fallback); on failure the reason is shown.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures_util::{stream, StreamExt};
+use futures_util::{StreamExt, stream};
 use tokio::sync::Notify;
 
 use crate::app::{AppState, SpeedStatus};
@@ -250,7 +250,11 @@ fn join_url(base: &str, path: &str) -> String {
     if path.starts_with("http") {
         return path.to_string();
     }
-    format!("{}/{}", base.trim_end_matches('/'), path.trim_start_matches('/'))
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -353,7 +357,11 @@ async fn controller(
         let live = (bytes.saturating_sub(last_bytes)) as f64 * 8.0 / 1_000_000.0 / dt;
         last_bytes = bytes;
         last_t = Instant::now();
-        update(state, (elapsed.as_secs_f64() / full.as_secs_f64()).min(1.0), live);
+        update(
+            state,
+            (elapsed.as_secs_f64() / full.as_secs_f64()).min(1.0),
+            live,
+        );
 
         if measure_start.is_none() && elapsed >= WARMUP {
             measure_start = Some((Instant::now(), bytes));
@@ -436,10 +444,19 @@ async fn up_stream(
                     return None;
                 }
                 t.fetch_add(UP_CHUNK as u64, Ordering::Relaxed);
-                Some((Ok::<_, std::io::Error>(vec![0u8; UP_CHUNK]), sent + UP_CHUNK as u64))
+                Some((
+                    Ok::<_, std::io::Error>(vec![0u8; UP_CHUNK]),
+                    sent + UP_CHUNK as u64,
+                ))
             }
         }));
-        match client.post(&spec.up_url).body(body).send().await.and_then(|r| r.error_for_status()) {
+        match client
+            .post(&spec.up_url)
+            .body(body)
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+        {
             Ok(_) => backoff = Duration::from_millis(200),
             Err(_) => {
                 tokio::time::sleep(backoff).await;

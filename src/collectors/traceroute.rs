@@ -70,7 +70,11 @@ fn parse_hop(line: &str) -> Option<Hop> {
     let ttl: u8 = it.next()?.parse().ok()?;
     let second = it.next()?;
     if second == "*" {
-        return Some(Hop { ttl, addr: None, rtt_ms: None });
+        return Some(Hop {
+            ttl,
+            addr: None,
+            rtt_ms: None,
+        });
     }
     let rtt_ms = it.next().and_then(|v| v.parse::<f64>().ok());
     Some(Hop {

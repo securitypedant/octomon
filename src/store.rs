@@ -47,7 +47,10 @@ pub fn append(rec: &SpeedRecord) {
         let _ = std::fs::create_dir_all(dir);
     }
     if let (Ok(mut f), Ok(line)) = (
-        std::fs::OpenOptions::new().create(true).append(true).open(&path),
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path),
         serde_json::to_string(rec),
     ) {
         let _ = writeln!(f, "{line}");
@@ -56,7 +59,9 @@ pub fn append(rec: &SpeedRecord) {
 
 /// Load the most recent `n` records (oldest → newest).
 pub fn load_recent(n: usize) -> Vec<SpeedRecord> {
-    let Some(path) = path() else { return Vec::new() };
+    let Some(path) = path() else {
+        return Vec::new();
+    };
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };
