@@ -1,0 +1,71 @@
+//! Persistent speed-test history, appended as JSON Lines to the OS data dir
+//! (`$XDG_DATA_HOME/octomon/speedtests.jsonl`, default `~/.local/share/...`).
+
+use std::io::Write;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+/// One recorded speed-test result.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SpeedRecord {
+    /// Unix timestamp (seconds).
+    pub at: i64,
+    pub provider: String,
+    pub down_mbps: f64,
+    pub up_mbps: f64,
+    #[serde(default)]
+    pub idle_ms: Option<f64>,
+    #[serde(default)]
+    pub loaded_ms: Option<f64>,
+}
+
+impl SpeedRecord {
+    /// Local time formatted for display, e.g. "08-09 15:42".
+    pub fn when(&self) -> String {
+        use chrono::{Local, TimeZone};
+        Local
+            .timestamp_opt(self.at, 0)
+            .single()
+            .map(|dt| dt.format("%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "—".to_string())
+    }
+}
+
+fn path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| directories::BaseDirs::new().map(|b| b.home_dir().join(".local/share")))?;
+    Some(base.join("octomon").join("speedtests.jsonl"))
+}
+
+/// Append a record (best-effort; ignored on error).
+pub fn append(rec: &SpeedRecord) {
+    let Some(path) = path() else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let (Ok(mut f), Ok(line)) = (
+        std::fs::OpenOptions::new().create(true).append(true).open(&path),
+        serde_json::to_string(rec),
+    ) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Load the most recent `n` records (oldest → newest).
+pub fn load_recent(n: usize) -> Vec<SpeedRecord> {
+    let Some(path) = path() else { return Vec::new() };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut recs: Vec<SpeedRecord> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    if recs.len() > n {
+        recs.drain(0..recs.len() - n);
+    }
+    recs
+}

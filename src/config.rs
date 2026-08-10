@@ -31,9 +31,8 @@ pub struct Config {
     pub ping_timeout_ms: u64,
     /// Sampling interval for throughput / vitals in milliseconds.
     pub sample_interval_ms: u64,
-    /// Speed-test providers tried in order until one succeeds
-    /// ("cloudflare", "mlab", "librespeed").
-    pub speedtest_providers: Vec<String>,
+    /// Selected speed-test provider ("cloudflare", "mlab", "librespeed").
+    pub speedtest_provider: String,
     /// Base URL for Cloudflare's speed-test endpoints.
     pub cloudflare_url: String,
     /// M-Lab locate service URL (returns a nearby NDT7 server).
@@ -59,8 +58,7 @@ impl Default for Config {
             ping_interval_ms: 1000,
             ping_timeout_ms: 1000,
             sample_interval_ms: 1000,
-            // Cloudflare first (fast, no setup), M-Lab as fallback (open infra).
-            speedtest_providers: vec!["cloudflare".to_string(), "mlab".to_string()],
+            speedtest_provider: "cloudflare".to_string(),
             cloudflare_url: "https://speed.cloudflare.com".to_string(),
             mlab_locate_url: "https://locate.measurementlab.net/v2/nearest/ndt/ndt7".to_string(),
             librespeed_server: None,
@@ -122,6 +120,18 @@ impl Config {
                 cfg
             }
         }
+    }
+
+    /// Update just the selected provider in the on-disk config (best-effort),
+    /// preserving other settings.
+    pub fn persist_provider(name: &str) {
+        let Some(path) = Self::path() else { return };
+        let mut cfg = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| toml::from_str::<Config>(&t).ok())
+            .unwrap_or_default();
+        cfg.speedtest_provider = name.to_string();
+        let _ = cfg.write_to(&path);
     }
 
     fn write_to(&self, path: &PathBuf) -> std::io::Result<()> {
