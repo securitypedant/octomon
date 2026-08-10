@@ -683,26 +683,36 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
         kv("dns", if n.dns.is_empty() { "-".into() } else { n.dns.join(", ") }),
     ];
     if let Some(w) = &n.wifi {
+        // Live signal/tx come from the CoreWLAN graph below; keep the slower
+        // system_profiler details (SSID / PHY / channel) here.
         lines.push(kv("ssid", dash(&w.ssid)));
         lines.push(kv("wifi", format!("{}  ch {}", dash(&w.phy), dash(&w.channel))));
-        lines.push(kv("signal", dash(&w.rssi)));
-        lines.push(kv("tx rate", dash(&w.tx_rate)));
     } else if n.link_kind.contains("Wi-Fi") || n.link_kind.contains("Wireless") {
-        // The Wi-Fi probe (system_profiler) is slow; show that more is coming.
         lines.push(Line::from(Span::styled(
             "gathering Wi-Fi details…",
             Style::new().fg(Color::DarkGray),
         )));
     }
-    f.render_widget(Paragraph::new(lines), inner);
 
-    // Transient "re-probing" note pinned to the bottom of this panel (the only
-    // thing 'r' affects).
+    // Reserve space at the bottom for the live signal graph when on Wi-Fi.
+    let (info_area, graph_area) = if s.signal.present {
+        let p = Layout::vertical([Constraint::Min(4), Constraint::Length(5)]).split(inner);
+        (p[0], Some(p[1]))
+    } else {
+        (inner, None)
+    };
+
+    f.render_widget(Paragraph::new(lines), info_area);
+    if let Some(ga) = graph_area {
+        signal_graph(f, s, ga);
+    }
+
+    // Transient "re-probing" note pinned to the bottom of the info area.
     if s.refresh_at.is_some_and(|t| t.elapsed().as_secs() < 3) {
         let bottom = Rect {
-            x: inner.x,
-            y: inner.y + inner.height.saturating_sub(1),
-            width: inner.width,
+            x: info_area.x,
+            y: info_area.y + info_area.height.saturating_sub(1),
+            width: info_area.width,
             height: 1,
         };
         f.render_widget(
@@ -713,6 +723,38 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
             bottom,
         );
     }
+}
+
+/// Live Wi-Fi signal sparkline (RSSI, higher = better) with current tx rate.
+fn signal_graph(f: &mut Frame, s: &AppState, area: Rect) {
+    let sig = &s.signal;
+    let color = match sig.rssi_dbm {
+        r if r >= -60 => Color::Green,
+        r if r >= -72 => Color::Yellow,
+        _ => Color::Red,
+    };
+    let title = format!(
+        " signal {} dBm · noise {} · tx {:.0} Mbps ",
+        sig.rssi_dbm, sig.noise_dbm, sig.tx_rate_mbps
+    );
+    // Map RSSI (~-30 best … -100 worst) to a positive bar; fixed max so bar
+    // height reflects absolute signal quality.
+    let data: Vec<u64> = {
+        let take = area.width as usize;
+        let skip = sig.rssi_hist.data.len().saturating_sub(take);
+        sig.rssi_hist
+            .data
+            .iter()
+            .skip(skip)
+            .map(|&d| (d + 110.0).max(0.0) as u64)
+            .collect()
+    };
+    let spark = Sparkline::default()
+        .max(80)
+        .data(data)
+        .style(Style::new().fg(color))
+        .block(Block::new().title(Span::styled(title, Style::new().fg(Color::DarkGray))));
+    f.render_widget(spark, area);
 }
 
 fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
