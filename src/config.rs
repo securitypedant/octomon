@@ -1,15 +1,17 @@
-//! Configuration: default + user-provided ICMP targets and timing knobs.
+//! Configuration.
 //!
-//! Loaded from `~/.config/octomon/config.toml` (via `directories`) when present,
-//! otherwise falls back to sensible defaults. Missing file is not an error.
+//! Loaded from `$XDG_CONFIG_HOME/octomon/config.toml` (default
+//! `~/.config/octomon/config.toml`) on both macOS and Linux. On first run a
+//! default file is written there so it can be edited.
 
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// A single ICMP target.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Target {
     /// Human-readable label shown in the UI.
     pub label: String,
@@ -18,7 +20,7 @@ pub struct Target {
 }
 
 /// User-facing configuration.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Targets to probe with ICMP.
@@ -29,12 +31,21 @@ pub struct Config {
     pub ping_timeout_ms: u64,
     /// Sampling interval for throughput / vitals in milliseconds.
     pub sample_interval_ms: u64,
+    /// Speed-test providers tried in order until one succeeds
+    /// ("cloudflare", "mlab", "librespeed").
+    pub speedtest_providers: Vec<String>,
+    /// Base URL for Cloudflare's speed-test endpoints.
+    pub cloudflare_url: String,
+    /// M-Lab locate service URL (returns a nearby NDT7 server).
+    pub mlab_locate_url: String,
+    /// LibreSpeed backend base URL (required to use the "librespeed" provider),
+    /// e.g. "https://example.com/backend".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub librespeed_server: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        // Defaults: the two anycast DNS resolvers from the README, plus a couple
-        // of well-known unicast hosts for a broader picture.
         let t = |label: &str, ip: &str| Target {
             label: label.to_string(),
             addr: ip.parse().expect("valid default IP"),
@@ -48,6 +59,11 @@ impl Default for Config {
             ping_interval_ms: 1000,
             ping_timeout_ms: 1000,
             sample_interval_ms: 1000,
+            // Cloudflare first (fast, no setup), M-Lab as fallback (open infra).
+            speedtest_providers: vec!["cloudflare".to_string(), "mlab".to_string()],
+            cloudflare_url: "https://speed.cloudflare.com".to_string(),
+            mlab_locate_url: "https://locate.measurementlab.net/v2/nearest/ndt/ndt7".to_string(),
+            librespeed_server: None,
         }
     }
 }
@@ -73,13 +89,22 @@ impl Config {
         Duration::from_millis(self.sample_interval_ms)
     }
 
-    /// Load config from the standard path, falling back to defaults. Returns the
-    /// defaults (and logs) on any read/parse problem so the app always starts.
+    /// The config file path: `$XDG_CONFIG_HOME/octomon/config.toml`, or
+    /// `~/.config/octomon/config.toml` (used on macOS as well as Linux).
+    pub fn path() -> Option<PathBuf> {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| directories::BaseDirs::new().map(|b| b.home_dir().join(".config")))?;
+        Some(base.join("octomon").join("config.toml"))
+    }
+
+    /// Load config, writing a default file on first run. Any read/parse problem
+    /// falls back to defaults so the app always starts.
     pub fn load() -> Self {
-        let Some(dirs) = directories::ProjectDirs::from("", "", "octomon") else {
+        let Some(path) = Self::path() else {
             return Config::default();
         };
-        let path = dirs.config_dir().join("config.toml");
         match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<Config>(&text) {
                 Ok(cfg) => cfg,
@@ -88,7 +113,24 @@ impl Config {
                     Config::default()
                 }
             },
-            Err(_) => Config::default(), // no file → defaults, silently
+            Err(_) => {
+                // No file yet — write the defaults so the user has a starting point.
+                let cfg = Config::default();
+                if let Err(e) = cfg.write_to(&path) {
+                    tracing::warn!("could not write default config to {}: {e}", path.display());
+                }
+                cfg
+            }
         }
+    }
+
+    fn write_to(&self, path: &PathBuf) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let body = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
+        let header = "# octomon configuration — edit and restart octomon.\n\
+                      # Deleting this file regenerates it with defaults.\n\n";
+        std::fs::write(path, format!("{header}{body}"))
     }
 }

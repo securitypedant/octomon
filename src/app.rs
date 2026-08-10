@@ -213,6 +213,8 @@ pub struct SpeedTest {
     pub idle_latency_ms: Option<f64>,
     /// Latency measured while the link was saturated, in ms.
     pub loaded_latency_ms: Option<f64>,
+    /// Which provider produced the most recent result.
+    pub provider: String,
 }
 
 impl SpeedTest {

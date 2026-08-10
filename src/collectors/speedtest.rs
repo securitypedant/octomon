@@ -1,12 +1,10 @@
-//! On-demand down/up speed test against Cloudflare's public endpoints
-//! (`speed.cloudflare.com`, no API key). Triggered by the user (`s` key) via a
-//! [`Notify`].
+//! On-demand speed test with pluggable providers and automatic fallback.
 //!
-//! Method (mirroring how a real speed test works, unlike a single fixed-size
-//! transfer): several parallel connections run for a fixed duration, an initial
-//! warm-up is discarded so TCP slow-start doesn't bias the result, and
-//! throughput is the steady-state bytes/second across the remaining window.
-//! Small latency probes during the loaded phases yield a bufferbloat figure.
+//! HTTP providers (Cloudflare, LibreSpeed) share one parallel-stream engine:
+//! several connections run for a fixed duration, an initial warm-up is discarded
+//! so TCP slow-start doesn't bias the result, and throughput is the steady-state
+//! bytes/second. M-Lab NDT7 speaks WebSockets and lives in [`crate::collectors::ndt7`].
+//! Providers are tried in order until one succeeds.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,19 +14,151 @@ use futures_util::{stream, StreamExt};
 use tokio::sync::Notify;
 
 use crate::app::{AppState, SpeedStatus};
+use crate::collectors::ndt7;
 
-const DOWN_URL: &str = "https://speed.cloudflare.com/__down";
-const UP_URL: &str = "https://speed.cloudflare.com/__up";
-
-const STREAMS: usize = 4; // parallel connections per direction
-const WARMUP: Duration = Duration::from_secs(2); // discarded (slow-start ramp)
-const MEASURE: Duration = Duration::from_secs(6); // steady-state window
-// Per-request size; streams reconnect if exhausted, so this bounds reconnect
-// overhead (bigger = fewer reconnects on fast links), not total throughput.
-// Cloudflare's __down rejects bytes >= 100_000_000 with 403, so sit just under.
-const REQ_BYTES: u64 = 99_000_000;
+const STREAMS: usize = 4;
+const WARMUP: Duration = Duration::from_secs(2);
+const MEASURE: Duration = Duration::from_secs(6);
 const UP_CHUNK: usize = 64 * 1024;
-const TICK: Duration = Duration::from_millis(200);
+pub(crate) const TICK: Duration = Duration::from_millis(200);
+
+/// A speed-test provider, carrying its (config-driven) endpoint URLs.
+#[derive(Clone)]
+pub enum Provider {
+    /// Cloudflare base URL.
+    Cloudflare(String),
+    /// LibreSpeed backend base URL.
+    LibreSpeed(String),
+    /// M-Lab locate service URL.
+    Mlab(String),
+}
+
+impl Provider {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Provider::Cloudflare(_) => "Cloudflare",
+            Provider::LibreSpeed(_) => "LibreSpeed",
+            Provider::Mlab(_) => "M-Lab",
+        }
+    }
+
+    /// Resolve a provider name against config. LibreSpeed needs a server URL, so
+    /// it is skipped when unset.
+    pub fn from_name(name: &str, cfg: &crate::config::Config) -> Option<Provider> {
+        match name.to_lowercase().as_str() {
+            "cloudflare" | "cf" => Some(Provider::Cloudflare(cfg.cloudflare_url.clone())),
+            "mlab" | "m-lab" | "ndt7" => Some(Provider::Mlab(cfg.mlab_locate_url.clone())),
+            "librespeed" => cfg.librespeed_server.clone().map(Provider::LibreSpeed),
+            _ => None,
+        }
+    }
+}
+
+/// Result of a completed test.
+pub struct Report {
+    pub provider: String,
+    pub down_mbps: f64,
+    pub up_mbps: f64,
+    pub idle_ms: Option<f64>,
+    pub loaded_ms: Option<f64>,
+}
+
+/// Endpoint shape for an HTTP provider.
+struct HttpSpec {
+    name: &'static str,
+    down_url: String,
+    down_param: &'static str,
+    down_size: u64,
+    up_url: String,
+    probe_url: String,
+}
+
+fn cloudflare_spec(base: &str) -> HttpSpec {
+    let base = base.trim_end_matches('/');
+    HttpSpec {
+        name: "Cloudflare",
+        down_url: format!("{base}/__down"),
+        down_param: "bytes",
+        down_size: 99_000_000, // just under the 100 MB cap
+        up_url: format!("{base}/__up"),
+        probe_url: format!("{base}/__down?bytes=1"),
+    }
+}
+
+fn librespeed_spec(base: &str) -> HttpSpec {
+    let base = base.trim_end_matches('/');
+    HttpSpec {
+        name: "LibreSpeed",
+        down_url: format!("{base}/garbage.php"),
+        down_param: "ckSize", // in MB
+        down_size: 90,
+        up_url: format!("{base}/empty.php"),
+        probe_url: format!("{base}/empty.php"),
+    }
+}
+
+pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>, providers: Vec<Provider>) {
+    let client = match reqwest::Client::builder()
+        .pool_max_idle_per_host(STREAMS)
+        .timeout(Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("speedtest client: {e}");
+            return;
+        }
+    };
+
+    loop {
+        trigger.notified().await;
+
+        let mut last_err = "no speed-test providers configured".to_string();
+        let mut report = None;
+        for provider in &providers {
+            set_phase(&state, &format!("{} · connect", provider.name()));
+            match run_provider(&client, &state, provider).await {
+                Ok(r) => {
+                    report = Some(r);
+                    break;
+                }
+                Err(e) => last_err = format!("{}: {e}", provider.name()),
+            }
+        }
+
+        let mut s = state.lock().unwrap();
+        s.speedtest.progress = 0.0;
+        s.speedtest.live_mbps = 0.0;
+        s.speedtest.last_run = Some(Instant::now());
+        match report {
+            Some(r) => {
+                s.speedtest.status = SpeedStatus::Done;
+                s.speedtest.provider = r.provider;
+                s.speedtest.down_mbps = Some(r.down_mbps);
+                s.speedtest.up_mbps = Some(r.up_mbps);
+                s.speedtest.idle_latency_ms = r.idle_ms;
+                s.speedtest.loaded_latency_ms = r.loaded_ms;
+                s.speedtest.phase = "done".to_string();
+            }
+            None => {
+                s.speedtest.status = SpeedStatus::Failed(last_err.clone());
+                s.speedtest.phase = format!("failed: {last_err}");
+            }
+        }
+    }
+}
+
+async fn run_provider(
+    client: &reqwest::Client,
+    state: &Arc<Mutex<AppState>>,
+    provider: &Provider,
+) -> Result<Report, String> {
+    match provider {
+        Provider::Cloudflare(base) => run_http(client, state, cloudflare_spec(base)).await,
+        Provider::LibreSpeed(base) => run_http(client, state, librespeed_spec(base)).await,
+        Provider::Mlab(locate) => ndt7::run(client, state, locate).await,
+    }
+}
 
 #[derive(Clone, Copy)]
 enum Dir {
@@ -45,66 +175,26 @@ impl Dir {
     }
 }
 
-struct Report {
-    down_mbps: f64,
-    up_mbps: f64,
-    idle_ms: Option<f64>,
-    loaded_ms: Option<f64>,
-}
+async fn run_http(
+    client: &reqwest::Client,
+    state: &Arc<Mutex<AppState>>,
+    spec: HttpSpec,
+) -> Result<Report, String> {
+    let spec = Arc::new(spec);
 
-pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>) {
-    let client = match reqwest::Client::builder()
-        .pool_max_idle_per_host(STREAMS)
-        .timeout(Duration::from_secs(30))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("speedtest client: {e}");
-            return;
-        }
-    };
+    set_phase(state, &format!("{} · latency", spec.name));
+    let idle_ms = idle_latency(client, &spec.probe_url).await;
 
-    loop {
-        trigger.notified().await;
-        let result = run_once(&client, &state).await;
-
-        let mut s = state.lock().unwrap();
-        s.speedtest.progress = 0.0;
-        s.speedtest.live_mbps = 0.0;
-        s.speedtest.last_run = Some(Instant::now());
-        match result {
-            Ok(r) => {
-                s.speedtest.status = SpeedStatus::Done;
-                s.speedtest.down_mbps = Some(r.down_mbps);
-                s.speedtest.up_mbps = Some(r.up_mbps);
-                s.speedtest.idle_latency_ms = r.idle_ms;
-                s.speedtest.loaded_latency_ms = r.loaded_ms;
-                s.speedtest.phase = "done".to_string();
-            }
-            Err(e) => {
-                s.speedtest.status = SpeedStatus::Failed(e.clone());
-                s.speedtest.phase = format!("failed: {e}");
-            }
-        }
-    }
-}
-
-async fn run_once(client: &reqwest::Client, state: &Arc<Mutex<AppState>>) -> Result<Report, String> {
-    // Unloaded baseline latency.
-    set_phase(state, "latency");
-    let idle_ms = idle_latency(client).await;
-
-    let (down_mbps, mut rtts) = measure(client, state, Dir::Down).await?;
-    let (up_mbps, up_rtts) = measure(client, state, Dir::Up).await?;
+    let (down_mbps, mut rtts) = measure(client, state, &spec, Dir::Down).await?;
+    let (up_mbps, up_rtts) = measure(client, state, &spec, Dir::Up).await?;
     rtts.extend(up_rtts);
 
-    let loaded_ms = median(&mut rtts);
     Ok(Report {
+        provider: spec.name.to_string(),
         down_mbps,
         up_mbps,
         idle_ms,
-        loaded_ms,
+        loaded_ms: median(&mut rtts),
     })
 }
 
@@ -113,24 +203,25 @@ async fn run_once(client: &reqwest::Client, state: &Arc<Mutex<AppState>>) -> Res
 async fn measure(
     client: &reqwest::Client,
     state: &Arc<Mutex<AppState>>,
+    spec: &Arc<HttpSpec>,
     dir: Dir,
 ) -> Result<(f64, Vec<f64>), String> {
-    set_phase(state, dir.label());
+    set_phase(state, &format!("{} · {}", spec.name, dir.label()));
     let total = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
 
     let mut handles = Vec::new();
     for _ in 0..STREAMS {
-        let (c, t, s) = (client.clone(), total.clone(), stop.clone());
+        let (c, sp, t, s) = (client.clone(), spec.clone(), total.clone(), stop.clone());
         handles.push(tokio::spawn(async move {
             match dir {
-                Dir::Down => down_stream(c, t, s).await,
-                Dir::Up => up_stream(c, t, s).await,
+                Dir::Down => down_stream(c, sp, t, s).await,
+                Dir::Up => up_stream(c, sp, t, s).await,
             }
         }));
     }
 
-    let (mbps, rtts) = controller(client, state, &total).await;
+    let (mbps, rtts) = controller(client, state, &total, &spec.probe_url).await;
     stop.store(true, Ordering::Relaxed);
     for h in handles {
         h.abort();
@@ -145,12 +236,11 @@ async fn measure(
     Ok((mbps, rtts))
 }
 
-/// Drives timing: live updates, warm-up boundary, steady-state rate, and
-/// periodic loaded-latency probes.
 async fn controller(
     client: &reqwest::Client,
     state: &Arc<Mutex<AppState>>,
     total: &AtomicU64,
+    probe_url: &str,
 ) -> (f64, Vec<f64>) {
     let rtts: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
     let start = Instant::now();
@@ -166,7 +256,6 @@ async fn controller(
         let elapsed = start.elapsed();
         let bytes = total.load(Ordering::Relaxed);
 
-        // Live instantaneous throughput for the gauge.
         let dt = last_t.elapsed().as_secs_f64().max(0.001);
         let live = (bytes.saturating_sub(last_bytes)) as f64 * 8.0 / 1_000_000.0 / dt;
         last_bytes = bytes;
@@ -177,14 +266,13 @@ async fn controller(
             measure_start = Some((Instant::now(), bytes));
         }
 
-        // Probe loaded latency ~every 600ms once past warm-up.
         if elapsed >= WARMUP {
             since_probe += TICK;
             if since_probe >= Duration::from_millis(600) {
                 since_probe = Duration::ZERO;
-                let (c, r) = (client.clone(), rtts.clone());
+                let (c, r, url) = (client.clone(), rtts.clone(), probe_url.to_string());
                 tokio::spawn(async move {
-                    if let Some(ms) = probe_latency(&c).await {
+                    if let Some(ms) = probe_latency(&c, &url).await {
                         r.lock().unwrap().push(ms);
                     }
                 });
@@ -201,14 +289,17 @@ async fn controller(
     }
 }
 
-/// Repeatedly download large responses, counting bytes, until stopped. Backs
-/// off exponentially on errors so a rate-limit (429) isn't hammered.
-async fn down_stream(client: reqwest::Client, total: Arc<AtomicU64>, stop: Arc<AtomicBool>) {
+async fn down_stream(
+    client: reqwest::Client,
+    spec: Arc<HttpSpec>,
+    total: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+) {
     let mut backoff = Duration::from_millis(200);
     while !stop.load(Ordering::Relaxed) {
         let resp = client
-            .get(DOWN_URL)
-            .query(&[("bytes", REQ_BYTES.to_string())])
+            .get(&spec.down_url)
+            .query(&[(spec.down_param, spec.down_size.to_string())])
             .send()
             .await
             .and_then(|r| r.error_for_status());
@@ -236,22 +327,26 @@ async fn down_stream(client: reqwest::Client, total: Arc<AtomicU64>, stop: Arc<A
     }
 }
 
-/// Repeatedly upload a streamed body, counting bytes handed to the socket.
-async fn up_stream(client: reqwest::Client, total: Arc<AtomicU64>, stop: Arc<AtomicBool>) {
+async fn up_stream(
+    client: reqwest::Client,
+    spec: Arc<HttpSpec>,
+    total: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+) {
     let mut backoff = Duration::from_millis(200);
     while !stop.load(Ordering::Relaxed) {
         let (t, s) = (total.clone(), stop.clone());
         let body = reqwest::Body::wrap_stream(stream::unfold(0u64, move |sent| {
             let (t, s) = (t.clone(), s.clone());
             async move {
-                if s.load(Ordering::Relaxed) || sent >= REQ_BYTES {
+                if s.load(Ordering::Relaxed) {
                     return None;
                 }
                 t.fetch_add(UP_CHUNK as u64, Ordering::Relaxed);
                 Some((Ok::<_, std::io::Error>(vec![0u8; UP_CHUNK]), sent + UP_CHUNK as u64))
             }
         }));
-        match client.post(UP_URL).body(body).send().await.and_then(|r| r.error_for_status()) {
+        match client.post(&spec.up_url).body(body).send().await.and_then(|r| r.error_for_status()) {
             Ok(_) => backoff = Duration::from_millis(200),
             Err(_) => {
                 tokio::time::sleep(backoff).await;
@@ -261,28 +356,26 @@ async fn up_stream(client: reqwest::Client, total: Arc<AtomicU64>, stop: Arc<Ato
     }
 }
 
-/// Baseline (unloaded) latency: the minimum of a few small round-trips.
-async fn idle_latency(client: &reqwest::Client) -> Option<f64> {
+async fn idle_latency(client: &reqwest::Client, probe_url: &str) -> Option<f64> {
     let mut best: Option<f64> = None;
     for _ in 0..5 {
-        if let Some(ms) = probe_latency(client).await {
+        if let Some(ms) = probe_latency(client, probe_url).await {
             best = Some(best.map_or(ms, |b| b.min(ms)));
         }
     }
     best
 }
 
-/// One tiny request timed end to end, in milliseconds.
-async fn probe_latency(client: &reqwest::Client) -> Option<f64> {
+async fn probe_latency(client: &reqwest::Client, probe_url: &str) -> Option<f64> {
     let start = Instant::now();
-    let resp = client
-        .get(DOWN_URL)
-        .query(&[("bytes", "1")])
-        .send()
-        .await
-        .ok()?;
+    let resp = client.get(probe_url).send().await.ok()?;
     resp.bytes().await.ok()?;
     Some(start.elapsed().as_secs_f64() * 1000.0)
+}
+
+pub(crate) fn mbps(bytes: u64, elapsed: Duration) -> f64 {
+    let secs = elapsed.as_secs_f64().max(0.001);
+    (bytes as f64 * 8.0) / 1_000_000.0 / secs
 }
 
 fn median(v: &mut [f64]) -> Option<f64> {
@@ -293,14 +386,14 @@ fn median(v: &mut [f64]) -> Option<f64> {
     Some(v[v.len() / 2])
 }
 
-fn set_phase(state: &Arc<Mutex<AppState>>, phase: &str) {
+pub(crate) fn set_phase(state: &Arc<Mutex<AppState>>, phase: &str) {
     let mut s = state.lock().unwrap();
     s.speedtest.phase = phase.to_string();
     s.speedtest.progress = 0.0;
     s.speedtest.live_mbps = 0.0;
 }
 
-fn update(state: &Arc<Mutex<AppState>>, progress: f64, live_mbps: f64) {
+pub(crate) fn update(state: &Arc<Mutex<AppState>>, progress: f64, live_mbps: f64) {
     let mut s = state.lock().unwrap();
     s.speedtest.progress = progress.clamp(0.0, 1.0);
     s.speedtest.live_mbps = live_mbps;

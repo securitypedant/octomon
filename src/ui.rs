@@ -385,8 +385,10 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
     render_speedtest(f, s, rows[0]);
 
     let graphs = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
+    let (ddata, dmax) = spark_floor(&tp.down_hist, graphs[0].width, graphs[0].height);
     let down = Sparkline::default()
-        .data(tp.down_hist.tail_u64(graphs[0].width as usize))
+        .data(ddata)
+        .max(dmax)
         .style(Style::new().fg(Color::Green))
         .block(Block::new().title(Span::styled(
             format!(" ↓ down  {}", fmt_rate(tp.down_bps)),
@@ -394,8 +396,10 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
         )));
     f.render_widget(down, graphs[0]);
 
+    let (udata, umax) = spark_floor(&tp.up_hist, graphs[1].width, graphs[1].height);
     let up = Sparkline::default()
-        .data(tp.up_hist.tail_u64(graphs[1].width as usize))
+        .data(udata)
+        .max(umax)
         .style(Style::new().fg(Color::Magenta))
         .block(Block::new().title(Span::styled(
             format!(" ↑ up    {}", fmt_rate(tp.up_bps)),
@@ -427,6 +431,7 @@ fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect) {
         ])
     };
     let mut lines = vec![
+        kv("provider", if st.provider.is_empty() { "—".into() } else { st.provider.clone() }, Color::Cyan),
         kv("download", fmt_mbps(st.down_mbps), Color::Green),
         kv("upload", fmt_mbps(st.up_mbps), Color::Magenta),
     ];
@@ -449,6 +454,23 @@ fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect) {
         )));
     }
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Sparkline data that guarantees any non-zero sample renders at least one
+/// sub-cell (▁), so low-but-present bandwidth is always visible. Returns the
+/// data plus the explicit max to scale against.
+fn spark_floor(hist: &crate::app::History, width: u16, height: u16) -> (Vec<u64>, u64) {
+    let data = hist.tail_u64(width as usize);
+    let max = data.iter().copied().max().unwrap_or(0);
+    if max == 0 {
+        return (data, 1); // no activity → nothing to show
+    }
+    // A sparkline cell has 8 vertical levels; the smallest visible value is
+    // max / (rows*8). Floor non-zero samples to that so they show a pixel.
+    let levels = (height as u64).saturating_mul(8).max(8);
+    let floor = (max / levels).max(1);
+    let data = data.iter().map(|&v| if v > 0 { v.max(floor) } else { 0 }).collect();
+    (data, max)
 }
 
 /// The speed-test row: a live progress gauge while running, else a status line.
@@ -746,6 +768,10 @@ fn speedtest_line(s: &AppState) -> Line<'static> {
                 .unwrap_or_default();
             let mut spans = vec![
                 label,
+                Span::styled(
+                    format!("{} ", st.provider),
+                    Style::new().fg(Color::Cyan),
+                ),
                 Span::styled(
                     format!("↓ {}", fmt_mbps(st.down_mbps)),
                     Style::new().fg(Color::Green).bold(),
