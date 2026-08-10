@@ -10,6 +10,7 @@ mod config;
 mod platform;
 mod store;
 mod ui;
+mod util;
 
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};

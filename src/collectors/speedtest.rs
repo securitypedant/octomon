@@ -184,14 +184,9 @@ async fn librespeed_pick(
     list_url: &str,
 ) -> Result<HttpSpec, String> {
     set_phase(state, "LibreSpeed · finding server");
-    let text = client
-        .get(list_url)
-        .send()
+    let text = crate::util::fetch_text_capped(client, list_url, 512 * 1024)
         .await
-        .map_err(|e| format!("server list: {e}"))?
-        .text()
-        .await
-        .map_err(|e| format!("server list body: {e}"))?;
+        .map_err(|e| format!("server list: {e}"))?;
     let list: Vec<serde_json::Value> =
         serde_json::from_str(&text).map_err(|e| format!("server list json: {e}"))?;
 
@@ -479,7 +474,8 @@ async fn idle_latency(client: &reqwest::Client, probe_url: &str) -> Option<f64> 
 async fn probe_latency(client: &reqwest::Client, probe_url: &str) -> Option<f64> {
     let start = Instant::now();
     let resp = client.get(probe_url).send().await.ok()?;
-    resp.bytes().await.ok()?;
+    // These endpoints return tiny/empty bodies; cap in case a server misbehaves.
+    crate::util::drain_capped(resp, 64 * 1024).await;
     Some(start.elapsed().as_secs_f64() * 1000.0)
 }
 

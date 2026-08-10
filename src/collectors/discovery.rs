@@ -76,13 +76,10 @@ pub async fn public_ip(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Co
     else {
         return;
     };
-    let Ok(resp) = http.get(&cfg.public_ip_url).send().await else {
+    // Cap the body (an IP is tiny); only accept a clean IP literal.
+    let Ok(text) = crate::util::fetch_text_capped(&http, &cfg.public_ip_url, 4096).await else {
         return;
     };
-    let Ok(text) = resp.text().await else {
-        return;
-    };
-    // Guard against a huge/HTML body; only accept a clean IP literal.
     let Ok(addr) = text.trim().parse::<IpAddr>() else {
         return;
     };
