@@ -12,8 +12,10 @@ installers = ["shell", "homebrew"]
 # Homebrew tap to publish the (binary) formula into
 tap = "securitypedant/homebrew-octomon"
 publish-jobs = ["homebrew"]
-# Target platforms to build apps for. macOS only for v1 (Linux is release 2).
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+# Target platforms to build apps for. Apple Silicon only for v0.1.x; x86 macOS
+# builds cleanly but is unverified on Intel hardware (add once smoke-tested).
+# Linux is release 2.
+targets = ["aarch64-apple-darwin"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # Where to host releases

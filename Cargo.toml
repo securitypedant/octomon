@@ -1,6 +1,6 @@
 [package]
 name = "octomon"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A btop-style terminal dashboard for network performance: latency, bandwidth, per-process usage, and Wi-Fi signal."
 repository = "https://github.com/securitypedant/octomon"
