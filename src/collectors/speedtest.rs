@@ -27,20 +27,25 @@ pub(crate) const TICK: Duration = Duration::from_millis(200);
 pub enum Provider {
     /// Cloudflare base URL.
     Cloudflare(String),
-    /// LibreSpeed backend base URL.
-    LibreSpeed(String),
+    /// LibreSpeed: an explicit backend base URL, or a server-list URL to auto-pick.
+    LibreSpeed {
+        server: Option<String>,
+        list_url: String,
+    },
     /// M-Lab locate service URL.
     Mlab(String),
 }
 
 impl Provider {
-    /// Resolve a provider name against config. LibreSpeed needs a server URL, so
-    /// it is skipped when unset.
+    /// Resolve a provider name against config.
     pub fn from_name(name: &str, cfg: &crate::config::Config) -> Option<Provider> {
         match name.to_lowercase().as_str() {
             "cloudflare" | "cf" => Some(Provider::Cloudflare(cfg.cloudflare_url.clone())),
             "mlab" | "m-lab" | "ndt7" => Some(Provider::Mlab(cfg.mlab_locate_url.clone())),
-            "librespeed" => cfg.librespeed_server.clone().map(Provider::LibreSpeed),
+            "librespeed" => Some(Provider::LibreSpeed {
+                server: cfg.librespeed_server.clone(),
+                list_url: cfg.librespeed_server_list.clone(),
+            }),
             _ => None,
         }
     }
@@ -115,8 +120,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>, cfg: crate::
         let result = match selected.as_deref() {
             Some(name) => match Provider::from_name(name, &cfg) {
                 Some(provider) => run_provider(&client, &state, &provider).await,
-                // Only a known-but-unconfigured provider (LibreSpeed) lands here.
-                None => Err(format!("{name} needs 'librespeed_server' set in config.toml")),
+                None => Err(format!("unknown provider '{name}'")),
             },
             None => Err("no provider selected".to_string()),
         };
@@ -161,9 +165,92 @@ async fn run_provider(
 ) -> Result<Report, String> {
     match provider {
         Provider::Cloudflare(base) => run_http(client, state, cloudflare_spec(base)).await,
-        Provider::LibreSpeed(base) => run_http(client, state, librespeed_spec(base)).await,
+        Provider::LibreSpeed { server, list_url } => {
+            let spec = match server {
+                Some(base) => librespeed_spec(base),
+                None => librespeed_pick(client, state, list_url).await?,
+            };
+            run_http(client, state, spec).await
+        }
         Provider::Mlab(locate) => ndt7::run(client, state, locate).await,
     }
+}
+
+/// Pick a public LibreSpeed server: fetch the list, ping several, use the
+/// lowest-latency responder.
+async fn librespeed_pick(
+    client: &reqwest::Client,
+    state: &Arc<Mutex<AppState>>,
+    list_url: &str,
+) -> Result<HttpSpec, String> {
+    set_phase(state, "LibreSpeed · finding server");
+    let text = client
+        .get(list_url)
+        .send()
+        .await
+        .map_err(|e| format!("server list: {e}"))?
+        .text()
+        .await
+        .map_err(|e| format!("server list body: {e}"))?;
+    let list: Vec<serde_json::Value> =
+        serde_json::from_str(&text).map_err(|e| format!("server list json: {e}"))?;
+
+    // (server, dlURL, ulURL, pingURL) for the first several entries.
+    let cands: Vec<(String, String, String, String)> = list
+        .iter()
+        .filter_map(|e| {
+            let server = e["server"].as_str()?;
+            let server = server
+                .strip_prefix("//")
+                .map(|r| format!("https://{r}"))
+                .unwrap_or_else(|| server.to_string());
+            Some((
+                server,
+                e["dlURL"].as_str()?.to_string(),
+                e["ulURL"].as_str()?.to_string(),
+                e["pingURL"].as_str()?.to_string(),
+            ))
+        })
+        .take(12)
+        .collect();
+    if cands.is_empty() {
+        return Err("no LibreSpeed servers in list".to_string());
+    }
+
+    // Ping each (bounded), pick the fastest responder.
+    let latencies = futures_util::future::join_all(cands.iter().map(|(server, _, _, ping)| {
+        let url = join_url(server, ping);
+        async move {
+            tokio::time::timeout(Duration::from_secs(2), probe_latency(client, &url))
+                .await
+                .ok()
+                .flatten()
+        }
+    }))
+    .await;
+
+    let best = latencies
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| l.map(|ms| (i, ms)))
+        .min_by(|a, b| a.1.total_cmp(&b.1));
+    let (i, _) = best.ok_or("no LibreSpeed server responded")?;
+    let (server, dl, ul, ping) = &cands[i];
+    Ok(HttpSpec {
+        name: "LibreSpeed",
+        down_url: join_url(server, dl),
+        down_param: "ckSize",
+        down_size: 90,
+        up_url: join_url(server, ul),
+        probe_url: join_url(server, ping),
+    })
+}
+
+fn join_url(base: &str, path: &str) -> String {
+    if path.starts_with("http") {
+        return path.to_string();
+    }
+    format!("{}/{}", base.trim_end_matches('/'), path.trim_start_matches('/'))
 }
 
 #[derive(Clone, Copy)]

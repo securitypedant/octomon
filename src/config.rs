@@ -37,10 +37,13 @@ pub struct Config {
     pub cloudflare_url: String,
     /// M-Lab locate service URL (returns a nearby NDT7 server).
     pub mlab_locate_url: String,
-    /// LibreSpeed backend base URL (required to use the "librespeed" provider),
-    /// e.g. "https://example.com/backend".
+    /// Optional LibreSpeed backend base URL to force a specific server, e.g.
+    /// "https://example.com/backend". When unset, a public server is picked
+    /// automatically from `librespeed_server_list`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub librespeed_server: Option<String>,
+    /// LibreSpeed public server-list URL (used when `librespeed_server` is unset).
+    pub librespeed_server_list: String,
 }
 
 impl Default for Config {
@@ -62,6 +65,8 @@ impl Default for Config {
             cloudflare_url: "https://speed.cloudflare.com".to_string(),
             mlab_locate_url: "https://locate.measurementlab.net/v2/nearest/ndt/ndt7".to_string(),
             librespeed_server: None,
+            librespeed_server_list: "https://librespeed.org/backend-servers/servers.json"
+                .to_string(),
         }
     }
 }
