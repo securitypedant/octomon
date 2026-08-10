@@ -2,7 +2,7 @@
 name = "octomon"
 version = "0.1.1"
 edition = "2024"
-description = "A btop-style terminal dashboard for network performance: latency, bandwidth, per-process usage, and Wi-Fi signal."
+description = "Btop-style terminal network monitor: latency, bandwidth, and Wi-Fi signal"
 repository = "https://github.com/securitypedant/octomon"
 homepage = "https://github.com/securitypedant/octomon"
 readme = "README.md"
