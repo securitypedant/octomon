@@ -2,6 +2,7 @@
 //! cadence and writes into the shared [`crate::app::AppState`]. Critical sections
 //! never span an `.await`.
 
+pub mod discovery;
 pub mod netinfo;
 pub mod ping;
 pub mod procbw;

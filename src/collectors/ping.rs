@@ -11,24 +11,27 @@ use surge_ping::{Client, PingIdentifier, PingSequence};
 use crate::app::AppState;
 use crate::config::Config;
 
-/// Spawn a ping loop for a single target index. The identifier must be unique
-/// per socket, so it is derived from the (stable) target index.
+/// Spawn a ping loop for a target identified by its stable `id`. The task looks
+/// the target up by id each tick, so it self-terminates if the target is
+/// removed and is unaffected by other targets being added/deleted.
 pub fn spawn_for(
     state: Arc<Mutex<AppState>>,
     client: Arc<Client>,
     cfg: Config,
-    idx: usize,
+    id: u64,
     addr: IpAddr,
 ) {
     tokio::spawn(async move {
-        let mut pinger = client.pinger(addr, PingIdentifier(idx as u16 + 1)).await;
+        let mut pinger = client
+            .pinger(addr, PingIdentifier((id as u16).wrapping_add(1)))
+            .await;
         pinger.timeout(cfg.ping_timeout());
         let payload = [0u8; 56];
         let mut seq: u16 = 0;
 
         // Stagger targets across the interval so their probes don't all fire on
         // the same tick (which bunches sends and can distort timing).
-        let offset = cfg.ping_interval_ms.saturating_mul(idx as u64 % 10) / 10;
+        let offset = cfg.ping_interval_ms.saturating_mul(id % 10) / 10;
         tokio::time::sleep(std::time::Duration::from_millis(offset)).await;
 
         let mut ticker = tokio::time::interval(cfg.ping_interval());
@@ -37,9 +40,8 @@ pub fn spawn_for(
             seq = seq.wrapping_add(1);
             let result = pinger.ping(PingSequence(seq), &payload).await;
             let mut s = state.lock().unwrap();
-            // Guard against the target list having shrunk (not currently possible,
-            // but keeps this robust against future removals).
-            let Some(target) = s.targets.get_mut(idx) else {
+            // Look up by id; if the target was deleted, end this task.
+            let Some(target) = s.targets.iter_mut().find(|t| t.id == id) else {
                 break;
             };
             match result {
@@ -52,11 +54,11 @@ pub fn spawn_for(
 
 /// Spawn ping loops for all targets currently in the state.
 pub fn spawn_all(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) {
-    let snapshot: Vec<(usize, IpAddr)> = {
+    let snapshot: Vec<(u64, IpAddr)> = {
         let s = state.lock().unwrap();
-        s.targets.iter().enumerate().map(|(i, t)| (i, t.addr)).collect()
+        s.targets.iter().map(|t| (t.id, t.addr)).collect()
     };
-    for (idx, addr) in snapshot {
-        spawn_for(state.clone(), client.clone(), cfg.clone(), idx, addr);
+    for (id, addr) in snapshot {
+        spawn_for(state.clone(), client.clone(), cfg.clone(), id, addr);
     }
 }
