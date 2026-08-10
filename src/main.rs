@@ -553,12 +553,21 @@ fn print_snapshot(s: &AppState) {
 
     let n = &s.netinfo;
     println!("\n[Network]");
-    println!("  iface={}  link={}", n.iface, n.link_kind);
+    println!(
+        "  iface={} ({})  type={} {}",
+        n.iface,
+        n.iface_label,
+        n.medium.label(),
+        n.link_detail
+    );
     println!("  ipv4={:?}", n.ipv4);
     println!(
         "  mac={}  gateway={} ({})",
         n.mac, n.gateway_ip, n.gateway_mac
     );
+    if let Some(t) = n.tunnel_label() {
+        println!("  tunnel={t} — hops beyond the endpoint are encapsulated");
+    }
     println!("  dns={:?}", n.dns);
     if let Some(w) = &n.wifi {
         println!(

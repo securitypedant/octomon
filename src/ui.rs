@@ -7,10 +7,10 @@ use ratatui::style::Modifier;
 use ratatui::symbols::Marker;
 use ratatui::widgets::{
     Axis, Block, Cell, Chart, Clear, Dataset, Gauge, GraphType, LineGauge, Paragraph, Row,
-    Sparkline, Table,
+    Sparkline, Table, Wrap,
 };
 
-use crate::app::{AppState, InputMode, Panel, ProcStatus, SpeedStatus};
+use crate::app::{AppState, InputMode, LinkMedium, Panel, ProcStatus, SpeedStatus};
 
 /// Draw the whole dashboard.
 pub fn render(f: &mut Frame, s: &AppState) {
@@ -306,10 +306,13 @@ fn traceroute_view(f: &mut Frame, s: &AppState, area: Rect) {
         ])
     };
 
-    let rows = inner.height as usize;
-    let body: Vec<Line> = if tr.hops.is_empty() {
+    // A tunnelled default route swallows the intermediate hops, so keep a row
+    // for the explanation rather than leaving a wall of '*' unexplained.
+    let note = tunnel_note(s);
+    let rows = (inner.height as usize).saturating_sub(note.len());
+    let mut body: Vec<Line> = if tr.hops.is_empty() {
         vec![Line::from(Span::styled(
-            "probing…",
+            if tr.running { "probing…" } else { "no hops" },
             Style::new().fg(Color::DarkGray),
         ))]
     } else if tr.hops.len() > rows {
@@ -329,7 +332,20 @@ fn traceroute_view(f: &mut Frame, s: &AppState, area: Rect) {
     } else {
         tr.hops.iter().map(hop_line).collect()
     };
+    body.extend(note);
     f.render_widget(Paragraph::new(body), inner);
+}
+
+/// One-line explanation, shown only when the default route is a tunnel, for why
+/// hops go missing and the gateway looks dead.
+fn tunnel_note(s: &AppState) -> Vec<Line<'static>> {
+    let Some(vendor) = s.netinfo.tunnel_label() else {
+        return Vec::new();
+    };
+    vec![Line::from(Span::styled(
+        format!("⚠ default route is a tunnel ({vendor}) — hops inside it don't answer"),
+        Style::new().fg(Color::Yellow),
+    ))]
 }
 
 /// Latency line chart for the graphed target, with a p95 reference line.
@@ -459,7 +475,7 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let talkers = if s.fullscreen { 10 } else { 5 };
     let talker_h = talkers as u16 + 1; // +1 for the section title
     let rows = Layout::vertical([
-        Constraint::Length(1),        // speedtest status / progress
+        Constraint::Length(speedtest_height(s, inner.width)), // status / progress
         Constraint::Min(6),           // throughput graphs (given the most room)
         Constraint::Length(talker_h), // top talkers pinned to the bottom
     ])
@@ -575,6 +591,24 @@ fn spark_floor(hist: &crate::app::History, width: u16, height: u16) -> (Vec<u64>
     (data, max)
 }
 
+/// Rows to reserve for the speed-test status. A failure gets as many rows as the
+/// message needs to wrap into, so the whole error is readable — more of it in
+/// full-screen, where there is room to spare.
+fn speedtest_height(s: &AppState, width: u16) -> u16 {
+    let SpeedStatus::Failed(e) = &s.speedtest.status else {
+        return 1;
+    };
+    if !s.speedtest_enabled {
+        return 1;
+    }
+    // "speedtest failed: " prefix + message + "  [s] retry" suffix.
+    let chars = 18 + e.chars().count() + 11;
+    let w = width.max(1) as usize;
+    let lines = chars.div_ceil(w) as u16;
+    let cap = if s.fullscreen { 6 } else { 3 };
+    lines.clamp(1, cap)
+}
+
 /// The speed-test row: a live progress gauge while running, else a status line.
 fn render_speedtest(f: &mut Frame, s: &AppState, area: Rect) {
     let st = &s.speedtest;
@@ -598,7 +632,12 @@ fn render_speedtest(f: &mut Frame, s: &AppState, area: Rect) {
             area,
         );
     } else {
-        f.render_widget(Paragraph::new(speedtest_line(s)), area);
+        // Wrap so a long failure reason uses the panel's full width rather than
+        // being clipped at the right edge.
+        f.render_widget(
+            Paragraph::new(speedtest_line(s)).wrap(Wrap { trim: false }),
+            area,
+        );
     }
 }
 
@@ -628,7 +667,7 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
 
     // Header with the column cursor highlighted and a sort-direction arrow.
     let focused = s.focus == Panel::Bandwidth;
-    let labels = ["process", "↓", "↑", "total", "retx"];
+    let labels = ["name", "↓", "↑", "total", "retx"];
     let header = Row::new(labels.iter().enumerate().map(|(i, l)| {
         let mut txt = (*l).to_string();
         if let Some((c, desc)) = s.bw_sort
@@ -698,16 +737,9 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
     f.render_widget(Table::new(rows, widths).header(header), inner);
 }
 
-/// Centered modal listing all keyboard shortcuts.
+/// Centered modal listing all keyboard shortcuts, titled with the running
+/// version so users can report what they're actually on.
 fn help_overlay(f: &mut Frame, area: Rect) {
-    let w = 60u16.min(area.width);
-    let h = 22u16.min(area.height);
-    let rect = Rect {
-        x: area.x + (area.width.saturating_sub(w)) / 2,
-        y: area.y + (area.height.saturating_sub(h)) / 2,
-        width: w,
-        height: h,
-    };
     let row = |k: &str, d: &str| {
         // Pad generously so long key combos keep a gap before the description.
         Line::from(vec![
@@ -757,11 +789,26 @@ fn help_overlay(f: &mut Frame, area: Rect) {
             Style::new().fg(Color::DarkGray),
         )),
     ];
+
+    // Size to the content (plus borders) so no shortcut is cut off; the
+    // terminal is the only cap.
+    let w = 60u16.min(area.width);
+    let h = (lines.len() as u16 + 2).min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+
     f.render_widget(Clear, rect);
     f.render_widget(
         Paragraph::new(lines).block(
             Block::bordered()
-                .title(Span::styled(" Keyboard Shortcuts ", Style::new().bold()))
+                .title(Span::styled(
+                    format!(" octomon v{} · Shortcuts ", env!("CARGO_PKG_VERSION")),
+                    Style::new().bold(),
+                ))
                 .border_style(Style::new().fg(Color::Cyan)),
         ),
         rect,
@@ -800,9 +847,29 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
         return;
     }
 
+    // The OS's own name for the interface ("Wi-Fi", "Thunderbolt Ethernet") is
+    // useful context but only when it isn't just the device name again.
+    let iface = if n.iface_label.is_empty() || n.iface_label == n.iface {
+        n.iface.clone()
+    } else {
+        format!("{}  ({})", n.iface, n.iface_label)
+    };
+    // Medium first, since it decides how everything below should be read; the
+    // OS's extra facts (speed, DHCP) trail behind it, dimmed.
+    let mut type_row = vec![
+        Span::styled(format!("{:<9}", "type"), Style::new().fg(Color::DarkGray)),
+        Span::styled(n.medium.label(), Style::new().fg(medium_color(n.medium))),
+    ];
+    if !n.link_detail.is_empty() {
+        type_row.push(Span::styled(
+            format!(" · {}", n.link_detail),
+            Style::new().fg(Color::Gray),
+        ));
+    }
+
     let mut lines = vec![
-        kv("iface", dash(&n.iface)),
-        kv("link", dash(&n.link_kind)),
+        kv("iface", iface),
+        Line::from(type_row),
         kv(
             "ipv4",
             if n.ipv4.is_empty() {
@@ -820,19 +887,47 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
             },
         ),
         kv("mac", dash(&n.mac)),
-        kv(
+    ];
+
+    // A tunnelled default route hides the real path: the encapsulated hops never
+    // answer ICMP, so an unreachable gateway and an empty traceroute are expected
+    // rather than a fault. Say so instead of leaving a bare red address.
+    if let Some(vendor) = n.tunnel_label() {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<9}", "tunnel"), Style::new().fg(Color::DarkGray)),
+            Span::styled(vendor, Style::new().fg(Color::Yellow).bold()),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<9}", "gateway"),
+                Style::new().fg(Color::DarkGray),
+            ),
+            Span::raw(format!(
+                "{}  ({})",
+                dash(&n.gateway_ip),
+                dash(&n.gateway_mac)
+            )),
+        ]));
+        lines.push(Line::from(Span::styled(
+            "         tunnel endpoint — hops beyond it are encapsulated",
+            Style::new().fg(Color::DarkGray),
+        )));
+    } else {
+        lines.push(kv(
             "gateway",
             format!("{}  ({})", dash(&n.gateway_ip), dash(&n.gateway_mac)),
-        ),
-        kv(
-            "dns",
-            if n.dns.is_empty() {
-                "-".into()
-            } else {
-                n.dns.join(", ")
-            },
-        ),
-    ];
+        ));
+    }
+
+    lines.push(kv(
+        "dns",
+        if n.dns.is_empty() {
+            "-".into()
+        } else {
+            n.dns.join(", ")
+        },
+    ));
+
     if let Some(w) = &n.wifi {
         // Live signal/tx come from the CoreWLAN graph below; keep the slower
         // system_profiler details (SSID / PHY / channel) here.
@@ -841,24 +936,41 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
             "wifi",
             format!("{}  ch {}", dash(&w.phy), dash(&w.channel)),
         ));
-    } else if n.link_kind.contains("Wi-Fi") || n.link_kind.contains("Wireless") {
+    } else if n.medium == LinkMedium::WiFi {
         lines.push(Line::from(Span::styled(
             "gathering Wi-Fi details…",
             Style::new().fg(Color::DarkGray),
         )));
     }
 
-    // Reserve space at the bottom for the live signal graph when on Wi-Fi.
-    let (info_area, graph_area) = if s.signal.present {
+    // The radio can be associated while traffic goes elsewhere; say so, because
+    // the signal graph below is deliberately suppressed in that case.
+    if s.signal.present && matches!(n.medium, LinkMedium::Ethernet | LinkMedium::Bridge) {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "         Wi-Fi associated ({} dBm) but not the primary route",
+                s.signal.rssi_dbm
+            ),
+            Style::new().fg(Color::DarkGray),
+        )));
+    }
+
+    // Reserve space at the bottom for whichever link graph applies.
+    let graph = link_graph(s);
+    let (info_area, graph_area) = if graph == LinkGraph::None {
+        (inner, None)
+    } else {
         let p = Layout::vertical([Constraint::Min(4), Constraint::Length(5)]).split(inner);
         (p[0], Some(p[1]))
-    } else {
-        (inner, None)
     };
 
     f.render_widget(Paragraph::new(lines), info_area);
     if let Some(ga) = graph_area {
-        signal_graph(f, s, ga);
+        match graph {
+            LinkGraph::Signal => signal_graph(f, s, ga),
+            LinkGraph::Utilisation => link_util_graph(f, s, ga),
+            LinkGraph::None => {}
+        }
     }
 
     // Transient "re-probing" note pinned to the bottom of the info area.
@@ -877,6 +989,102 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
             bottom,
         );
     }
+}
+
+/// Which link chart the Network panel should draw for the current medium.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum LinkGraph {
+    /// Wi-Fi RSSI + tx rate.
+    Signal,
+    /// Wired link utilisation against negotiated capacity.
+    Utilisation,
+    None,
+}
+
+/// Radio metrics only make sense when the radio actually carries the traffic:
+/// an associated Wi-Fi card is irrelevant while the default route is a cable.
+/// A tunnel is layered over some physical link, so the radio (if associated) is
+/// still the real bottleneck and its graph stays useful.
+fn link_graph(s: &AppState) -> LinkGraph {
+    match s.netinfo.medium {
+        LinkMedium::WiFi | LinkMedium::Unknown if s.signal.present => LinkGraph::Signal,
+        LinkMedium::Tunnel if s.signal.present => LinkGraph::Signal,
+        m if m.is_wired() => LinkGraph::Utilisation,
+        _ => LinkGraph::None,
+    }
+}
+
+/// The wired counterpart to the Wi-Fi signal graph: how much of the negotiated
+/// link capacity is in use. There is no RSSI on copper — headroom against line
+/// rate is the equivalent "how healthy is this link" signal, and it is what
+/// tells you whether the cable or something upstream is the limit.
+fn link_util_graph(f: &mut Frame, s: &AppState, area: Rect) {
+    let tp = &s.throughput;
+    let want = (area.width as usize).saturating_mul(2).max(20);
+    let tail = |h: &crate::app::History| -> Vec<f64> {
+        let skip = h.data.len().saturating_sub(want);
+        h.data.iter().skip(skip).copied().collect()
+    };
+    let down = tail(&tp.down_hist);
+    let up = tail(&tp.up_hist);
+    let len = down.len().min(up.len());
+    if len == 0 {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                " link utilisation — collecting…",
+                Style::new().fg(Color::DarkGray),
+            )),
+            area,
+        );
+        return;
+    }
+
+    // Byte counters → percent of line rate. Without a reported line rate, fall
+    // back to scaling against the observed peak and say so in the title.
+    let cap_bps = s.netinfo.link_speed_bps.filter(|b| *b > 0);
+    let peak = down
+        .iter()
+        .chain(up.iter())
+        .copied()
+        .fold(1.0_f64, f64::max)
+        * 8.0;
+    let scale = cap_bps.map(|b| b as f64).unwrap_or(peak);
+    let pct = |bytes_per_sec: f64| (bytes_per_sec * 8.0 / scale * 100.0).clamp(0.0, 100.0);
+
+    let dpts: Vec<(f64, f64)> = (0..len).map(|i| (i as f64, pct(down[i]))).collect();
+    let upts: Vec<(f64, f64)> = (0..len).map(|i| (i as f64, pct(up[i]))).collect();
+    let xmax = (len - 1).max(1) as f64;
+
+    let (dnow, unow) = (pct(tp.down_bps), pct(tp.up_bps));
+    let title = match cap_bps {
+        Some(b) => format!(
+            " link {} Mb · ↓ {dnow:.1}% ↑ {unow:.1}% of capacity ",
+            b / 1_000_000
+        ),
+        None => format!(" link load (line rate unknown) · ↓ {dnow:.0}% ↑ {unow:.0}% of peak "),
+    };
+
+    let datasets = vec![
+        Dataset::default()
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::new().fg(Color::Green))
+            .data(&dpts),
+        Dataset::default()
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::new().fg(Color::Magenta))
+            .data(&upts),
+    ];
+    let chart = Chart::new(datasets)
+        .block(Block::new().title(Span::styled(title, Style::new().fg(Color::DarkGray))))
+        .x_axis(Axis::default().bounds([0.0, xmax]))
+        .y_axis(
+            Axis::default()
+                .bounds([0.0, 100.0])
+                .labels([Line::from("0"), Line::from("100%")]),
+        );
+    f.render_widget(chart, area);
 }
 
 /// Live Wi-Fi signal sparkline (RSSI, higher = better) with current tx rate.
@@ -1050,11 +1258,12 @@ fn speedtest_line(s: &AppState) -> Line<'static> {
             Line::from(spans)
         }
         SpeedStatus::Failed(e) => {
-            // Surface the reason; flag rate limiting explicitly.
+            // Surface the reason in full (the paragraph wraps to the panel
+            // width); flag rate limiting explicitly.
             let msg = if e.contains("rate-limit") || e.contains("429") {
                 "rate-limited — wait a moment".to_string()
             } else {
-                e.chars().take(48).collect()
+                e.clone()
             };
             Line::from(vec![
                 label,
@@ -1119,6 +1328,16 @@ fn latency_color(last: Option<f64>, loss: f64) -> Color {
     }
 }
 
+/// Colour the link type so a tunnelled default route stands out — it changes how
+/// every other reading on the panel should be read.
+fn medium_color(m: LinkMedium) -> Color {
+    match m {
+        LinkMedium::Tunnel => Color::Yellow,
+        LinkMedium::Unknown => Color::DarkGray,
+        _ => Color::White,
+    }
+}
+
 fn usage_color(pct: f32) -> Color {
     if pct >= 85.0 {
         Color::Red
@@ -1126,5 +1345,96 @@ fn usage_color(pct: f32) -> Color {
         Color::Yellow
     } else {
         Color::Green
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::LinkMedium;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// Render into an off-screen buffer and return it as one searchable string.
+    fn draw(s: &AppState, w: u16, h: u16) -> String {
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| render(f, s)).unwrap();
+        t.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    fn state_with_medium(medium: LinkMedium) -> AppState {
+        let mut s = AppState::new(vec![]);
+        s.netinfo.iface = "en0".to_string();
+        s.netinfo.medium = medium;
+        s
+    }
+
+    #[test]
+    fn network_panel_names_the_connection_type() {
+        let s = state_with_medium(LinkMedium::Ethernet);
+        assert!(draw(&s, 200, 60).contains("Ethernet (wired)"));
+    }
+
+    #[test]
+    fn signal_graph_only_when_the_radio_carries_traffic() {
+        // Wired primary with the radio still associated: no signal graph, but a
+        // utilisation graph instead.
+        let mut wired = state_with_medium(LinkMedium::Ethernet);
+        wired.signal.present = true;
+        wired.signal.rssi_dbm = -55;
+        assert_eq!(link_graph(&wired), LinkGraph::Utilisation);
+        let out = draw(&wired, 200, 60);
+        assert!(!out.contains("signal -55 dBm"));
+        assert!(out.contains("not the primary route"));
+
+        // Wi-Fi primary: the signal graph is the right one.
+        let mut wifi = state_with_medium(LinkMedium::WiFi);
+        wifi.signal.present = true;
+        assert_eq!(link_graph(&wifi), LinkGraph::Signal);
+
+        // No radio and no wired capacity to chart: no graph at all.
+        assert_eq!(
+            link_graph(&state_with_medium(LinkMedium::WiFi)),
+            LinkGraph::None
+        );
+    }
+
+    #[test]
+    fn help_shows_the_version_and_fits_its_content() {
+        let mut s = AppState::new(vec![]);
+        s.show_help = true;
+        let out = draw(&s, 200, 60);
+        assert!(out.contains(&format!("octomon v{}", env!("CARGO_PKG_VERSION"))));
+        // The last section used to fall off the bottom of a fixed 22-row box.
+        assert!(out.contains("press ? or Esc to close"));
+    }
+
+    #[test]
+    fn tunnel_is_called_out() {
+        let mut s = state_with_medium(LinkMedium::Tunnel);
+        s.netinfo.tunnel = Some("Cloudflare WARP".to_string());
+        s.netinfo.gateway_ip = "172.16.0.1".to_string();
+        let out = draw(&s, 200, 60);
+        assert!(out.contains("Cloudflare WARP"));
+        assert!(out.contains("Tunnel (VPN)"));
+        assert!(out.contains("encapsulated"));
+    }
+
+    #[test]
+    fn failed_speedtest_gets_rows_for_the_whole_message() {
+        let msg = "Cloudflare download failed: error sending request for url \
+                   (https://speed.cloudflare.com/__down): connection closed before message completed";
+        let mut s = AppState::new(vec![]);
+        s.speedtest.status = SpeedStatus::Failed(msg.to_string());
+        // A narrow panel needs several rows; a wide one needs fewer.
+        assert!(speedtest_height(&s, 40) > speedtest_height(&s, 160));
+        assert!(speedtest_height(&s, 40) > 1);
+        // The tail of the message survives rather than being clipped at 48 chars.
+        assert!(draw(&s, 200, 60).contains("connection closed before message completed"));
     }
 }

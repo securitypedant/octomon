@@ -21,8 +21,13 @@ Four panels, all updating live, all **unprivileged** (no `sudo`):
   choice of provider (**Cloudflare / M-Lab / LibreSpeed**), and **per-process**
   talkers showing which apps are using the network (with retransmit rate and
   session totals).
-- **Network** — interface, IP/DHCP, gateway, DNS, link type, Wi-Fi SSID/PHY/
-  channel, plus a **live Wi-Fi signal graph** (RSSI / noise / tx-rate).
+- **Network** — interface, **connection type** (Wi-Fi / Ethernet / cellular /
+  VPN tunnel), IP/DHCP, gateway, DNS, Wi-Fi SSID/PHY/channel, and a link graph
+  matched to the medium: a **live Wi-Fi signal graph** (RSSI / noise / tx-rate)
+  on wireless, or **link utilisation against negotiated capacity** on a cable.
+  A **tunnelled default route** (Cloudflare WARP, Tailscale, WireGuard…) is
+  detected and named, so missing traceroute hops and an unreachable gateway
+  read as "the VPN is encapsulating the path" rather than a fault.
 - **Machine** — CPU and memory, framed only as a "is my box the bottleneck?"
   signal.
 

@@ -296,6 +296,43 @@ pub struct WifiInfo {
     pub tx_rate: String,
 }
 
+/// How the default-route interface actually carries traffic. Drives which
+/// metrics make sense to show: radio signal for Wi-Fi, link utilisation for a
+/// wired link, a tunnel warning for a VPN.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkMedium {
+    #[default]
+    Unknown,
+    WiFi,
+    Ethernet,
+    Cellular,
+    /// Default route runs through a VPN / tunnel device (utun, wg, ppp…).
+    Tunnel,
+    Loopback,
+    Bridge,
+}
+
+impl LinkMedium {
+    /// Human label for the Network panel.
+    pub fn label(self) -> &'static str {
+        match self {
+            LinkMedium::WiFi => "Wi-Fi (wireless)",
+            LinkMedium::Ethernet => "Ethernet (wired)",
+            LinkMedium::Cellular => "Cellular (WWAN)",
+            LinkMedium::Tunnel => "Tunnel (VPN)",
+            LinkMedium::Loopback => "Loopback",
+            LinkMedium::Bridge => "Bridge (wired)",
+            LinkMedium::Unknown => "unknown",
+        }
+    }
+
+    /// True for a cabled link, where radio metrics don't apply but negotiated
+    /// link speed does.
+    pub fn is_wired(self) -> bool {
+        matches!(self, LinkMedium::Ethernet | LinkMedium::Bridge)
+    }
+}
+
 /// Basic network identity: addresses, gateway, link.
 #[derive(Clone, Default)]
 pub struct NetInfo {
@@ -305,12 +342,36 @@ pub struct NetInfo {
     pub mac: String,
     pub gateway_ip: String,
     pub gateway_mac: String,
+    /// The OS's friendly name for the interface ("Wi-Fi", "Thunderbolt
+    /// Ethernet Slot 0"), when it reports one.
+    pub iface_label: String,
     /// DNS resolver addresses for this interface.
     pub dns: Vec<String>,
-    /// e.g. "Wi-Fi", "Ethernet", "Loopback" — best-effort.
-    pub link_kind: String,
+    /// Extra link facts the OS exposes — negotiated speed, DHCP — shown after
+    /// the medium. Empty when nothing is known.
+    pub link_detail: String,
+    /// Classified medium of the default route.
+    pub medium: LinkMedium,
+    /// Negotiated link speed in bits/sec, when the OS reports it.
+    pub link_speed_bps: Option<u64>,
+    /// Set when the default route is a tunnel device. Carries the VPN's name
+    /// when it can be identified (e.g. "Cloudflare WARP"), else empty.
+    pub tunnel: Option<String>,
     /// Present when the default interface is Wi-Fi and details are available.
     pub wifi: Option<WifiInfo>,
+}
+
+impl NetInfo {
+    /// Tunnel description for display: the vendor when known, else generic.
+    pub fn tunnel_label(&self) -> Option<String> {
+        self.tunnel.as_ref().map(|v| {
+            if v.is_empty() {
+                "unidentified VPN / tunnel".to_string()
+            } else {
+                v.clone()
+            }
+        })
+    }
 }
 
 /// Live Wi-Fi signal, sampled frequently (CoreWLAN on macOS) for graphing.
