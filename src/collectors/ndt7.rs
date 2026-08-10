@@ -48,14 +48,9 @@ pub async fn run(
 
 /// Ask the locate service for a server, returning (download_url, upload_url).
 async fn locate(client: &reqwest::Client, locate_url: &str) -> Result<(String, String), String> {
-    let text = client
-        .get(locate_url)
-        .send()
+    let text = crate::util::fetch_text_capped(client, locate_url, 256 * 1024)
         .await
-        .map_err(|e| format!("locate: {e}"))?
-        .text()
-        .await
-        .map_err(|e| format!("locate body: {e}"))?;
+        .map_err(|e| format!("locate: {e}"))?;
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("locate json: {e}"))?;
 
