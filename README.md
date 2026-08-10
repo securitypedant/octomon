@@ -112,10 +112,35 @@ per-process bandwidth reads `nettop`; Wi-Fi signal reads CoreWLAN directly; the
 rest comes from `sysinfo` and `netdev`. Latency is validated to match the
 system `ping`, so the jitter you see is the network's, not the tool's.
 
+## Network & privacy
+
+octomon is a read-only monitor, but as a *network* tool it does make outbound
+requests. For transparency, here's everything it contacts and why:
+
+| Endpoint | When | Why | Data sent |
+|----------|------|-----|-----------|
+| Your configured ICMP targets (default 1.1.1.1, 8.8.8.8, 9.9.9.9) | continuously | latency/loss | ICMP echo |
+| `api.ipify.org` | once at startup | discover your public IP to add as a target | none (a GET) |
+| `speed.cloudflare.com` | only when you press `s` (Cloudflare provider) | speed test | filler bytes |
+| `locate.measurementlab.net` + a nearby M-Lab server | only when you press `s` (M-Lab provider) | speed test | filler bytes |
+| `librespeed.org` server list + a public LibreSpeed server | only when you press `s` (LibreSpeed provider) | speed test | filler bytes |
+
+Notes:
+
+- **Speed tests are on-demand only** — octomon never runs them automatically, so
+  it won't hammer public infrastructure.
+- Third-party responses are read with a hard size cap.
+- Nothing is sent to any octomon-operated service (there isn't one), and no
+  telemetry is collected.
+- Turn off public-IP discovery with `public_ip_url = ""`, or swap any endpoint,
+  in `~/.config/octomon/config.toml`.
+
 ## Contributing
 
-Issues and PRs welcome. `cargo fmt`, `cargo clippy`, and `cargo test` should all
-be clean (CI enforces this).
+Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). `cargo fmt`,
+`cargo clippy`, and `cargo test` should all be clean (CI enforces this). Please
+follow the [Code of Conduct](CODE_OF_CONDUCT.md); report security issues per
+[SECURITY.md](SECURITY.md).
 
 ## License
 
