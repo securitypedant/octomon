@@ -80,11 +80,13 @@ async fn main() -> Result<()> {
         .collect();
     let state = Arc::new(Mutex::new(AppState::new(targets)));
     {
-        // Available speed-test providers (LibreSpeed only if a server is set).
-        let mut provider_names = vec!["Cloudflare".to_string(), "M-Lab".to_string()];
-        if cfg.librespeed_server.is_some() {
-            provider_names.push("LibreSpeed".to_string());
-        }
+        // All providers are selectable; LibreSpeed reports a hint if it has no
+        // server configured when actually run.
+        let provider_names = vec![
+            "Cloudflare".to_string(),
+            "M-Lab".to_string(),
+            "LibreSpeed".to_string(),
+        ];
         let norm = |s: &str| s.to_lowercase().replace('-', "");
         let sel = provider_names
             .iter()
