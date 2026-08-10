@@ -44,6 +44,9 @@ pub struct Config {
     pub librespeed_server: Option<String>,
     /// LibreSpeed public server-list URL (used when `librespeed_server` is unset).
     pub librespeed_server_list: String,
+    /// Public-IP discovery endpoint (plain-text IP response). Added as a target
+    /// on startup. Set to "" to disable.
+    pub public_ip_url: String,
 }
 
 impl Default for Config {
@@ -67,6 +70,7 @@ impl Default for Config {
             librespeed_server: None,
             librespeed_server_list: "https://librespeed.org/backend-servers/servers.json"
                 .to_string(),
+            public_ip_url: "https://api.ipify.org".to_string(),
         }
     }
 }

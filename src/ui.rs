@@ -882,33 +882,61 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
 /// Live Wi-Fi signal sparkline (RSSI, higher = better) with current tx rate.
 fn signal_graph(f: &mut Frame, s: &AppState, area: Rect) {
     let sig = &s.signal;
-    let color = match sig.rssi_dbm {
+    let sig_color = match sig.rssi_dbm {
         r if r >= -60 => Color::Green,
         r if r >= -72 => Color::Yellow,
         _ => Color::Red,
     };
     let title = format!(
-        " signal {} dBm · noise {} · tx {:.0} Mbps ",
-        sig.rssi_dbm, sig.noise_dbm, sig.tx_rate_mbps
+        " signal {} dBm ({}) · tx {:.0} Mbps (cyan) ",
+        sig.rssi_dbm,
+        match sig_color {
+            Color::Green => "green",
+            Color::Yellow => "yellow",
+            _ => "red",
+        },
+        sig.tx_rate_mbps,
     );
-    // Map RSSI (~-30 best … -100 worst) to a positive bar; fixed max so bar
-    // height reflects absolute signal quality.
-    let data: Vec<u64> = {
-        let take = area.width as usize;
-        let skip = sig.rssi_hist.data.len().saturating_sub(take);
-        sig.rssi_hist
-            .data
-            .iter()
-            .skip(skip)
-            .map(|&d| (d + 110.0).max(0.0) as u64)
-            .collect()
+
+    // Both series share a normalised 0..1 y-axis so their trends overlay: RSSI
+    // as signal quality (−30 best … −100 worst); tx-rate against its own peak.
+    let want = (area.width as usize).saturating_mul(2).max(20);
+    let tail = |h: &crate::app::History| -> Vec<f64> {
+        let skip = h.data.len().saturating_sub(want);
+        h.data.iter().skip(skip).copied().collect()
     };
-    let spark = Sparkline::default()
-        .max(80)
-        .data(data)
-        .style(Style::new().fg(color))
-        .block(Block::new().title(Span::styled(title, Style::new().fg(Color::DarkGray))));
-    f.render_widget(spark, area);
+    let rssi = tail(&sig.rssi_hist);
+    let tx = tail(&sig.tx_hist);
+    let len = rssi.len().min(tx.len());
+    if len == 0 {
+        return;
+    }
+    let tx_max = tx.iter().copied().fold(1.0_f64, f64::max);
+    let sig_pts: Vec<(f64, f64)> = (0..len)
+        .map(|i| (i as f64, ((rssi[i] + 100.0) / 70.0).clamp(0.0, 1.0)))
+        .collect();
+    let tx_pts: Vec<(f64, f64)> = (0..len)
+        .map(|i| (i as f64, (tx[i] / tx_max).clamp(0.0, 1.0)))
+        .collect();
+    let xmax = (len - 1).max(1) as f64;
+
+    let datasets = vec![
+        Dataset::default()
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::new().fg(sig_color))
+            .data(&sig_pts),
+        Dataset::default()
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::new().fg(Color::Cyan))
+            .data(&tx_pts),
+    ];
+    let chart = Chart::new(datasets)
+        .block(Block::new().title(Span::styled(title, Style::new().fg(Color::DarkGray))))
+        .x_axis(Axis::default().bounds([0.0, xmax]))
+        .y_axis(Axis::default().bounds([0.0, 1.05]));
+    f.render_widget(chart, area);
 }
 
 fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {

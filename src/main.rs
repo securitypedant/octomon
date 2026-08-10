@@ -115,9 +115,14 @@ async fn main() -> Result<()> {
     };
     if let Some(client) = ping_client.clone() {
         collectors::ping::spawn_all(state.clone(), client.clone(), cfg.clone());
-        // Auto-discover the gateway + next hops as targets (skipped in --check).
+        // Auto-discover the gateway + next hops, and the public IP, as targets.
         if !cli.check {
             tokio::spawn(collectors::discovery::run(
+                state.clone(),
+                client.clone(),
+                cfg.clone(),
+            ));
+            tokio::spawn(collectors::discovery::public_ip(
                 state.clone(),
                 client,
                 cfg.clone(),

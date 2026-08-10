@@ -63,6 +63,47 @@ pub async fn run(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) 
     }
 }
 
+/// Discover the machine's public IP from `cfg.public_ip_url` (a plain-text IP
+/// endpoint) and add it as a target. No-op if the URL is empty or the response
+/// isn't a valid IP.
+pub async fn public_ip(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) {
+    if cfg.public_ip_url.trim().is_empty() {
+        return;
+    }
+    let Ok(http) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    else {
+        return;
+    };
+    let Ok(resp) = http.get(&cfg.public_ip_url).send().await else {
+        return;
+    };
+    let Ok(text) = resp.text().await else {
+        return;
+    };
+    // Guard against a huge/HTML body; only accept a clean IP literal.
+    let Ok(addr) = text.trim().parse::<IpAddr>() else {
+        return;
+    };
+
+    let (id, added) = {
+        let mut s = state.lock().unwrap();
+        if s.targets.iter().any(|t| t.addr == addr) {
+            (0, false)
+        } else {
+            let mut t = TargetStat::new("public IP".to_string(), addr);
+            t.discovered = true;
+            let id = t.id;
+            s.targets.push(t);
+            (id, true)
+        }
+    };
+    if added {
+        ping::spawn_for(state, client, cfg, id, addr);
+    }
+}
+
 /// Parse a hop line, returning (ttl, addr) only for hops that responded.
 fn parse_hop(line: &str) -> Option<(u8, IpAddr)> {
     let mut it = line.split_whitespace();
