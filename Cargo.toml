@@ -35,3 +35,8 @@ tracing-subscriber = "0.3.23"
 objc2 = "0.6.4"
 objc2-core-wlan = "0.3.2"
 objc2-foundation = "0.3.2"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
