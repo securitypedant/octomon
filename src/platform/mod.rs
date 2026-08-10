@@ -26,6 +26,25 @@ pub async fn proc_net_sample() -> Option<Vec<ProcSample>> {
     None
 }
 
+/// Live Wi-Fi signal metrics (fast, unprivileged; RSSI/noise/tx-rate don't
+/// require location permission — only SSID/BSSID do).
+pub struct WifiSignal {
+    pub rssi_dbm: i32,
+    pub noise_dbm: i32,
+    pub tx_rate_mbps: f64,
+}
+
+/// Sample the current Wi-Fi signal. `None` when not on Wi-Fi or unsupported.
+#[cfg(target_os = "macos")]
+pub fn wifi_signal() -> Option<WifiSignal> {
+    macos::wifi_signal()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn wifi_signal() -> Option<WifiSignal> {
+    None
+}
+
 /// Wi-Fi details for the active connection, when available.
 #[cfg(target_os = "macos")]
 pub async fn wifi_details() -> Option<WifiInfo> {
@@ -44,8 +63,30 @@ pub async fn wifi_details() -> Option<WifiInfo> {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::ProcSample;
+    use super::{ProcSample, WifiSignal};
     use crate::app::WifiInfo;
+
+    /// Read RSSI / noise / tx-rate via CoreWLAN. Returns `None` when there is no
+    /// associated Wi-Fi interface. `rssiValue()` is 0 when not associated.
+    pub fn wifi_signal() -> Option<WifiSignal> {
+        use objc2_core_wlan::CWWiFiClient;
+        // SAFETY: standard CoreWLAN read-only accessors on the shared client's
+        // default interface; all return values are owned/primitive.
+        unsafe {
+            let client = CWWiFiClient::sharedWiFiClient();
+            let iface = client.interface()?;
+            let rssi = iface.rssiValue() as i32;
+            let tx = iface.transmitRate();
+            if rssi == 0 && tx == 0.0 {
+                return None; // not associated
+            }
+            Some(WifiSignal {
+                rssi_dbm: rssi,
+                noise_dbm: iface.noiseMeasurement() as i32,
+                tx_rate_mbps: tx,
+            })
+        }
+    }
 
     /// One-shot per-process cumulative counters via `nettop`. Note: passing `-s`
     /// makes nettop reject the arg set and print usage, so it is omitted; `-L 1`

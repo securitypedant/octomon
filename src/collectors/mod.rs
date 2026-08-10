@@ -7,6 +7,7 @@ pub mod ndt7;
 pub mod netinfo;
 pub mod ping;
 pub mod procbw;
+pub mod signal;
 pub mod speedtest;
 pub mod throughput;
 pub mod traceroute;

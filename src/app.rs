@@ -306,6 +306,17 @@ pub struct NetInfo {
     pub wifi: Option<WifiInfo>,
 }
 
+/// Live Wi-Fi signal, sampled frequently (CoreWLAN on macOS) for graphing.
+#[derive(Clone, Default)]
+pub struct SignalState {
+    pub present: bool,
+    pub rssi_dbm: i32,
+    pub noise_dbm: i32,
+    pub tx_rate_mbps: f64,
+    pub rssi_hist: History,
+    pub tx_hist: History,
+}
+
 /// Machine vitals, framed only as a "is my box the bottleneck?" signal.
 #[derive(Clone, Default)]
 pub struct Vitals {
@@ -436,6 +447,7 @@ pub struct AppState {
     pub throughput: Throughput,
     pub speedtest: SpeedTest,
     pub netinfo: NetInfo,
+    pub signal: SignalState,
     pub vitals: Vitals,
     pub focus: Panel,
     /// When set, the focused panel is drawn full-screen instead of the 2x2 grid.
@@ -497,6 +509,7 @@ impl AppState {
             throughput: Throughput::default(),
             speedtest: SpeedTest::default(),
             netinfo: NetInfo::default(),
+            signal: SignalState::default(),
             vitals: Vitals::default(),
             focus: Panel::Quality,
             fullscreen: false,

@@ -126,6 +126,7 @@ async fn main() -> Result<()> {
     tokio::spawn(collectors::vitals::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::netinfo::run(state.clone(), netinfo_refresh.clone()));
     tokio::spawn(collectors::wifi::run(state.clone(), netinfo_refresh.clone()));
+    tokio::spawn(collectors::signal::run(state.clone()));
     tokio::spawn(collectors::procbw::run(state.clone()));
     if !cli.no_speedtest {
         tokio::spawn(collectors::speedtest::run(
@@ -533,6 +534,16 @@ fn print_snapshot(s: &AppState) {
         println!(
             "  wifi: ssid={} phy={} ch={} signal={} tx={}",
             w.ssid, w.phy, w.channel, w.rssi, w.tx_rate
+        );
+    }
+    let sig = &s.signal;
+    if sig.present {
+        println!(
+            "  live signal (CoreWLAN): rssi={} dBm  noise={} dBm  tx={:.0} Mbps  ({} samples)",
+            sig.rssi_dbm,
+            sig.noise_dbm,
+            sig.tx_rate_mbps,
+            sig.rssi_hist.data.len()
         );
     }
 
