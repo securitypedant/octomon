@@ -202,9 +202,9 @@ fn block(title: &str, focused: bool) -> Block<'static> {
 }
 
 fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
-    let b = block("Connection Quality", s.focus == Panel::Quality);
-    let inner = b.inner(area);
-    f.render_widget(b, area);
+    // The border is a fixed inset, so the inner rect is known before the title
+    // is — and the title needs the scroll counts, which depend on the layout.
+    let inner = block("", false).inner(area);
 
     // The path views need the room, so the target table shrinks to a summary.
     let bottom_h = if s.fullscreen { 12 } else { 6 };
@@ -313,29 +313,21 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         Constraint::Length(8),
         Constraint::Length(6),
     ];
-    f.render_widget(Table::new(rows, widths).header(header), parts[1]);
-
-    // Tell the user the list continues rather than just cutting it off.
+    // Scroll counts live in the title: overlaying them on the header row
+    // clobbered whichever column happened to sit under them.
+    let mut title = "Connection Quality".to_string();
     if hidden_above > 0 || hidden_below > 0 {
-        let mut parts_txt = Vec::new();
+        title.push_str(" · ");
         if hidden_above > 0 {
-            parts_txt.push(format!("↑{hidden_above}"));
+            title.push_str(&format!("↑{hidden_above} "));
         }
         if hidden_below > 0 {
-            parts_txt.push(format!("↓{hidden_below}"));
+            title.push_str(&format!("↓{hidden_below} "));
         }
-        let txt = format!(" {} more ", parts_txt.join(" "));
-        let x = parts[1].x + parts[1].width.saturating_sub(txt.len() as u16 + 1);
-        f.render_widget(
-            Paragraph::new(Span::styled(txt, Style::new().fg(Color::Yellow))),
-            Rect {
-                x,
-                y: parts[1].y,
-                width: parts[1].width.min(14),
-                height: 1,
-            },
-        );
+        title.push_str("more");
     }
+    f.render_widget(block(&title, s.focus == Panel::Quality), area);
+    f.render_widget(Table::new(rows, widths).header(header), parts[1]);
 
     match s.quality_view {
         QualityView::Graph => latency_graph(f, s, n, parts[2]),
