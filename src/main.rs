@@ -22,7 +22,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use surge_ping::Client;
 use tokio::sync::{Notify, mpsc};
 
-use app::{AppState, InputMode, Panel, QualityView, SpeedStatus, TargetStat};
+use app::{AppState, InputMode, Panel, QualityView, SpeedStatus, SubPane, TargetStat};
 use config::Config;
 
 /// Handles shared with the input loop for issuing side effects.
@@ -264,22 +264,32 @@ enum Side {
     SaveProvider(String),
 }
 
-/// Move whichever cursor the Connection Quality panel is currently showing: the
-/// hop list when monitoring a path, otherwise the target list.
-fn move_quality_cursor(s: &mut AppState, delta: isize) {
-    if s.quality_view == QualityView::HopMonitor
-        && let Some(m) = s.hop_monitor.as_mut()
-    {
-        let last = m.hops.len().saturating_sub(1) as isize;
-        m.selected = (m.selected as isize + delta).clamp(0, last.max(0)) as usize;
-        return;
+/// Move whichever cursor holds focus: the sub-pane's when one is active,
+/// otherwise the panel's primary list.
+fn move_cursor(s: &mut AppState, delta: isize) {
+    let secondary = s.sub_pane == SubPane::Secondary;
+    match s.focus {
+        Panel::Quality if secondary => {
+            if let Some(m) = s.hop_monitor.as_mut() {
+                let last = m.hops.len().saturating_sub(1) as isize;
+                m.selected = (m.selected as isize + delta).clamp(0, last.max(0)) as usize;
+            }
+        }
+        Panel::Quality => {
+            let order = s.quality_order();
+            let Some(pos) = order.iter().position(|&i| i == s.selected) else {
+                return;
+            };
+            let new =
+                (pos as isize + delta).clamp(0, order.len().saturating_sub(1) as isize) as usize;
+            s.selected = order[new];
+        }
+        Panel::Bandwidth if secondary => {
+            let last = s.speed_history.len().saturating_sub(1) as isize;
+            s.speed_sel = (s.speed_sel as isize + delta).clamp(0, last.max(0)) as usize;
+        }
+        _ => {}
     }
-    let order = s.quality_order();
-    let Some(pos) = order.iter().position(|&i| i == s.selected) else {
-        return;
-    };
-    let new = (pos as isize + delta).clamp(0, order.len().saturating_sub(1) as isize) as usize;
-    s.selected = order[new];
 }
 
 fn handle_key(ctx: &Ctx, key: KeyEvent) {
@@ -421,17 +431,29 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.speedtest.begin();
                     side = Side::Speedtest;
                 }
-                // Quality-panel actions.
+                // 'n' moves between sub-panes of the focused panel (Tab is
+                // already taken by the four main panels).
+                KeyCode::Char('n') if s.has_sub_pane() => {
+                    s.sub_pane = match s.sub_pane {
+                        SubPane::Primary => SubPane::Secondary,
+                        SubPane::Secondary => SubPane::Primary,
+                    };
+                }
+                // Quality-panel actions. With a monitored hop selected, the add
+                // prompt starts pre-filled with it — the usual reason to look at
+                // a hop is to start watching it properly.
                 KeyCode::Char('a') if s.focus == Panel::Quality => {
+                    s.input_buffer = s
+                        .selected_hop()
+                        .and_then(|h| h.addr)
+                        .map(|a| a.to_string())
+                        .unwrap_or_default();
                     s.input_mode = InputMode::AddTarget;
-                    s.input_buffer.clear();
                 }
-                KeyCode::Up | KeyCode::Char('k') if s.focus == Panel::Quality => {
-                    move_quality_cursor(&mut s, -1);
-                }
-                KeyCode::Down | KeyCode::Char('j') if s.focus == Panel::Quality => {
-                    move_quality_cursor(&mut s, 1);
-                }
+                KeyCode::Up | KeyCode::Char('k') => move_cursor(&mut s, -1),
+                KeyCode::Down | KeyCode::Char('j') => move_cursor(&mut s, 1),
+                KeyCode::PageUp => move_cursor(&mut s, -10),
+                KeyCode::PageDown => move_cursor(&mut s, 10),
                 // ←/→ move the column cursor; Enter sorts by it (Space toggles).
                 KeyCode::Left if s.focus == Panel::Quality => {
                     s.q_col = s.q_col.saturating_sub(1);
@@ -476,6 +498,14 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 _ => {}
             },
         }
+
+        // The secondary pane can disappear under the cursor -- leaving
+        // full-screen, or switching away from the path monitor -- and a cursor
+        // parked in a pane that is no longer drawn is invisible.
+        if !s.has_sub_pane() {
+            s.sub_pane = SubPane::Primary;
+        }
+        s.speed_sel = s.speed_sel.min(s.speed_history.len().saturating_sub(1));
     }
 
     match side {

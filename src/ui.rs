@@ -10,7 +10,9 @@ use ratatui::widgets::{
     Sparkline, Table, Wrap,
 };
 
-use crate::app::{AppState, InputMode, LinkMedium, Panel, ProcStatus, QualityView, SpeedStatus};
+use crate::app::{
+    AppState, InputMode, LinkMedium, Panel, ProcStatus, QualityView, SpeedStatus, SubPane,
+};
 
 /// Draw the whole dashboard.
 pub fn render(f: &mut Frame, s: &AppState) {
@@ -127,6 +129,8 @@ fn context_line(s: &AppState) -> Line<'static> {
             txt("race "),
             key("[m]"),
             txt("onitor "),
+            key("[n]"),
+            txt("pane "),
             key("[←→↵]"),
             txt("sort "),
             key("[R]"),
@@ -224,7 +228,7 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let n = s.window_samples();
     quality_summary(f, s, n, parts[0]);
 
-    let focused = s.focus == Panel::Quality;
+    let focused = s.focus == Panel::Quality && s.sub_pane == SubPane::Primary;
     // Sortable header: highlight the column cursor, mark the active sort ▲/▼.
     let hcell = |sort_col: usize, label: &str| {
         let mut txt = label.to_string();
@@ -303,6 +307,40 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     }
 }
 
+/// A row of the rendered hop list: either a real hop, or a collapsed run of
+/// consecutive hops that never answered.
+enum HopRow<'a> {
+    Hop(usize, &'a crate::app::MonitoredHop),
+    /// (first ttl, last ttl, how many) — a run of silent hops worth one line.
+    Silent(u8, u8, usize),
+}
+
+/// Collapse runs of unresponsive hops. A single silent hop between two
+/// responders is genuinely informative and stays; a run of six is just noise
+/// pushing the useful rows off the screen.
+fn hop_rows(hops: &[crate::app::MonitoredHop]) -> Vec<HopRow<'_>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < hops.len() {
+        if hops[i].addr.is_some() {
+            out.push(HopRow::Hop(i, &hops[i]));
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < hops.len() && hops[i].addr.is_none() {
+            i += 1;
+        }
+        let run = i - start;
+        if run == 1 {
+            out.push(HopRow::Hop(start, &hops[start]));
+        } else {
+            out.push(HopRow::Silent(hops[start].ttl, hops[i - 1].ttl, run));
+        }
+    }
+    out
+}
+
 /// Continuous per-hop statistics with an inline sparkline for every hop — the
 /// MTR-style view. Loss appearing at one hop and persisting past it points at
 /// that hop; loss *only* at a hop is usually just ICMP deprioritised there, so
@@ -316,15 +354,21 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
     } else {
         "live"
     };
-    let outer = Block::new().title(Span::styled(
-        format!(
-            " path monitor · {}  ({status})  [↑↓] hop  [g] graph ",
-            m.target
-        ),
-        Style::new().fg(Color::DarkGray),
-    ));
-    let inner = outer.inner(area);
-    f.render_widget(outer, area);
+    let active = s.focus == Panel::Quality && s.sub_pane == SubPane::Secondary;
+
+    // Full-screen has room to give the selected hop its own chart beneath the
+    // table; the split view does not.
+    let (list_area, chart_area) = if s.fullscreen && area.height >= 12 {
+        let p = Layout::vertical([Constraint::Min(5), Constraint::Length(8)]).split(area);
+        (p[0], Some(p[1]))
+    } else {
+        (area, None)
+    };
+
+    let b = block(&format!("Path · {}  ({status})", m.target), active);
+    let inner = b.inner(list_area);
+    f.render_widget(b, list_area);
+
     if inner.height == 0 || m.hops.is_empty() {
         f.render_widget(
             Paragraph::new(Span::styled(
@@ -336,104 +380,200 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
         return;
     }
 
-    // Reserve the right-hand slice for per-hop sparklines; the table takes the
-    // rest. Below a certain width the sparklines are noise, so drop them.
-    let spark_w = if inner.width >= 74 { 18 } else { 0 };
-    let table_w = inner.width.saturating_sub(spark_w);
+    // Column widths are fixed, so the sparklines start right after the last
+    // column rather than being flung to the far right of a wide terminal.
+    const COLS: [u16; 7] = [4, 17, 6, 8, 8, 8, 7];
+    // Table adds one cell of spacing between columns; leaving it out squeezes
+    // the columns and silently truncates the address cell.
+    let table_w: u16 = COLS.iter().sum::<u16>() + COLS.len() as u16 - 1;
+    let spark_w = inner.width.saturating_sub(table_w + 1);
+    let show_sparks = spark_w >= 8;
 
     let header = Row::new(["ttl", "address", "loss", "last", "avg", "p95", "jitter"])
         .style(Style::new().fg(Color::Gray).bold());
     let rows_avail = inner.height.saturating_sub(1) as usize;
-    let visible = m.hops.len().min(rows_avail);
+    let all_rows = hop_rows(&m.hops);
+    let visible: Vec<&HopRow> = all_rows.iter().take(rows_avail).collect();
 
-    let rows = m.hops.iter().take(visible).enumerate().map(|(i, h)| {
-        let selected = i == m.selected;
-        let Some(stat) = &h.stat else {
-            // A hop that never answered discovery: no probe, nothing to show.
-            let mut style = Style::new().fg(Color::DarkGray);
-            if selected {
-                style = style.bg(Color::Rgb(40, 40, 55));
-            }
-            return Row::new(vec![
-                Cell::from(format!("{:>2}", h.ttl)),
-                Cell::from("*"),
-                Cell::from("—"),
-                Cell::from("—"),
-                Cell::from("—"),
-                Cell::from("—"),
-                Cell::from("—"),
-            ])
-            .style(style);
-        };
-        let loss = stat.loss_pct();
-        let st = stat.stats(n);
-        let mut style = Style::new().fg(latency_color(stat.last_rtt_ms, loss));
-        if selected {
-            style = style
-                .bg(Color::Rgb(40, 40, 55))
-                .add_modifier(Modifier::BOLD);
-        }
-        Row::new(vec![
-            Cell::from(format!("{:>2}", h.ttl)),
-            Cell::from(
-                h.addr
-                    .map(|a| a.to_string())
-                    .unwrap_or_else(|| "*".to_string()),
-            ),
-            Cell::from(Span::styled(
-                format!("{loss:.0}%"),
-                Style::new().fg(loss_color(loss)),
-            )),
-            Cell::from(fmt_ms(stat.last_rtt_ms)),
-            Cell::from(fmt_ms(st.mean)),
-            Cell::from(fmt_ms(st.p95)),
-            Cell::from(format!("{:.1}", stat.jitter_ms)),
+    let rows = visible.iter().map(|row| match row {
+        HopRow::Silent(from, to, count) => Row::new(vec![
+            Cell::from(format!("{from:>2}-{to}")),
+            Cell::from(format!("{count} hops silent (no ICMP reply)")),
+            Cell::from(""),
+            Cell::from(""),
+            Cell::from(""),
+            Cell::from(""),
+            Cell::from(""),
         ])
-        .style(style)
+        .style(Style::new().fg(Color::DarkGray).italic()),
+        HopRow::Hop(idx, h) => {
+            let selected = active && *idx == m.selected;
+            let Some(stat) = &h.stat else {
+                let mut style = Style::new().fg(Color::DarkGray);
+                if selected {
+                    style = style.bg(Color::Rgb(40, 40, 55));
+                }
+                return Row::new(vec![
+                    Cell::from(format!("{:>2}", h.ttl)),
+                    Cell::from("*"),
+                    Cell::from("—"),
+                    Cell::from("—"),
+                    Cell::from("—"),
+                    Cell::from("—"),
+                    Cell::from("—"),
+                ])
+                .style(style);
+            };
+            let loss = stat.loss_pct();
+            let st = stat.stats(n);
+            let mut style = Style::new().fg(latency_color(stat.last_rtt_ms, loss));
+            if selected {
+                style = style
+                    .bg(Color::Rgb(40, 40, 55))
+                    .add_modifier(Modifier::BOLD);
+            }
+            Row::new(vec![
+                Cell::from(format!("{:>2}", h.ttl)),
+                Cell::from(
+                    h.addr
+                        .map(|a| a.to_string())
+                        .unwrap_or_else(|| "*".to_string()),
+                ),
+                Cell::from(Span::styled(
+                    format!("{loss:.0}%"),
+                    Style::new().fg(loss_color(loss)),
+                )),
+                Cell::from(fmt_ms(stat.last_rtt_ms)),
+                Cell::from(fmt_ms(st.mean)),
+                Cell::from(fmt_ms(st.p95)),
+                Cell::from(format!("{:.1}", stat.jitter_ms)),
+            ])
+            .style(style)
+        }
     });
-    let widths = [
-        Constraint::Length(4),
-        Constraint::Length(17),
-        Constraint::Length(6),
-        Constraint::Length(8),
-        Constraint::Length(8),
-        Constraint::Length(8),
-        Constraint::Length(7),
-    ];
-    let table_area = Rect {
-        width: table_w,
-        ..inner
-    };
-    f.render_widget(Table::new(rows, widths).header(header), table_area);
+    let widths: Vec<Constraint> = COLS.iter().map(|w| Constraint::Length(*w)).collect();
+    f.render_widget(
+        Table::new(rows, widths).header(header),
+        Rect {
+            width: table_w.min(inner.width),
+            ..inner
+        },
+    );
 
-    if spark_w == 0 {
+    if show_sparks {
+        for (i, row) in visible.iter().enumerate() {
+            let HopRow::Hop(_, h) = row else { continue };
+            let Some(stat) = &h.stat else { continue };
+            let strip = Rect {
+                x: inner.x + table_w + 1,
+                y: inner.y + 1 + i as u16, // +1 skips the header row
+                width: spark_w,
+                height: 1,
+            };
+            if strip.y >= inner.y + inner.height {
+                break;
+            }
+            let data = stat.history.tail_u64(spark_w as usize);
+            if data.is_empty() {
+                continue;
+            }
+            let max = data.iter().copied().max().unwrap_or(1).max(1);
+            f.render_widget(
+                Sparkline::default()
+                    .data(data)
+                    .max(max)
+                    .style(Style::new().fg(latency_color(stat.last_rtt_ms, stat.loss_pct()))),
+                strip,
+            );
+        }
+    }
+
+    if let Some(chart_area) = chart_area {
+        hop_chart(f, m, n, chart_area);
+    }
+}
+
+/// Latency history for the hop under the cursor, in its own panel.
+fn hop_chart(f: &mut Frame, m: &crate::app::HopMonitor, n: usize, area: Rect) {
+    let hop = m.hops.get(m.selected);
+    let label = match hop {
+        Some(h) => match h.addr {
+            Some(a) => format!("hop {} · {a}", h.ttl),
+            None => format!("hop {} · no reply", h.ttl),
+        },
+        None => "hop".to_string(),
+    };
+    let b = block(&label, false);
+    let inner = b.inner(area);
+    f.render_widget(b, area);
+
+    let Some(stat) = hop.and_then(|h| h.stat.as_ref()) else {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "this hop does not answer — nothing to chart",
+                Style::new().fg(Color::DarkGray),
+            )),
+            inner,
+        );
+        return;
+    };
+
+    let want = (inner.width as usize).saturating_mul(2).max(20);
+    let raw: Vec<f64> = {
+        let mut v: Vec<f64> = stat.history.data.iter().rev().take(want).copied().collect();
+        v.reverse();
+        v
+    };
+    if raw.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "collecting…",
+                Style::new().fg(Color::DarkGray),
+            )),
+            inner,
+        );
         return;
     }
-    // One sparkline per row, drawn into the row's own single-cell-high strip.
-    for (i, h) in m.hops.iter().take(visible).enumerate() {
-        let Some(stat) = &h.stat else { continue };
-        let row = Rect {
-            x: inner.x + table_w,
-            y: inner.y + 1 + i as u16, // +1 skips the header row
-            width: spark_w,
-            height: 1,
-        };
-        if row.y >= inner.y + inner.height {
-            break;
-        }
-        let data = stat.history.tail_u64(spark_w as usize);
-        if data.is_empty() {
-            continue;
-        }
-        let max = data.iter().copied().max().unwrap_or(1).max(1);
-        f.render_widget(
-            Sparkline::default()
-                .data(data)
-                .max(max)
-                .style(Style::new().fg(latency_color(stat.last_rtt_ms, stat.loss_pct()))),
-            row,
+
+    let series: Vec<(f64, f64)> = raw
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (i as f64, v))
+        .collect();
+    let xmax = (series.len().saturating_sub(1)).max(1) as f64;
+    let st = stat.stats(n);
+    let p95 = st.p95.unwrap_or(0.0);
+    let ymax = raw.iter().copied().fold(0.0_f64, f64::max).max(p95) * 1.15 + 1.0;
+    let p95_line = [(0.0, p95), (xmax, p95)];
+
+    let datasets = vec![
+        Dataset::default()
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::new().fg(latency_color(stat.last_rtt_ms, stat.loss_pct())))
+            .data(&series),
+        Dataset::default()
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::new().fg(Color::Yellow))
+            .data(&p95_line),
+    ];
+    let chart = Chart::new(datasets)
+        .block(Block::new().title(Span::styled(
+            format!(
+                " p95 {p95:.0}ms · loss {:.0}% · jitter {:.1} ",
+                stat.loss_pct(),
+                stat.jitter_ms
+            ),
+            Style::new().fg(Color::DarkGray),
+        )))
+        .x_axis(Axis::default().bounds([0.0, xmax]))
+        .y_axis(
+            Axis::default()
+                .bounds([0.0, ymax])
+                .labels([Line::from("0"), Line::from(format!("{ymax:.0}ms"))]),
         );
-    }
+    f.render_widget(chart, inner);
 }
 
 /// Loss deserves its own scale: any sustained loss matters, unlike latency where
@@ -677,27 +817,30 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
         )));
     f.render_widget(up, graphs[1]);
 
-    // Full-screen: processes and speed-test history each get their own panel.
+    // Full-screen: processes and speed-test history each get their own panel,
+    // and 'n' moves the cursor between them.
     if s.fullscreen {
         let cols = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(rows[2]);
+        let on_history = s.focus == Panel::Bandwidth && s.sub_pane == SubPane::Secondary;
 
-        let pblock = block("Processes", false);
+        let pblock = block("Processes", s.focus == Panel::Bandwidth && !on_history);
         let pinner = pblock.inner(cols[0]);
         f.render_widget(pblock, cols[0]);
         top_talkers(f, s, pinner, talkers);
 
-        let sblock = block("Speed Test History", false);
+        let sblock = block("Speed Test History", on_history);
         let sinner = sblock.inner(cols[1]);
         f.render_widget(sblock, cols[1]);
-        speedtest_results(f, s, sinner);
+        speedtest_results(f, s, sinner, on_history);
     } else {
         top_talkers(f, s, rows[2], talkers);
     }
 }
 
-/// Table of recent speed-test results (full-screen only).
-fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect) {
+/// Table of recent speed-test results (full-screen only). Scrolls to keep the
+/// cursor visible, so a long history can be paged through rather than clipped.
+fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
     if s.speed_history.is_empty() {
         f.render_widget(
             Paragraph::new(Span::styled(
@@ -712,25 +855,44 @@ fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect) {
     let header = Row::new(["time", "provider", "↓Mbps", "↑Mbps", "bloat"])
         .style(Style::new().fg(Color::DarkGray));
     let n = (area.height.saturating_sub(1)) as usize;
-    let rows = s.speed_history.iter().rev().take(n).map(|r| {
-        let bloat = match (r.idle_ms, r.loaded_ms) {
-            (Some(i), Some(l)) => format!("+{:.0}ms", (l - i).max(0.0)),
-            _ => "—".to_string(),
-        };
-        Row::new(vec![
-            Cell::from(r.when()),
-            Cell::from(r.provider.clone()),
-            Cell::from(Span::styled(
-                format!("{:.0}", r.down_mbps),
-                Style::new().fg(Color::Green),
-            )),
-            Cell::from(Span::styled(
-                format!("{:.0}", r.up_mbps),
-                Style::new().fg(Color::Magenta),
-            )),
-            Cell::from(bloat),
-        ])
-    });
+    // Newest first; the cursor indexes this reversed order.
+    let ordered: Vec<&crate::store::SpeedRecord> = s.speed_history.iter().rev().collect();
+    let sel = s.speed_sel.min(ordered.len().saturating_sub(1));
+    // Scroll only as far as needed to bring the cursor into view.
+    let first = if n == 0 { 0 } else { sel.saturating_sub(n - 1) };
+
+    let rows = ordered
+        .iter()
+        .skip(first)
+        .take(n)
+        .enumerate()
+        .map(|(i, r)| {
+            let selected = focused && first + i == sel;
+            let bloat = match (r.idle_ms, r.loaded_ms) {
+                (Some(i), Some(l)) => format!("+{:.0}ms", (l - i).max(0.0)),
+                _ => "—".to_string(),
+            };
+            Row::new(vec![
+                Cell::from(r.when()),
+                Cell::from(r.provider.clone()),
+                Cell::from(Span::styled(
+                    format!("{:.0}", r.down_mbps),
+                    Style::new().fg(Color::Green),
+                )),
+                Cell::from(Span::styled(
+                    format!("{:.0}", r.up_mbps),
+                    Style::new().fg(Color::Magenta),
+                )),
+                Cell::from(bloat),
+            ])
+            .style(if selected {
+                Style::new()
+                    .bg(Color::Rgb(40, 40, 55))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::new()
+            })
+        });
     let widths = [
         Constraint::Length(12),
         Constraint::Length(11),
@@ -953,6 +1115,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("g", "graph selected target (exits traceroute)"),
         row("t", "traceroute the selected target"),
         row("m", "monitor every hop continuously (MTR-style)"),
+        row("n", "move between sub-panes of this panel"),
         row("↑/↓ or j/k", "select a target (or hop, when monitoring)"),
         row("←/→", "move sort-column cursor"),
         row("Enter", "sort by the cursor column"),
@@ -963,6 +1126,8 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             "  Bandwidth",
             Style::new().fg(Color::White).bold(),
         )),
+        row("n", "switch Processes / Speed Test History (full-screen)"),
+        row("↑/↓ PgUp/PgDn", "page through speed-test history"),
         row("v", "cycle speed-test provider (saved)"),
         row("←/→", "move top-talkers column cursor"),
         row("Enter / Space", "sort by column / toggle direction"),
@@ -1191,6 +1356,21 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
         )));
     }
 
+    // Full-screen has room to chart each resolver's response time, which is
+    // where slow DNS actually becomes visible.
+    let dns_rows = if s.fullscreen {
+        s.dns.len().min(MAX_DNS_GRAPHS) as u16
+    } else {
+        0
+    };
+    let (inner, dns_area) = if dns_rows > 0 {
+        let p =
+            Layout::vertical([Constraint::Min(6), Constraint::Length(dns_rows + 2)]).split(inner);
+        (p[0], Some(p[1]))
+    } else {
+        (inner, None)
+    };
+
     // Reserve space at the bottom for whichever link graph applies.
     let graph = link_graph(s);
     let (info_area, graph_area) = if graph == LinkGraph::None {
@@ -1208,6 +1388,9 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
             LinkGraph::None => {}
         }
     }
+    if let Some(da) = dns_area {
+        dns_graphs(f, s, da);
+    }
 
     // Transient "re-probing" note pinned to the bottom of the info area.
     if s.refresh_at.is_some_and(|t| t.elapsed().as_secs() < 3) {
@@ -1223,6 +1406,81 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
                 Style::new().fg(Color::Yellow),
             )),
             bottom,
+        );
+    }
+}
+
+/// A machine can list a lot of resolvers (a VPN proxy, IPv6 duplicates, search
+/// domains); charting all of them would crowd out the panel.
+const MAX_DNS_GRAPHS: usize = 5;
+
+/// One response-time sparkline per resolver, in its own panel. Each is scaled to
+/// its own peak: the question is whether *this* resolver is degrading, and a
+/// shared scale would flatten a fast one next to a slow one.
+fn dns_graphs(f: &mut Frame, s: &AppState, area: Rect) {
+    let shown = s.dns.len().min(MAX_DNS_GRAPHS);
+    let hidden = s.dns.len().saturating_sub(shown);
+    let title = if hidden > 0 {
+        format!("DNS response time  (+{hidden} more)")
+    } else {
+        "DNS response time".to_string()
+    };
+    let b = block(&title, false);
+    let inner = b.inner(area);
+    f.render_widget(b, area);
+    if inner.height == 0 {
+        return;
+    }
+
+    // Address column, then the rest of the width for the trace.
+    let label_w = 17u16.min(inner.width / 2);
+    for (i, probe) in s.dns.iter().take(shown).enumerate() {
+        let y = inner.y + i as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        let last = match probe.last_ms {
+            Some(ms) => format!("{ms:>4.0}ms"),
+            None => "   —  ".to_string(),
+        };
+        let color = probe.last_ms.map(dns_color).unwrap_or(Color::Red);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!("{:<16}", probe.server.to_string()),
+                    Style::new().fg(Color::Gray),
+                ),
+                Span::styled(last, Style::new().fg(color)),
+            ])),
+            Rect {
+                x: inner.x,
+                y,
+                width: label_w + 7,
+                height: 1,
+            },
+        );
+
+        let spark_x = inner.x + label_w + 8;
+        let spark_w = inner.width.saturating_sub(label_w + 8);
+        if spark_w < 4 {
+            continue;
+        }
+        let data = probe.hist.tail_u64(spark_w as usize);
+        if data.is_empty() {
+            continue;
+        }
+        let max = data.iter().copied().max().unwrap_or(1).max(1);
+        f.render_widget(
+            Sparkline::default()
+                .data(data)
+                .max(max)
+                .style(Style::new().fg(color)),
+            Rect {
+                x: spark_x,
+                y,
+                width: spark_w,
+                height: 1,
+            },
         );
     }
 }
@@ -1723,6 +1981,12 @@ mod tests {
             }
         };
 
+        let silent = |ttl: u8| MonitoredHop {
+            ttl,
+            addr: None,
+            stat: None,
+        };
+
         let mut s = AppState::new(vec![]);
         s.quality_view = QualityView::HopMonitor;
         s.focus = Panel::Quality;
@@ -1734,27 +1998,75 @@ mod tests {
                 hop(1, 1, &[3.0, 3.2, 3.1], 0),
                 // A hop that answered discovery but is now dropping probes.
                 hop(2, 2, &[20.0, 21.0], 6),
-                // A hop that never answered traceroute at all.
-                MonitoredHop {
-                    ttl: 3,
-                    addr: None,
-                    stat: None,
-                },
+                silent(3), // lone gap — kept, it is informative
+                hop(4, 4, &[30.0], 0),
+                silent(5), // run of three — collapsed to one line
+                silent(6),
+                silent(7),
+                hop(8, 8, &[40.0], 0),
             ],
             discovering: false,
             generation: 1,
             selected: 0,
         });
 
-        let out = draw(&s, 120, 30);
-        assert!(out.contains("path monitor"));
+        let out = draw(&s, 120, 40);
+        assert!(out.contains("Path ·"));
         assert!(out.contains("Cloudflare (1.1.1.1)"));
         assert!(out.contains("10.0.0.1"));
-        assert!(out.contains("10.0.0.2"));
+        assert!(out.contains("10.0.0.8"));
         // The lossy hop reports its loss rather than being hidden.
         assert!(out.contains("75%"));
-        // An unresolved hop still occupies its ttl slot.
-        assert!(out.contains(" 3 "));
+        // A run of silent hops collapses; a lone one does not.
+        assert!(out.contains("3 hops silent"));
+        assert!(out.contains(" 5-7"));
+    }
+
+    #[test]
+    fn silent_hop_runs_collapse_but_lone_gaps_survive() {
+        use crate::app::MonitoredHop;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let live = |ttl: u8| MonitoredHop {
+            ttl,
+            addr: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, ttl))),
+            stat: None,
+        };
+        let silent = |ttl: u8| MonitoredHop {
+            ttl,
+            addr: None,
+            stat: None,
+        };
+
+        // live, gap, live, run-of-3, live
+        let hops = vec![
+            live(1),
+            silent(2),
+            live(3),
+            silent(4),
+            silent(5),
+            silent(6),
+            live(7),
+        ];
+        let rows = hop_rows(&hops);
+        let shapes: Vec<String> = rows
+            .iter()
+            .map(|r| match r {
+                HopRow::Hop(_, h) => format!("hop{}", h.ttl),
+                HopRow::Silent(a, b, n) => format!("silent{a}-{b}x{n}"),
+            })
+            .collect();
+        assert_eq!(
+            shapes,
+            vec!["hop1", "hop2", "hop3", "silent4-6x3", "hop7"],
+            "a lone gap stays a row; a run collapses"
+        );
+
+        // A path that is entirely silent still collapses to one row.
+        let all_silent = vec![silent(1), silent(2), silent(3)];
+        assert_eq!(hop_rows(&all_silent).len(), 1);
+        // And an empty path produces nothing rather than panicking.
+        assert!(hop_rows(&[]).is_empty());
     }
 
     #[test]

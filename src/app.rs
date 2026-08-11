@@ -314,6 +314,17 @@ pub struct HopMonitor {
     pub selected: usize,
 }
 
+/// Which sub-pane inside the focused panel holds the cursor. Tab cycles the four
+/// main panels, so sub-panes need their own key.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubPane {
+    /// Quality: the target table. Bandwidth: the process list.
+    #[default]
+    Primary,
+    /// Quality: the monitored hop list. Bandwidth: speed-test history.
+    Secondary,
+}
+
 /// Which chart the Connection Quality panel shows beneath the target table.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum QualityView {
@@ -872,6 +883,10 @@ pub struct AppState {
     pub hop_monitor: Option<HopMonitor>,
     /// Which chart the panel is showing.
     pub quality_view: QualityView,
+    /// Cursor location within the focused panel (cycled with 'n').
+    pub sub_pane: SubPane,
+    /// Cursor into `speed_history`, newest-first, for the Bandwidth panel.
+    pub speed_sel: usize,
     /// When 'r' was last pressed, for a transient "re-probing" note.
     pub refresh_at: Option<Instant>,
     /// Bumped by the netinfo collector whenever [`NetInfo::identity`] changes.
@@ -928,6 +943,8 @@ impl AppState {
             traceroute: None,
             hop_monitor: None,
             quality_view: QualityView::Graph,
+            sub_pane: SubPane::Primary,
+            speed_sel: 0,
             refresh_at: None,
             net_change_seq: 0,
             input_mode: InputMode::Normal,
@@ -941,6 +958,31 @@ impl AppState {
             should_quit: false,
             started: Instant::now(),
         }
+    }
+
+    /// Whether the focused panel currently offers a second cursor pane, so 'n'
+    /// is a no-op rather than a confusing dead key elsewhere.
+    pub fn has_sub_pane(&self) -> bool {
+        match self.focus {
+            Panel::Quality => {
+                self.quality_view == QualityView::HopMonitor && self.hop_monitor.is_some()
+            }
+            Panel::Bandwidth => self.fullscreen && !self.speed_history.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// The hop the monitor cursor is on, when that pane holds the cursor.
+    pub fn selected_hop(&self) -> Option<&MonitoredHop> {
+        if self.sub_pane != SubPane::Secondary {
+            return None;
+        }
+        self.hop_monitor.as_ref()?.hops.get(
+            self.hop_monitor
+                .as_ref()
+                .map(|m| m.selected)
+                .unwrap_or_default(),
+        )
     }
 
     /// Number of recent samples covered by the current window.
