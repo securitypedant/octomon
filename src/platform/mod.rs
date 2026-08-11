@@ -57,6 +57,29 @@ pub fn wifi_signal() -> Option<WifiSignal> {
     None
 }
 
+/// Thermal / power state. Throttling collapses throughput while CPU reads idle,
+/// which is otherwise one of the more baffling failure modes to diagnose.
+pub struct ThermalState {
+    /// Short human summary, e.g. "nominal" or "CPU limited to 70%".
+    pub summary: String,
+    pub throttled: bool,
+    /// "AC Power" / "Battery Power", where the platform reports it.
+    pub power_source: String,
+}
+
+/// `None` on platforms with no unprivileged source. Linux exposes per-zone
+/// temperatures under /sys, but no equivalent "am I being throttled" verdict,
+/// so it is deliberately not guessed at.
+#[cfg(target_os = "macos")]
+pub async fn thermal_state() -> Option<ThermalState> {
+    macos::thermal_state().await
+}
+
+#[cfg(not(target_os = "macos"))]
+pub async fn thermal_state() -> Option<ThermalState> {
+    None
+}
+
 /// Wi-Fi details for the active connection, when available.
 #[cfg(target_os = "macos")]
 pub async fn wifi_details() -> Option<WifiInfo> {
@@ -162,6 +185,61 @@ mod macos {
             });
         }
         samples
+    }
+
+    /// Thermal and power state via `pmset`, which is unprivileged.
+    pub async fn thermal_state() -> Option<super::ThermalState> {
+        let therm = tokio::process::Command::new("pmset")
+            .args(["-g", "therm"])
+            .output()
+            .await
+            .ok()?;
+        let (summary, throttled) = parse_therm(&String::from_utf8_lossy(&therm.stdout));
+
+        // Power source is separate but cheap, and explains a throttle: a laptop
+        // on battery may be limited deliberately rather than by heat.
+        let power_source = tokio::process::Command::new("pmset")
+            .args(["-g", "ps"])
+            .output()
+            .await
+            .ok()
+            .map(|o| parse_power_source(&String::from_utf8_lossy(&o.stdout)))
+            .unwrap_or_default();
+
+        Some(super::ThermalState {
+            summary,
+            throttled,
+            power_source,
+        })
+    }
+
+    /// `pmset -g therm` prints "No ... has been recorded" lines when all is
+    /// well, and `CPU_Speed_Limit = N` when the CPU is being held back.
+    fn parse_therm(text: &str) -> (String, bool) {
+        let mut limit: Option<u32> = None;
+        for line in text.lines() {
+            if let Some((k, v)) = line.split_once('=')
+                && k.trim().ends_with("CPU_Speed_Limit")
+                && let Ok(n) = v.trim().parse::<u32>()
+            {
+                limit = Some(n);
+            }
+        }
+        match limit {
+            // 100 means "reported, and not limited".
+            Some(n) if n < 100 => (format!("CPU limited to {n}%"), true),
+            Some(_) => ("nominal".to_string(), false),
+            None if text.contains("No thermal warning level") => ("nominal".to_string(), false),
+            None => (String::new(), false),
+        }
+    }
+
+    /// First line of `pmset -g ps` is "Now drawing from 'AC Power'".
+    fn parse_power_source(text: &str) -> String {
+        text.lines()
+            .find_map(|l| l.split_once('\'').map(|(_, r)| r))
+            .and_then(|r| r.split_once('\'').map(|(name, _)| name.to_string()))
+            .unwrap_or_default()
     }
 
     /// Parse the "Current Network Information" block from

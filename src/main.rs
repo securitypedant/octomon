@@ -754,10 +754,38 @@ fn print_snapshot(s: &AppState) {
     let v = &s.vitals;
     println!("\n[Machine]");
     println!(
-        "  cpu={:.1}%  mem={}/{} MiB",
+        "  cpu={:.1}%  mem={}/{} MiB  pressure={:.0}%",
         v.cpu_pct,
         v.mem_used / 1_048_576,
-        v.mem_total / 1_048_576
+        v.mem_total / 1_048_576,
+        v.mem_pressure_pct
+    );
+    println!(
+        "  load={:.2} {:.2} {:.2} over {} cores  swap={}/{} MiB",
+        v.load.0,
+        v.load.1,
+        v.load.2,
+        v.core_count(),
+        v.swap_used / 1_048_576,
+        v.swap_total / 1_048_576
+    );
+    if let Some((i, pct)) = v.hottest_core() {
+        println!("  hottest core: {} at {pct:.0}%", i + 1);
+    }
+    if !v.thermal.is_empty() || !v.power_source.is_empty() {
+        println!(
+            "  thermal={} throttled={} power={}",
+            v.thermal, v.throttled, v.power_source
+        );
+    }
+    let e = &s.link_errors;
+    println!(
+        "  link {}: rx_err={} tx_err={} ({:.3}% of packets, {:.0} pkt/s)",
+        e.iface,
+        e.rx_err_total,
+        e.tx_err_total,
+        e.error_pct(),
+        e.rx_packets_per_sec + e.tx_packets_per_sec
     );
 }
 

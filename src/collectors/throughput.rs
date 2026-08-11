@@ -38,12 +38,23 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         let mut down = 0u64;
         let mut up = 0u64;
         let mut label = String::from("all");
+        // Error and packet counters ride along with the byte counters — same
+        // refresh, no extra syscalls. Rising errors while CPU looks fine point
+        // at the link itself, which nothing else in octomon would reveal.
+        let mut rx_err = 0u64;
+        let mut tx_err = 0u64;
+        let mut rx_pkt = 0u64;
+        let mut tx_pkt = 0u64;
 
         for (name, data) in &networks {
             match &want {
                 Some(di) if di == name => {
                     down = data.received();
                     up = data.transmitted();
+                    rx_err = data.errors_on_received();
+                    tx_err = data.errors_on_transmitted();
+                    rx_pkt = data.packets_received();
+                    tx_pkt = data.packets_transmitted();
                     label = di.clone();
                     break;
                 }
@@ -54,6 +65,10 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
                     }
                     down += data.received();
                     up += data.transmitted();
+                    rx_err += data.errors_on_received();
+                    tx_err += data.errors_on_transmitted();
+                    rx_pkt += data.packets_received();
+                    tx_pkt += data.packets_transmitted();
                 }
             }
         }
@@ -64,9 +79,14 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         prev_iface = Some(label.clone());
         if switched {
             let mut s = state.lock().unwrap();
-            s.throughput.iface = label;
+            s.throughput.iface = label.clone();
             s.throughput.down_bps = 0.0;
             s.throughput.up_bps = 0.0;
+            // Error totals belong to the interface that produced them.
+            s.link_errors = crate::app::LinkErrors {
+                iface: label,
+                ..Default::default()
+            };
             continue;
         }
 
@@ -74,10 +94,20 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         let up_bps = up as f64 / secs;
 
         let mut s = state.lock().unwrap();
-        s.throughput.iface = label;
+        s.throughput.iface = label.clone();
         s.throughput.down_bps = down_bps;
         s.throughput.up_bps = up_bps;
         s.throughput.down_hist.push(down_bps);
         s.throughput.up_hist.push(up_bps);
+
+        let e = &mut s.link_errors;
+        e.iface = label;
+        e.rx_err_per_sec = rx_err as f64 / secs;
+        e.tx_err_per_sec = tx_err as f64 / secs;
+        // Kept cumulative so a brief burst stays visible after it stops.
+        e.rx_err_total += rx_err;
+        e.tx_err_total += tx_err;
+        e.rx_packets_per_sec = rx_pkt as f64 / secs;
+        e.tx_packets_per_sec = tx_pkt as f64 / secs;
     }
 }

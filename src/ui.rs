@@ -58,8 +58,11 @@ fn header(f: &mut Frame, s: &AppState, area: Rect) {
 
     let up = s.started.elapsed().as_secs();
     let mut left = vec![
+        // The leading space sits outside the badge; inside it renders as a
+        // stray cyan block hanging off the left edge.
+        Span::raw(" "),
         Span::styled(
-            " octomon ",
+            "octomon ",
             Style::new().fg(Color::Black).bg(Color::Cyan).bold(),
         ),
         Span::raw(format!(
@@ -131,7 +134,7 @@ fn context_line(s: &AppState) -> Line<'static> {
             txt("onitor "),
             key("[n]"),
             txt("pane "),
-            key("[←→↵]"),
+            key("[←→ ↵]"),
             txt("sort "),
             key("[R]"),
             txt("eset "),
@@ -206,15 +209,19 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     // is — and the title needs the scroll counts, which depend on the layout.
     let inner = block("", false).inner(area);
 
-    // The path views need the room, so the target table shrinks to a summary.
-    let bottom_h = if s.fullscreen { 12 } else { 6 };
     let parts = if s.quality_view == QualityView::Graph {
-        Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(bottom_h),
-        ])
-        .split(inner)
+        // Full-screen: the target list takes only what it needs and the chart
+        // fills the rest, since three overlaid series need the vertical room.
+        // Split view keeps a fixed slice so the table is not squeezed away.
+        let (list, graph) = if s.fullscreen {
+            (
+                Constraint::Length((s.targets.len() as u16 + 1).min(14)),
+                Constraint::Min(6),
+            )
+        } else {
+            (Constraint::Min(3), Constraint::Length(6))
+        };
+        Layout::vertical([Constraint::Length(1), list, graph]).split(inner)
     } else {
         let table_h = (s.targets.len() as u16 + 2).min(9);
         Layout::vertical([
@@ -388,7 +395,8 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
     // Full-screen has room to give the selected hop its own chart beneath the
     // table; the split view does not.
     let (list_area, chart_area) = if s.fullscreen && area.height >= 12 {
-        let p = Layout::vertical([Constraint::Min(5), Constraint::Length(8)]).split(area);
+        // Three overlaid series need the vertical room to be told apart.
+        let p = Layout::vertical([Constraint::Min(5), Constraint::Length(11)]).split(area);
         (p[0], Some(p[1]))
     } else {
         (area, None)
@@ -628,6 +636,7 @@ fn hop_chart(f: &mut Frame, m: &crate::app::HopMonitor, n: usize, area: Rect) {
     let p95 = st.p95.unwrap_or(0.0);
     let ymax = raw.iter().copied().fold(0.0_f64, f64::max).max(p95) * 1.15 + 1.0;
     let p95_line = [(0.0, p95), (xmax, p95)];
+    let jitter_line = [(0.0, stat.jitter_ms), (xmax, stat.jitter_ms)];
 
     let datasets = vec![
         Dataset::default()
@@ -640,18 +649,24 @@ fn hop_chart(f: &mut Frame, m: &crate::app::HopMonitor, n: usize, area: Rect) {
             .graph_type(GraphType::Line)
             .style(Style::new().fg(P95_COLOR))
             .data(&p95_line),
+        Dataset::default()
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::new().fg(JITTER_COLOR))
+            .data(&jitter_line),
     ];
     let chart = Chart::new(datasets)
         .block(Block::new().title(Line::from(vec![
             Span::styled(" latency ", Style::new().fg(SERIES_COLOR)),
             Span::styled("· p95 ", Style::new().fg(Color::DarkGray)),
             Span::styled(format!("{p95:.0}ms"), Style::new().fg(P95_COLOR)),
+            Span::styled(" · jitter ", Style::new().fg(Color::DarkGray)),
             Span::styled(
-                format!(
-                    " · loss {:.0}% · jitter {:.1} ",
-                    stat.loss_pct(),
-                    stat.jitter_ms
-                ),
+                format!("{:.1}ms", stat.jitter_ms),
+                Style::new().fg(JITTER_COLOR),
+            ),
+            Span::styled(
+                format!(" · loss {:.0}% ", stat.loss_pct()),
                 Style::new().fg(Color::DarkGray),
             ),
         ])))
@@ -778,6 +793,9 @@ fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
     let p95 = t.stats(n).p95.unwrap_or(0.0);
     let ymax = raw.iter().copied().fold(0.0_f64, f64::max).max(p95) * 1.15 + 1.0;
     let p95_line = [(0.0, p95), (xmax, p95)];
+    // Jitter as a reference line rather than a series: it is a single smoothed
+    // figure, so plotting it per-sample would just redraw the same value.
+    let jitter_line = [(0.0, t.jitter_ms), (xmax, t.jitter_ms)];
 
     let datasets = vec![
         Dataset::default()
@@ -790,6 +808,11 @@ fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
             .graph_type(GraphType::Line)
             .style(Style::new().fg(P95_COLOR))
             .data(&p95_line),
+        Dataset::default()
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::new().fg(JITTER_COLOR))
+            .data(&jitter_line),
     ];
 
     // Each label is drawn in its series' colour, so the legend needs no key.
@@ -798,7 +821,12 @@ fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
             Span::styled(" latency ", Style::new().fg(Color::DarkGray)),
             Span::styled(t.label.clone(), Style::new().fg(SERIES_COLOR)),
             Span::styled("   p95 ", Style::new().fg(Color::DarkGray)),
-            Span::styled(format!("{p95:.0}ms "), Style::new().fg(P95_COLOR)),
+            Span::styled(format!("{p95:.0}ms"), Style::new().fg(P95_COLOR)),
+            Span::styled("   jitter ", Style::new().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:.1}ms ", t.jitter_ms),
+                Style::new().fg(JITTER_COLOR),
+            ),
         ])))
         .x_axis(Axis::default().bounds([0.0, xmax]))
         .y_axis(
@@ -1879,54 +1907,191 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let inner = b.inner(area);
     f.render_widget(b, area);
 
+    // Per-core detail only earns its space full-screen; the split view keeps to
+    // the summary plus history.
+    let core_rows = if s.fullscreen && !v.cores.is_empty() {
+        v.cores.len().div_ceil(CORES_PER_ROW) as u16 + 1
+    } else {
+        0
+    };
     let parts = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(0),
+        Constraint::Length(1), // cpu
+        Constraint::Length(1), // memory pressure
+        Constraint::Length(1), // load average
+        Constraint::Length(1), // link errors
+        Constraint::Length(1), // thermal / power
+        Constraint::Length(core_rows),
+        Constraint::Min(0), // history
     ])
     .split(inner);
 
     // LineGauge keeps the label to the left of the bar, so it stays legible
     // (a Gauge draws the label over the fill, which is unreadable on yellow).
     let cpu = v.cpu_pct.clamp(0.0, 100.0);
+    let hottest = v
+        .hottest_core()
+        .map(|(i, pct)| format!(" (core {} {pct:.0}%)", i + 1))
+        .unwrap_or_default();
     f.render_widget(
         LineGauge::default()
             .ratio((cpu / 100.0) as f64)
-            .label(format!("CPU {cpu:>3.0}%"))
+            .label(format!("CPU {cpu:>3.0}%{hottest}"))
             .filled_style(Style::new().fg(usage_color(cpu)))
             .unfilled_style(Style::new().fg(Color::DarkGray)),
         parts[0],
     );
 
-    let mem_pct = if v.mem_total > 0 {
-        v.mem_used as f32 / v.mem_total as f32 * 100.0
-    } else {
-        0.0
-    };
+    // Pressure, not used/total: caches make "used" sit near total on a healthy
+    // machine, so the old bar was alarming and uninformative.
+    let pressure = v.mem_pressure_pct.clamp(0.0, 100.0);
     f.render_widget(
         LineGauge::default()
-            .ratio((mem_pct / 100.0).clamp(0.0, 1.0) as f64)
+            .ratio((pressure / 100.0) as f64)
             .label(format!(
-                "MEM {}/{}",
-                fmt_bytes(v.mem_used),
+                "MEM {pressure:>3.0}% used of {}",
                 fmt_bytes(v.mem_total)
             ))
-            .filled_style(Style::new().fg(usage_color(mem_pct)))
+            .filled_style(Style::new().fg(usage_color(pressure)))
             .unfilled_style(Style::new().fg(Color::DarkGray)),
         parts[1],
     );
 
+    // Load average, plus swap — swap activity is what actually correlates with
+    // "everything feels slow".
+    let (l1, l5, l15) = v.load;
+    let cores = v.core_count().max(1) as f64;
+    let mut load_spans = vec![
+        Span::styled("load ", Style::new().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{l1:.2} {l5:.2} {l15:.2}"),
+            // Load beyond core count means work is queueing for CPU.
+            Style::new().fg(if l1 > cores {
+                Color::Red
+            } else if l1 > cores * 0.7 {
+                Color::Yellow
+            } else {
+                Color::Green
+            }),
+        ),
+    ];
+    if v.swap_used > 0 {
+        load_spans.push(Span::styled("  swap ", Style::new().fg(Color::DarkGray)));
+        load_spans.push(Span::styled(
+            fmt_bytes(v.swap_used),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(load_spans)), parts[2]);
+
+    f.render_widget(Paragraph::new(link_error_line(&s.link_errors)), parts[3]);
+
+    // Thermal state, when the platform reports it.
+    if !v.thermal.is_empty() || !v.power_source.is_empty() {
+        let mut spans = vec![Span::styled("power ", Style::new().fg(Color::DarkGray))];
+        if !v.thermal.is_empty() {
+            spans.push(Span::styled(
+                v.thermal.clone(),
+                Style::new().fg(if v.throttled {
+                    Color::Red
+                } else {
+                    Color::Green
+                }),
+            ));
+        }
+        if !v.power_source.is_empty() {
+            spans.push(Span::styled(
+                format!("  {}", v.power_source),
+                Style::new().fg(Color::Gray),
+            ));
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), parts[4]);
+    }
+
+    if core_rows > 0 {
+        core_grid(f, &v.cores, parts[5]);
+    }
+
     // CPU history sparkline (uses the remaining space).
     let spark = Sparkline::default()
         .max(100)
-        .data(v.cpu_hist.tail_u64(parts[3].width as usize))
+        .data(v.cpu_hist.tail_u64(parts[6].width as usize))
         .style(Style::new().fg(Color::Yellow))
         .block(Block::new().title(Span::styled(
             " cpu history ",
             Style::new().fg(Color::DarkGray),
         )));
-    f.render_widget(spark, parts[3]);
+    f.render_widget(spark, parts[6]);
+}
+
+/// How many per-core meters sit on one row.
+const CORES_PER_ROW: usize = 4;
+
+/// Compact per-core meters. A single saturated core stalls a network path while
+/// the global average looks idle, which the summary line cannot show.
+fn core_grid(f: &mut Frame, cores: &[f32], area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!(" per-core ({} cores) ", cores.len()),
+            Style::new().fg(Color::DarkGray),
+        )),
+        Rect { height: 1, ..area },
+    );
+
+    let cell_w = area.width / CORES_PER_ROW as u16;
+    if cell_w < 8 {
+        return;
+    }
+    for (i, pct) in cores.iter().enumerate() {
+        let row = (i / CORES_PER_ROW) as u16;
+        let col = (i % CORES_PER_ROW) as u16;
+        let y = area.y + 1 + row;
+        if y >= area.y + area.height {
+            break;
+        }
+        let pct = pct.clamp(0.0, 100.0);
+        f.render_widget(
+            LineGauge::default()
+                .ratio((pct / 100.0) as f64)
+                .label(format!("{:>2} {pct:>3.0}%", i + 1))
+                .filled_style(Style::new().fg(usage_color(pct)))
+                .unfilled_style(Style::new().fg(Color::DarkGray)),
+            Rect {
+                x: area.x + col * cell_w,
+                y,
+                width: cell_w.saturating_sub(1),
+                height: 1,
+            },
+        );
+    }
+}
+
+/// Interface error/drop summary. Silence here is the expected state, so a clean
+/// link says so rather than showing nothing.
+fn link_error_line(e: &crate::app::LinkErrors) -> Line<'static> {
+    let total = e.rx_err_total + e.tx_err_total;
+    let mut spans = vec![Span::styled("errs ", Style::new().fg(Color::DarkGray))];
+    if total == 0 {
+        spans.push(Span::styled("none", Style::new().fg(Color::Green)));
+        return Line::from(spans);
+    }
+    let pct = e.error_pct();
+    spans.push(Span::styled(
+        format!("rx {} tx {}", e.rx_err_total, e.tx_err_total),
+        Style::new().fg(if pct >= 1.0 {
+            Color::Red
+        } else {
+            Color::Yellow
+        }),
+    ));
+    // A rate means nothing without knowing whether the link was busy.
+    spans.push(Span::styled(
+        format!("  {pct:.2}% of packets"),
+        Style::new().fg(Color::DarkGray),
+    ));
+    Line::from(spans)
 }
 
 /// One-line speed-test status/results shown atop the bandwidth panel.
@@ -2055,6 +2220,7 @@ fn rtt_color(ms: f64) -> Color {
 /// green trace line would read as a verdict rather than as a series.
 const SERIES_COLOR: Color = Color::Cyan;
 const P95_COLOR: Color = Color::Magenta;
+const JITTER_COLOR: Color = Color::LightBlue;
 
 fn latency_color(last: Option<f64>, loss: f64) -> Color {
     if loss >= 5.0 || last.is_none() {
@@ -2379,6 +2545,62 @@ mod tests {
 
         s.speedtest.phase = "Cloudflare · download".into();
         assert!(draw(&s, 120, 30).contains("download"));
+    }
+
+    #[test]
+    fn machine_panel_surfaces_the_new_signals() {
+        let mut s = AppState::new(vec![]);
+        s.focus = Panel::Vitals;
+        s.vitals.cpu_pct = 9.0;
+        s.vitals.cores = vec![12.0, 4.0, 88.0, 3.0];
+        s.vitals.mem_total = 24 * 1024 * 1024 * 1024;
+        s.vitals.mem_pressure_pct = 68.0;
+        s.vitals.load = (2.8, 2.9, 2.9);
+        s.vitals.thermal = "CPU limited to 70%".into();
+        s.vitals.throttled = true;
+        s.vitals.power_source = "Battery Power".into();
+
+        let out = draw(&s, 120, 30);
+        // A saturated core is invisible in a 9% average, so it is called out.
+        // Cores are numbered from 1 for display; index 2 is core 3.
+        assert!(out.contains("core 3 88%"));
+        assert!(out.contains("68% used"), "pressure, not used/total");
+        assert!(out.contains("2.80 2.90 2.90"));
+        assert!(out.contains("CPU limited to 70%"));
+        assert!(out.contains("Battery Power"));
+
+        // Per-core detail is full-screen only; the split view stays a summary.
+        assert!(!out.contains("per-core"));
+        s.fullscreen = true;
+        assert!(draw(&s, 120, 30).contains("per-core (4 cores)"));
+    }
+
+    #[test]
+    fn link_errors_read_as_a_share_of_traffic() {
+        use crate::app::LinkErrors;
+
+        // A clean link says so rather than showing nothing.
+        let mut s = AppState::new(vec![]);
+        s.focus = Panel::Vitals;
+        assert!(draw(&s, 120, 30).contains("errs none"));
+
+        s.link_errors = LinkErrors {
+            iface: "en0".into(),
+            rx_err_total: 12,
+            tx_err_total: 3,
+            rx_err_per_sec: 1.0,
+            tx_err_per_sec: 0.0,
+            rx_packets_per_sec: 900.0,
+            tx_packets_per_sec: 1100.0,
+        };
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("rx 12 tx 3"));
+        // A raw rate means nothing without knowing how busy the link was.
+        assert!(out.contains("% of packets"));
+        assert!((s.link_errors.error_pct() - 0.04998).abs() < 0.001);
+
+        // An idle link must not divide by zero.
+        assert_eq!(LinkErrors::default().error_pct(), 0.0);
     }
 
     /// Spiky latency must not blank the trace: a single 240ms outlier among

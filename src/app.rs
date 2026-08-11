@@ -610,6 +610,70 @@ pub struct Vitals {
     pub mem_total: u64,
     pub cpu_hist: History,
     pub mem_hist: History,
+    /// Per-core usage in core order. A single pegged core stalls a network path
+    /// while the global average looks idle, so the detail earns its space.
+    pub cores: Vec<f32>,
+    /// 1 / 5 / 15-minute load average.
+    pub load: (f64, f64, f64),
+    /// Share of RAM that is *unavailable*, 0..100. On macOS "used" sits near
+    /// total because of caching, so used/total reads alarming and means little;
+    /// what is available is the number that tracks feeling slow.
+    pub mem_pressure_pct: f32,
+    pub pressure_hist: History,
+    pub swap_used: u64,
+    pub swap_total: u64,
+    /// Thermal / power summary, platform-specific. Empty when unknown.
+    pub thermal: String,
+    /// True when the OS reports thermal or performance throttling. Throttling
+    /// tanks throughput while CPU looks idle, which is otherwise baffling.
+    pub throttled: bool,
+    /// "AC Power" / "Battery Power" where known.
+    pub power_source: String,
+}
+
+impl Vitals {
+    /// Number of cores currently reporting.
+    pub fn core_count(&self) -> usize {
+        self.cores.len()
+    }
+
+    /// Busiest single core, as a zero-based index. Display adds one —
+    /// people count cores from 1.
+    pub fn hottest_core(&self) -> Option<(usize, f32)> {
+        self.cores
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(i, v)| (i, *v))
+    }
+}
+
+/// Interface error and drop counters, as rates. Rising errors with normal CPU
+/// point at the link itself — a duplex mismatch, a bad cable, a full ring
+/// buffer — which nothing else in octomon would reveal.
+#[derive(Clone, Default)]
+pub struct LinkErrors {
+    pub iface: String,
+    pub rx_err_per_sec: f64,
+    pub tx_err_per_sec: f64,
+    /// Cumulative since octomon started, so a brief burst stays visible.
+    pub rx_err_total: u64,
+    pub tx_err_total: u64,
+    pub rx_packets_per_sec: f64,
+    pub tx_packets_per_sec: f64,
+}
+
+impl LinkErrors {
+    /// Errors as a share of packets carried — a rate alone means nothing
+    /// without knowing whether the link was busy.
+    pub fn error_pct(&self) -> f64 {
+        let packets = self.rx_packets_per_sec + self.tx_packets_per_sec;
+        let errors = self.rx_err_per_sec + self.tx_err_per_sec;
+        if packets + errors <= 0.0 {
+            return 0.0;
+        }
+        errors / (packets + errors) * 100.0
+    }
 }
 
 impl Default for History {
@@ -845,6 +909,8 @@ pub struct AppState {
     pub dns: Vec<DnsProbe>,
     pub signal: SignalState,
     pub vitals: Vitals,
+    /// Error/drop counters for the default interface.
+    pub link_errors: LinkErrors,
     pub focus: Panel,
     /// When set, the focused panel is drawn full-screen instead of the 2x2 grid.
     pub fullscreen: bool,
@@ -926,6 +992,7 @@ impl AppState {
             dns: Vec::new(),
             signal: SignalState::default(),
             vitals: Vitals::default(),
+            link_errors: LinkErrors::default(),
             focus: Panel::Quality,
             fullscreen: false,
             speedtest_enabled: true,
