@@ -356,7 +356,6 @@ mod macos {
 mod linux {
     use super::{ProcSample, WifiSignal};
     use crate::app::{Neighbour, WifiInfo};
-    use std::collections::HashMap;
 
     /// Live signal from `/proc/net/wireless`, which the kernel exposes to any
     /// user — no `iw`, no netlink, no privilege. Column 3 is the signal level in
@@ -727,31 +726,46 @@ mod linux {
             assert_eq!((n[2].channel, n[2].band_ghz), (161, 5));
         }
 
+        /// One sample per *socket*, not per process: `ss` lists only open
+        /// sockets, so a process total falls when a connection closes, and the
+        /// drop would cancel out real traffic. The collector sums the deltas.
         #[test]
-        fn ss_output_is_attributed_per_process() {
-            // Two sockets for one process, one for another.
+        fn ss_output_is_one_sample_per_socket() {
             let text = "\
-ESTAB 0 0 10.0.0.2:443 1.1.1.1:443 users:((\"firefox\",pid=100,fd=64))
+ESTAB 0 0 10.0.0.2:443 1.1.1.1:443 users:((\"firefox\",pid=100,fd=64)) ino:111 sk:1
 \t cubic wscale:7,7 rtt:12.5/1.0 bytes_sent:1000 bytes_received:5000 retrans:0/3
-ESTAB 0 0 10.0.0.2:80 2.2.2.2:80 users:((\"firefox\",pid=100,fd=65))
+ESTAB 0 0 10.0.0.2:80 2.2.2.2:80 users:((\"firefox\",pid=100,fd=65)) ino:222 sk:2
 \t cubic rtt:9/1 bytes_sent:500 bytes_received:2500 retrans:0/1
-ESTAB 0 0 10.0.0.2:22 3.3.3.3:22 users:((\"ssh\",pid=200,fd=3))
+ESTAB 0 0 10.0.0.2:22 3.3.3.3:22 users:((\"ssh\",pid=200,fd=3)) ino:333 sk:3
 \t cubic rtt:30/2 bytes_sent:99 bytes_received:77
 ";
             let mut s = parse_ss(text);
-            s.sort_by_key(|p| p.pid);
-            assert_eq!(s.len(), 2);
+            s.sort_by_key(|p| p.key);
+            assert_eq!(s.len(), 3, "three sockets, three counters");
 
-            // Both of firefox's sockets fold into one process entry.
-            assert_eq!(s[0].pid, 100);
-            assert_eq!(s[0].name, "firefox");
-            assert_eq!(s[0].bytes_out, 1500);
-            assert_eq!(s[0].bytes_in, 7500);
-            assert_eq!(s[0].retx, 4);
+            // Firefox's two sockets stay separate, each with its own identity.
+            assert_eq!(
+                (s[0].key, s[0].pid, s[0].name.as_str()),
+                (111, 100, "firefox")
+            );
+            assert_eq!((s[0].bytes_out, s[0].bytes_in, s[0].retx), (1000, 5000, 3));
+            assert_eq!((s[1].key, s[1].pid), (222, 100));
+            assert_eq!((s[1].bytes_out, s[1].bytes_in, s[1].retx), (500, 2500, 1));
 
-            assert_eq!(s[1].pid, 200);
-            assert_eq!(s[1].name, "ssh");
-            assert_eq!(s[1].retx, 0);
+            assert_eq!((s[2].key, s[2].pid, s[2].name.as_str()), (333, 200, "ssh"));
+            assert_eq!(
+                s[2].retx, 0,
+                "ss omits retrans: entirely when there are none"
+            );
+        }
+
+        /// Without `-e` there is no inode; the pid keeps the sample usable.
+        #[test]
+        fn ss_without_inode_falls_back_to_the_pid() {
+            let text = "ESTAB 0 0 10.0.0.2:443 1.1.1.1:443 users:((\"curl\",pid=254,fd=4))\n\t cubic bytes_sent:10 bytes_received:20\n";
+            let s = parse_ss(text);
+            assert_eq!(s.len(), 1);
+            assert_eq!(s[0].key, 254);
         }
 
         /// Verbatim `ss -tinpH` output from iproute2, so the parser is pinned to
@@ -777,6 +791,10 @@ ESTAB 0 0 10.0.0.2:22 3.3.3.3:22 users:((\"ssh\",pid=200,fd=3))
             // bytes_acked sits right next to bytes_sent and must not be read.
             assert_eq!(s[0].bytes_in, 112531);
             assert_eq!(s[0].retx, 0);
+            assert_eq!(
+                s[0].key, 254,
+                "no ino: in this capture, so it keys on the pid"
+            );
         }
 
         #[test]
