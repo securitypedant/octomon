@@ -527,14 +527,20 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                 // the right edge — that keeps "now" aligned down the column
                 // instead of stretching a short history across the full width.
                 let width = (data.len() as u16).min(spark_w);
-                let max = data.iter().copied().max().unwrap_or(1).max(1);
+                // Floor to a visible baseline, but colour from the *raw* sample:
+                // a fast hop under a spiky peak must still read as green, not as
+                // whatever its floored height happens to be.
+                let (heights, max) = floor_to_visible(&data, 1);
                 // Colour each bar by how bad that individual sample was, not by
                 // the hop's current state: a row that is green throughout except
                 // for a red patch tells you the trouble was transient, which
                 // height alone makes you squint to work out.
-                let bars: Vec<SparklineBar> = data
+                let bars: Vec<SparklineBar> = heights
                     .iter()
-                    .map(|&v| SparklineBar::from(v).style(Style::new().fg(rtt_color(v as f64))))
+                    .zip(data.iter())
+                    .map(|(&h, &raw)| {
+                        SparklineBar::from(h).style(Style::new().fg(rtt_color(raw as f64)))
+                    })
                     .collect();
                 f.render_widget(
                     Sparkline::default().data(bars).max(max),
@@ -1007,23 +1013,28 @@ fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
 /// sub-cell (▁), so low-but-present bandwidth is always visible. Returns the
 /// data plus the explicit max to scale against.
 fn spark_floor(hist: &crate::app::History, width: u16, height: u16) -> (Vec<u64>, u64) {
-    let data = hist.tail_u64(width as usize);
-    // A sparkline cell has 8 vertical levels, so the smallest value that renders
-    // anything is max / (rows*8).
+    floor_to_visible(&hist.tail_u64(width as usize), height)
+}
+
+/// Raise every sample to at least one rendered sub-cell, returning the data and
+/// the scale to draw it against.
+///
+/// A sparkline cell has 8 vertical levels, so in a one-row trace anything below
+/// `max / 8` renders as an empty column. With spiky data — a 240ms latency spike
+/// among 14ms samples — that blanks nearly the whole row, which reads as missing
+/// data rather than as a low value.
+fn floor_to_visible(data: &[u64], height: u16) -> (Vec<u64>, u64) {
     let levels = (height as u64).saturating_mul(8).max(8);
     let max = data.iter().copied().max().unwrap_or(0);
     if max == 0 {
-        // Idle link: still draw the baseline, so the chart reads as "zero
-        // throughput" rather than "no data" — an empty panel looks broken.
+        // All zero: still draw the baseline, so the chart reads as "nothing
+        // happening" rather than "no data" — an empty panel looks broken.
         return (vec![1; data.len()], levels);
     }
-    // Floor every sample, including zeros, so the trace keeps an unbroken
-    // baseline across quiet stretches instead of disappearing. Rounded up:
-    // ratatui truncates `value * levels / max`, so a floor computed by plain
-    // division lands just under one tick and renders nothing.
+    // Rounded up: ratatui truncates `value * levels / max`, so a floor computed
+    // by plain division lands just under one tick and renders nothing.
     let floor = max.div_ceil(levels).max(1);
-    let data = data.iter().map(|&v| v.max(floor)).collect();
-    (data, max)
+    (data.iter().map(|&v| v.max(floor)).collect(), max)
 }
 
 /// Rows to reserve for the speed-test status. A failure gets as many rows as the
@@ -2336,6 +2347,26 @@ mod tests {
         );
         // The peak still reaches the top.
         assert_eq!(data.iter().copied().max().unwrap(), 5_000_000);
+    }
+
+    /// Spiky latency must not blank the trace: a single 240ms outlier among
+    /// 14ms samples would otherwise push every normal sample below one tick.
+    #[test]
+    fn path_sparkline_keeps_a_baseline_under_a_spike() {
+        let samples: Vec<u64> = vec![14, 12, 15, 240, 13, 14, 0, 12];
+        let (heights, max) = floor_to_visible(&samples, 1);
+        assert_eq!(max, 240, "scale still comes from the real peak");
+        for (h, raw) in heights.iter().zip(samples.iter()) {
+            assert!(
+                h * 8 / max >= 1,
+                "sample {raw} rendered nothing (height {h}, max {max})"
+            );
+        }
+        // The spike still tops out, and colour comes from the raw value so a
+        // floored-up sample is not miscoloured as slow.
+        assert_eq!(heights.iter().copied().max().unwrap(), 240);
+        assert_eq!(rtt_color(14.0), Color::Green);
+        assert_eq!(rtt_color(240.0), Color::Red);
     }
 
     /// A long target list must stay navigable when the path monitor squeezes it.
