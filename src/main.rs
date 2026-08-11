@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
         s.samples_per_sec = 1000.0 / cfg.ping_interval_ms.max(1) as f64;
         s.speedtest_provider_names = provider_names;
         s.speedtest_provider_idx = sel;
-        s.speed_history = store::load_recent(50);
+        s.speed_history = store::load_recent(500);
         s.logging_requested = cli.log;
         // Which tools ship by default varies sharply by distribution, so a
         // missing binary is a normal condition. Say so up front rather than
@@ -271,8 +271,27 @@ fn move_cursor(s: &mut AppState, delta: isize) {
     match s.focus {
         Panel::Quality if secondary => {
             if let Some(m) = s.hop_monitor.as_mut() {
-                let last = m.hops.len().saturating_sub(1) as isize;
-                m.selected = (m.selected as isize + delta).clamp(0, last.max(0)) as usize;
+                // Only hops that answer are worth landing on: an unresponsive
+                // one has no statistics, no chart, and nothing to add as a
+                // target, so the cursor would appear to vanish passing over it.
+                let selectable: Vec<usize> = m
+                    .hops
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, h)| h.addr.is_some())
+                    .map(|(i, _)| i)
+                    .collect();
+                if selectable.is_empty() {
+                    return;
+                }
+                // Resume from wherever the cursor sits, even if that index is
+                // itself unselectable (the path can change under it).
+                let pos = selectable
+                    .iter()
+                    .position(|&i| i >= m.selected)
+                    .unwrap_or(selectable.len() - 1) as isize;
+                let next = (pos + delta).clamp(0, selectable.len() as isize - 1) as usize;
+                m.selected = selectable[next];
             }
         }
         Panel::Quality => {
@@ -740,5 +759,121 @@ fn prev_panel(p: Panel) -> Panel {
         Panel::Bandwidth => Panel::Quality,
         Panel::NetInfo => Panel::Bandwidth,
         Panel::Vitals => Panel::NetInfo,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use app::{HopMonitor, MonitoredHop, QualityView, TargetStat};
+    use std::net::Ipv4Addr;
+
+    fn monitor_state(hops: Vec<MonitoredHop>) -> AppState {
+        let mut s = AppState::new(vec![]);
+        s.focus = Panel::Quality;
+        s.quality_view = QualityView::HopMonitor;
+        s.sub_pane = SubPane::Secondary;
+        s.hop_monitor = Some(HopMonitor {
+            target: "t".into(),
+            dest: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            hops,
+            discovering: false,
+            generation: 1,
+            selected: 0,
+        });
+        s
+    }
+
+    fn live(ttl: u8) -> MonitoredHop {
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, ttl));
+        MonitoredHop {
+            ttl,
+            addr: Some(addr),
+            stat: Some(TargetStat::new(format!("hop {ttl}"), addr)),
+        }
+    }
+    fn silent(ttl: u8) -> MonitoredHop {
+        MonitoredHop {
+            ttl,
+            addr: None,
+            stat: None,
+        }
+    }
+
+    /// The cursor must land only on hops that answer: an unresponsive one has no
+    /// statistics and nothing to add, so it would look like the cursor vanished.
+    #[test]
+    fn hop_cursor_skips_unresponsive_hops() {
+        let mut s = monitor_state(vec![
+            live(1),
+            silent(2),
+            silent(3),
+            live(4),
+            silent(5),
+            live(6),
+        ]);
+        let sel = |s: &AppState| s.hop_monitor.as_ref().unwrap().selected;
+
+        assert_eq!(sel(&s), 0);
+        move_cursor(&mut s, 1);
+        assert_eq!(sel(&s), 3, "should jump the pair of silent hops");
+        move_cursor(&mut s, 1);
+        assert_eq!(sel(&s), 5);
+        // Clamped at the last responsive hop rather than running into silence.
+        move_cursor(&mut s, 1);
+        assert_eq!(sel(&s), 5);
+        move_cursor(&mut s, -1);
+        assert_eq!(sel(&s), 3);
+        move_cursor(&mut s, -5);
+        assert_eq!(sel(&s), 0);
+    }
+
+    #[test]
+    fn hop_cursor_survives_a_path_with_no_responsive_hops() {
+        let mut s = monitor_state(vec![silent(1), silent(2)]);
+        move_cursor(&mut s, 1);
+        assert_eq!(s.hop_monitor.as_ref().unwrap().selected, 0);
+    }
+
+    /// 'n' needs a second pane to move to; the Bandwidth panel gains one in
+    /// full-screen even before any speed test has been run.
+    #[test]
+    fn bandwidth_sub_pane_exists_in_fullscreen() {
+        let mut s = AppState::new(vec![]);
+        s.focus = Panel::Bandwidth;
+        assert!(!s.has_sub_pane(), "split view has a single pane");
+        s.fullscreen = true;
+        assert!(
+            s.has_sub_pane(),
+            "an empty history is still a pane worth focusing"
+        );
+    }
+
+    #[test]
+    fn speed_history_pages_through_every_entry() {
+        let mut s = AppState::new(vec![]);
+        s.focus = Panel::Bandwidth;
+        s.fullscreen = true;
+        s.sub_pane = SubPane::Secondary;
+        s.speed_history = (0..120)
+            .map(|i| store::SpeedRecord {
+                at: i,
+                provider: "Cloudflare".into(),
+                down_mbps: 100.0,
+                up_mbps: 10.0,
+                idle_ms: None,
+                loaded_ms: None,
+            })
+            .collect();
+
+        move_cursor(&mut s, 10);
+        assert_eq!(s.speed_sel, 10);
+        // Paging reaches the oldest entry rather than stopping at a page edge.
+        for _ in 0..20 {
+            move_cursor(&mut s, 10);
+        }
+        assert_eq!(s.speed_sel, 119, "should reach the last of 120 records");
+        move_cursor(&mut s, 10);
+        assert_eq!(s.speed_sel, 119, "and clamp there");
     }
 }

@@ -967,7 +967,9 @@ impl AppState {
             Panel::Quality => {
                 self.quality_view == QualityView::HopMonitor && self.hop_monitor.is_some()
             }
-            Panel::Bandwidth => self.fullscreen && !self.speed_history.is_empty(),
+            // Available whenever both panes are drawn; an empty history is
+            // still a pane you can focus and watch fill up.
+            Panel::Bandwidth => self.fullscreen,
             _ => false,
         }
     }

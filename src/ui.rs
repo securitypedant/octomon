@@ -396,16 +396,9 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
     let visible: Vec<&HopRow> = all_rows.iter().take(rows_avail).collect();
 
     let rows = visible.iter().map(|row| match row {
-        HopRow::Silent(from, to, count) => Row::new(vec![
-            Cell::from(format!("{from:>2}-{to}")),
-            Cell::from(format!("{count} hops silent (no ICMP reply)")),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-        ])
-        .style(Style::new().fg(Color::DarkGray).italic()),
+        // Left blank here and drawn afterwards across the whole row, since the
+        // message is wider than the address column and a Table cannot span.
+        HopRow::Silent(..) => Row::new(vec![Cell::from("")]),
         HopRow::Hop(idx, h) => {
             let selected = active && *idx == m.selected;
             let Some(stat) = &h.stat else {
@@ -460,31 +453,58 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
         },
     );
 
-    if show_sparks {
-        for (i, row) in visible.iter().enumerate() {
-            let HopRow::Hop(_, h) = row else { continue };
-            let Some(stat) = &h.stat else { continue };
-            let strip = Rect {
-                x: inner.x + table_w + 1,
-                y: inner.y + 1 + i as u16, // +1 skips the header row
-                width: spark_w,
-                height: 1,
-            };
-            if strip.y >= inner.y + inner.height {
-                break;
+    for (i, row) in visible.iter().enumerate() {
+        let y = inner.y + 1 + i as u16; // +1 skips the header row
+        if y >= inner.y + inner.height {
+            break;
+        }
+        match row {
+            HopRow::Silent(from, to, count) => {
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(format!("{from:>2}-{to} "), Style::new().fg(Color::DarkGray)),
+                        Span::styled(
+                            format!("{count} hops not responsive"),
+                            Style::new().fg(Color::DarkGray).italic(),
+                        ),
+                    ])),
+                    Rect {
+                        x: inner.x,
+                        y,
+                        width: inner.width,
+                        height: 1,
+                    },
+                );
             }
-            let data = stat.history.tail_u64(spark_w as usize);
-            if data.is_empty() {
-                continue;
+            HopRow::Hop(_, h) => {
+                if !show_sparks {
+                    continue;
+                }
+                let Some(stat) = &h.stat else { continue };
+                let data = stat.history.tail_u64(spark_w as usize);
+                if data.is_empty() {
+                    continue;
+                }
+                // Every hop is probed on the same interval, so one cell is the
+                // same slice of time on every row. A hop discovered late has
+                // fewer samples, so its trace is drawn narrower and pinned to
+                // the right edge — that keeps "now" aligned down the column
+                // instead of stretching a short history across the full width.
+                let width = (data.len() as u16).min(spark_w);
+                let max = data.iter().copied().max().unwrap_or(1).max(1);
+                f.render_widget(
+                    Sparkline::default()
+                        .data(data)
+                        .max(max)
+                        .style(Style::new().fg(latency_color(stat.last_rtt_ms, stat.loss_pct()))),
+                    Rect {
+                        x: inner.x + table_w + 1 + (spark_w - width),
+                        y,
+                        width,
+                        height: 1,
+                    },
+                );
             }
-            let max = data.iter().copied().max().unwrap_or(1).max(1);
-            f.render_widget(
-                Sparkline::default()
-                    .data(data)
-                    .max(max)
-                    .style(Style::new().fg(latency_color(stat.last_rtt_ms, stat.loss_pct()))),
-                strip,
-            );
         }
     }
 
@@ -1369,28 +1389,25 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
         )));
     }
 
-    // Full-screen has room to chart each resolver's response time, which is
-    // where slow DNS actually becomes visible.
-    let dns_rows = if s.fullscreen {
-        s.dns.len().min(MAX_DNS_GRAPHS) as u16
-    } else {
-        0
-    };
-    let (inner, dns_area) = if dns_rows > 0 {
-        let p =
-            Layout::vertical([Constraint::Min(6), Constraint::Length(dns_rows + 2)]).split(inner);
-        (p[0], Some(p[1]))
-    } else {
-        (inner, None)
-    };
-
-    // Reserve space at the bottom for whichever link graph applies.
     let graph = link_graph(s);
-    let (info_area, graph_area) = if graph == LinkGraph::None {
-        (inner, None)
+    let graph_h = if graph == LinkGraph::None { 0 } else { 5 };
+
+    // Full-screen charts each resolver's response time, which is where slow DNS
+    // actually becomes visible. The text block shrinks to its content so the
+    // charts get the leftover space rather than sitting under a large void.
+    let (info_area, graph_area, dns_area) = if s.fullscreen && !s.dns.is_empty() {
+        let parts = Layout::vertical([
+            Constraint::Length(lines.len() as u16),
+            Constraint::Length(graph_h),
+            Constraint::Min(3),
+        ])
+        .split(inner);
+        (parts[0], (graph_h > 0).then_some(parts[1]), Some(parts[2]))
+    } else if graph_h > 0 {
+        let p = Layout::vertical([Constraint::Min(4), Constraint::Length(graph_h)]).split(inner);
+        (p[0], Some(p[1]), None)
     } else {
-        let p = Layout::vertical([Constraint::Min(4), Constraint::Length(5)]).split(inner);
-        (p[0], Some(p[1]))
+        (inner, None, None)
     };
 
     f.render_widget(Paragraph::new(lines), info_area);
@@ -1445,36 +1462,51 @@ fn dns_graphs(f: &mut Frame, s: &AppState, area: Rect) {
         return;
     }
 
-    // Address column, then the rest of the width for the trace.
-    let label_w = 17u16.min(inner.width / 2);
+    // Split the panel evenly between resolvers, so a couple of them get tall
+    // readable traces rather than a one-row squiggle each.
+    let strip_h = (inner.height / shown as u16).max(1);
+    const LABEL_W: u16 = 26;
+    let spark_x = inner.x + LABEL_W;
+    let spark_w = inner.width.saturating_sub(LABEL_W);
+
     for (i, probe) in s.dns.iter().take(shown).enumerate() {
-        let y = inner.y + i as u16;
-        if y >= inner.y + inner.height {
+        let top = inner.y + i as u16 * strip_h;
+        if top >= inner.y + inner.height {
             break;
         }
-        let last = match probe.last_ms {
-            Some(ms) => format!("{ms:>4.0}ms"),
-            None => "   —  ".to_string(),
-        };
+        let h = strip_h.min(inner.y + inner.height - top);
         let color = probe.last_ms.map(dns_color).unwrap_or(Color::Red);
+
+        // Label sits on the strip's first row; mean gives context the instant
+        // reading cannot.
+        let last = match probe.last_ms {
+            Some(ms) => format!("{ms:.0}ms"),
+            None if !probe.status.is_empty() => probe.status.clone(),
+            None => "—".to_string(),
+        };
+        let mean = probe
+            .mean_ms()
+            .map(|v| format!("avg {v:.0}"))
+            .unwrap_or_default();
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    format!("{:<16}", probe.server.to_string()),
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    probe.server.to_string(),
                     Style::new().fg(Color::Gray),
-                ),
-                Span::styled(last, Style::new().fg(color)),
-            ])),
+                )),
+                Line::from(vec![
+                    Span::styled(format!("{last:<10}"), Style::new().fg(color).bold()),
+                    Span::styled(mean, Style::new().fg(Color::DarkGray)),
+                ]),
+            ]),
             Rect {
                 x: inner.x,
-                y,
-                width: label_w + 7,
-                height: 1,
+                y: top,
+                width: LABEL_W.min(inner.width),
+                height: h,
             },
         );
 
-        let spark_x = inner.x + label_w + 8;
-        let spark_w = inner.width.saturating_sub(label_w + 8);
         if spark_w < 4 {
             continue;
         }
@@ -1490,9 +1522,9 @@ fn dns_graphs(f: &mut Frame, s: &AppState, area: Rect) {
                 .style(Style::new().fg(color)),
             Rect {
                 x: spark_x,
-                y,
+                y: top,
                 width: spark_w,
-                height: 1,
+                height: h,
             },
         );
     }
@@ -2031,7 +2063,7 @@ mod tests {
         // The lossy hop reports its loss rather than being hidden.
         assert!(out.contains("75%"));
         // A run of silent hops collapses; a lone one does not.
-        assert!(out.contains("3 hops silent"));
+        assert!(out.contains("3 hops not responsive"));
         assert!(out.contains(" 5-7"));
     }
 
