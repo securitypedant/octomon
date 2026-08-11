@@ -53,6 +53,11 @@ struct Cli {
     /// Override the ICMP ping interval, in milliseconds.
     #[arg(long, value_name = "MS")]
     ping_interval: Option<u64>,
+
+    /// Start recording the session to CSV immediately (same as pressing 'l'),
+    /// so octomon can be run headless as a recorder.
+    #[arg(long)]
+    log: bool,
 }
 
 #[tokio::main]
@@ -100,6 +105,7 @@ async fn main() -> Result<()> {
         s.speedtest_provider_names = provider_names;
         s.speedtest_provider_idx = sel;
         s.speed_history = store::load_recent(50);
+        s.logging_requested = cli.log;
     }
 
     // Triggers fired by key presses.
@@ -145,6 +151,7 @@ async fn main() -> Result<()> {
     tokio::spawn(collectors::throughput::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::vitals::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::dns::run(state.clone(), cfg.clone()));
+    tokio::spawn(collectors::logger::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::netinfo::run(
         state.clone(),
         netinfo_refresh.clone(),
@@ -322,6 +329,9 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     side = Side::Refresh;
                 }
                 KeyCode::Char('w') => s.cycle_window(),
+                // 'l' toggles session recording; the logger task acts on this
+                // and reports back, so no file I/O happens on the key path.
+                KeyCode::Char('l') => s.logging_requested = !s.logging_requested,
                 // Shift+R resets the focused panel's accumulated data.
                 KeyCode::Char('R') => match s.focus {
                     Panel::Quality => {

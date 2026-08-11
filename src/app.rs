@@ -639,6 +639,15 @@ pub enum InputMode {
     AddTarget,
 }
 
+/// An in-progress session recording.
+#[derive(Clone)]
+pub struct LogStatus {
+    pub path: std::path::PathBuf,
+    /// Rows written so far.
+    pub rows: u64,
+    pub started: Instant,
+}
+
 /// Root shared state.
 pub struct AppState {
     pub targets: Vec<TargetStat>,
@@ -702,6 +711,10 @@ pub struct AppState {
     pub paused: bool,
     /// Help overlay visible.
     pub show_help: bool,
+    /// Set by the UI to ask the logger to start/stop; the logger owns the file.
+    pub logging_requested: bool,
+    /// Present while a recording is actually open.
+    pub log: Option<LogStatus>,
 
     pub should_quit: bool,
     pub started: Instant,
@@ -743,6 +756,8 @@ impl AppState {
             notice: None,
             paused: false,
             show_help: false,
+            logging_requested: false,
+            log: None,
             should_quit: false,
             started: Instant::now(),
         }

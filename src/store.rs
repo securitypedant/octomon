@@ -32,6 +32,21 @@ impl SpeedRecord {
     }
 }
 
+/// Directory for octomon's own data files.
+pub fn data_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| directories::BaseDirs::new().map(|b| b.home_dir().join(".local/share")))?;
+    Some(base.join("octomon"))
+}
+
+/// Path for a new session log, named for the moment recording started.
+pub fn session_log_path() -> Option<PathBuf> {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    Some(data_dir()?.join(format!("octomon-{stamp}.csv")))
+}
+
 fn path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)

@@ -76,6 +76,27 @@ fn header(f: &mut Frame, s: &AppState, area: Rect) {
     if s.fullscreen {
         left.push(Span::styled("  ⛶ full", Style::new().fg(Color::DarkGray)));
     }
+    // Recording is a background side effect that writes to disk, so it stays
+    // visible for as long as it is running.
+    match &s.log {
+        Some(log) => {
+            let secs = log.started.elapsed().as_secs();
+            left.push(Span::styled(
+                "  ● REC",
+                Style::new().fg(Color::White).bg(Color::Red).bold(),
+            ));
+            left.push(Span::styled(
+                format!(" {}:{:02}  {} rows", secs / 60, secs % 60, log.rows),
+                Style::new().fg(Color::Red),
+            ));
+        }
+        // Asked for, but the file is not open yet (or failed to open).
+        None if s.logging_requested => left.push(Span::styled(
+            "  ● starting…",
+            Style::new().fg(Color::Yellow),
+        )),
+        None => {}
+    }
     f.render_widget(Paragraph::new(Line::from(left)), cols[0]);
 
     // Context-sensitive actions, top-right.
@@ -155,7 +176,7 @@ fn footer(f: &mut Frame, s: &AppState, area: Rect) {
         ))
     } else {
         Line::from(Span::styled(
-            " [Tab] focus  [f] full  [p] pause  [r] refresh  [w] window  [s] speedtest  [?] help  [q] quit",
+            " [Tab] focus  [f] full  [p] pause  [r] refresh  [w] window  [s] speedtest  [l] log  [?] help  [q] quit",
             Style::new().fg(Color::DarkGray),
         ))
     };
@@ -904,6 +925,7 @@ fn help_overlay(f: &mut Frame, area: Rect) {
         row("p", "pause / resume auto-refresh"),
         row("r", "re-probe network info"),
         row("w", "cycle stats window (30/60/300s)"),
+        row("l", "start / stop recording this session to CSV"),
         row("?", "toggle this help"),
         row("q / Esc", "quit"),
         Line::from(""),
