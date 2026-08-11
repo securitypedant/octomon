@@ -10,7 +10,7 @@ use ratatui::widgets::{
     Sparkline, Table, Wrap,
 };
 
-use crate::app::{AppState, InputMode, LinkMedium, Panel, ProcStatus, SpeedStatus};
+use crate::app::{AppState, InputMode, LinkMedium, Panel, ProcStatus, QualityView, SpeedStatus};
 
 /// Draw the whole dashboard.
 pub fn render(f: &mut Frame, s: &AppState) {
@@ -101,6 +101,8 @@ fn context_line(s: &AppState) -> Line<'static> {
             txt("raph "),
             key("[t]"),
             txt("race "),
+            key("[m]"),
+            txt("onitor "),
             key("[←→↵]"),
             txt("sort "),
             key("[R]"),
@@ -176,21 +178,21 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let inner = b.inner(area);
     f.render_widget(b, area);
 
-    // When showing traceroute, shrink the table so hops get the room.
+    // The path views need the room, so the target table shrinks to a summary.
     let bottom_h = if s.fullscreen { 12 } else { 6 };
-    let parts = if s.show_traceroute {
+    let parts = if s.quality_view == QualityView::Graph {
+        Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(bottom_h),
+        ])
+        .split(inner)
+    } else {
         let table_h = (s.targets.len() as u16 + 2).min(9);
         Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(table_h),
             Constraint::Min(0),
-        ])
-        .split(inner)
-    } else {
-        Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(bottom_h),
         ])
         .split(inner)
     };
@@ -270,10 +272,154 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     ];
     f.render_widget(Table::new(rows, widths).header(header), parts[1]);
 
-    if s.show_traceroute {
-        traceroute_view(f, s, parts[2]);
+    match s.quality_view {
+        QualityView::Graph => latency_graph(f, s, n, parts[2]),
+        QualityView::Traceroute => traceroute_view(f, s, parts[2]),
+        QualityView::HopMonitor => hop_monitor_view(f, s, n, parts[2]),
+    }
+}
+
+/// Continuous per-hop statistics with an inline sparkline for every hop — the
+/// MTR-style view. Loss appearing at one hop and persisting past it points at
+/// that hop; loss *only* at a hop is usually just ICMP deprioritised there, so
+/// both columns are shown and coloured differently.
+fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
+    let Some(m) = &s.hop_monitor else {
+        return;
+    };
+    let status = if m.discovering {
+        "walking path…"
     } else {
-        latency_graph(f, s, n, parts[2]);
+        "live"
+    };
+    let outer = Block::new().title(Span::styled(
+        format!(
+            " path monitor · {}  ({status})  [↑↓] hop  [g] graph ",
+            m.target
+        ),
+        Style::new().fg(Color::DarkGray),
+    ));
+    let inner = outer.inner(area);
+    f.render_widget(outer, area);
+    if inner.height == 0 || m.hops.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "discovering path…",
+                Style::new().fg(Color::DarkGray),
+            )),
+            inner,
+        );
+        return;
+    }
+
+    // Reserve the right-hand slice for per-hop sparklines; the table takes the
+    // rest. Below a certain width the sparklines are noise, so drop them.
+    let spark_w = if inner.width >= 74 { 18 } else { 0 };
+    let table_w = inner.width.saturating_sub(spark_w);
+
+    let header = Row::new(["ttl", "address", "loss", "last", "avg", "p95", "jitter"])
+        .style(Style::new().fg(Color::Gray).bold());
+    let rows_avail = inner.height.saturating_sub(1) as usize;
+    let visible = m.hops.len().min(rows_avail);
+
+    let rows = m.hops.iter().take(visible).enumerate().map(|(i, h)| {
+        let selected = i == m.selected;
+        let Some(stat) = &h.stat else {
+            // A hop that never answered discovery: no probe, nothing to show.
+            let mut style = Style::new().fg(Color::DarkGray);
+            if selected {
+                style = style.bg(Color::Rgb(40, 40, 55));
+            }
+            return Row::new(vec![
+                Cell::from(format!("{:>2}", h.ttl)),
+                Cell::from("*"),
+                Cell::from("—"),
+                Cell::from("—"),
+                Cell::from("—"),
+                Cell::from("—"),
+                Cell::from("—"),
+            ])
+            .style(style);
+        };
+        let loss = stat.loss_pct();
+        let st = stat.stats(n);
+        let mut style = Style::new().fg(latency_color(stat.last_rtt_ms, loss));
+        if selected {
+            style = style
+                .bg(Color::Rgb(40, 40, 55))
+                .add_modifier(Modifier::BOLD);
+        }
+        Row::new(vec![
+            Cell::from(format!("{:>2}", h.ttl)),
+            Cell::from(
+                h.addr
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "*".to_string()),
+            ),
+            Cell::from(Span::styled(
+                format!("{loss:.0}%"),
+                Style::new().fg(loss_color(loss)),
+            )),
+            Cell::from(fmt_ms(stat.last_rtt_ms)),
+            Cell::from(fmt_ms(st.mean)),
+            Cell::from(fmt_ms(st.p95)),
+            Cell::from(format!("{:.1}", stat.jitter_ms)),
+        ])
+        .style(style)
+    });
+    let widths = [
+        Constraint::Length(4),
+        Constraint::Length(17),
+        Constraint::Length(6),
+        Constraint::Length(8),
+        Constraint::Length(8),
+        Constraint::Length(8),
+        Constraint::Length(7),
+    ];
+    let table_area = Rect {
+        width: table_w,
+        ..inner
+    };
+    f.render_widget(Table::new(rows, widths).header(header), table_area);
+
+    if spark_w == 0 {
+        return;
+    }
+    // One sparkline per row, drawn into the row's own single-cell-high strip.
+    for (i, h) in m.hops.iter().take(visible).enumerate() {
+        let Some(stat) = &h.stat else { continue };
+        let row = Rect {
+            x: inner.x + table_w,
+            y: inner.y + 1 + i as u16, // +1 skips the header row
+            width: spark_w,
+            height: 1,
+        };
+        if row.y >= inner.y + inner.height {
+            break;
+        }
+        let data = stat.history.tail_u64(spark_w as usize);
+        if data.is_empty() {
+            continue;
+        }
+        let max = data.iter().copied().max().unwrap_or(1).max(1);
+        f.render_widget(
+            Sparkline::default()
+                .data(data)
+                .max(max)
+                .style(Style::new().fg(latency_color(stat.last_rtt_ms, stat.loss_pct()))),
+            row,
+        );
+    }
+}
+
+/// Loss deserves its own scale: any sustained loss matters, unlike latency where
+/// tens of milliseconds are unremarkable.
+fn loss_color(pct: f64) -> Color {
+    match pct {
+        p if p >= 5.0 => Color::Red,
+        p if p >= 1.0 => Color::Yellow,
+        p if p > 0.0 => Color::Rgb(200, 200, 120),
+        _ => Color::Green,
     }
 }
 
@@ -769,7 +915,8 @@ fn help_overlay(f: &mut Frame, area: Rect) {
         row("d / Del", "delete the selected target"),
         row("g", "graph selected target (exits traceroute)"),
         row("t", "traceroute the selected target"),
-        row("↑/↓ or j/k", "select a target"),
+        row("m", "monitor every hop continuously (MTR-style)"),
+        row("↑/↓ or j/k", "select a target (or hop, when monitoring)"),
         row("←/→", "move sort-column cursor"),
         row("Enter", "sort by the cursor column"),
         row("Space", "toggle sort direction"),
@@ -1416,6 +1563,61 @@ mod tests {
             link_graph(&state_with_medium(LinkMedium::WiFi)),
             LinkGraph::None
         );
+    }
+
+    #[test]
+    fn hop_monitor_lists_every_hop_with_its_stats() {
+        use crate::app::{HopMonitor, MonitoredHop, QualityView};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let hop = |ttl: u8, last: u8, samples: &[f64], losses: usize| {
+            let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, last));
+            let mut st = crate::app::TargetStat::new(format!("hop {ttl}"), addr);
+            for &v in samples {
+                st.record_reply(v);
+            }
+            for _ in 0..losses {
+                st.record_loss();
+            }
+            MonitoredHop {
+                ttl,
+                addr: Some(addr),
+                stat: Some(st),
+            }
+        };
+
+        let mut s = AppState::new(vec![]);
+        s.quality_view = QualityView::HopMonitor;
+        s.focus = Panel::Quality;
+        s.fullscreen = true;
+        s.hop_monitor = Some(HopMonitor {
+            target: "Cloudflare (1.1.1.1)".into(),
+            dest: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            hops: vec![
+                hop(1, 1, &[3.0, 3.2, 3.1], 0),
+                // A hop that answered discovery but is now dropping probes.
+                hop(2, 2, &[20.0, 21.0], 6),
+                // A hop that never answered traceroute at all.
+                MonitoredHop {
+                    ttl: 3,
+                    addr: None,
+                    stat: None,
+                },
+            ],
+            discovering: false,
+            generation: 1,
+            selected: 0,
+        });
+
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("path monitor"));
+        assert!(out.contains("Cloudflare (1.1.1.1)"));
+        assert!(out.contains("10.0.0.1"));
+        assert!(out.contains("10.0.0.2"));
+        // The lossy hop reports its loss rather than being hidden.
+        assert!(out.contains("75%"));
+        // An unresolved hop still occupies its ttl slot.
+        assert!(out.contains(" 3 "));
     }
 
     #[test]

@@ -65,7 +65,7 @@ fn finish(state: &Arc<Mutex<AppState>>, err: Option<String>) {
 
 /// Parse a hop line like ` 5  157.131.209.65  187.819 ms` or ` 6  *`.
 /// The header ("traceroute to …") and blanks return `None`.
-fn parse_hop(line: &str) -> Option<Hop> {
+pub(crate) fn parse_hop(line: &str) -> Option<Hop> {
     let mut it = line.split_whitespace();
     let ttl: u8 = it.next()?.parse().ok()?;
     let second = it.next()?;

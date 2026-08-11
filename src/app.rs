@@ -286,6 +286,45 @@ pub struct Traceroute {
     pub hops: Vec<Hop>,
 }
 
+/// A hop under continuous measurement. Reuses [`TargetStat`], so hops get the
+/// same distribution / jitter / loss maths as ordinary targets.
+#[derive(Clone)]
+pub struct MonitoredHop {
+    pub ttl: u8,
+    /// `None` for a hop that never answered discovery (a `*` in traceroute).
+    pub addr: Option<IpAddr>,
+    /// Live statistics, present once the hop has an address to probe.
+    pub stat: Option<TargetStat>,
+}
+
+/// Continuous per-hop monitoring of the path to a destination — the MTR-style
+/// view. Where the whole path degrades tells you *where* the problem is, which
+/// a flat list of endpoint targets cannot.
+#[derive(Clone)]
+pub struct HopMonitor {
+    /// Display label for the destination, e.g. "Cloudflare (1.1.1.1)".
+    pub target: String,
+    pub dest: IpAddr,
+    pub hops: Vec<MonitoredHop>,
+    /// True while the path is being (re)discovered.
+    pub discovering: bool,
+    /// Bumped on every restart so probe tasks from a previous run exit.
+    pub generation: u64,
+    /// Cursor into `hops`, selecting which hop gets the large chart.
+    pub selected: usize,
+}
+
+/// Which chart the Connection Quality panel shows beneath the target table.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum QualityView {
+    /// Latency history for the graphed target.
+    Graph,
+    /// One-shot traceroute results.
+    Traceroute,
+    /// Continuously updated per-hop statistics.
+    HopMonitor,
+}
+
 /// Wi-Fi radio details (best-effort, platform-specific).
 #[derive(Clone, Default)]
 pub struct WifiInfo {
@@ -557,8 +596,10 @@ pub struct AppState {
     pub q_sort: Option<(usize, bool)>,
     /// Traceroute result for the current target, when requested.
     pub traceroute: Option<Traceroute>,
-    /// Show the traceroute view instead of the latency graph.
-    pub show_traceroute: bool,
+    /// Continuous per-hop monitor, when running.
+    pub hop_monitor: Option<HopMonitor>,
+    /// Which chart the panel is showing.
+    pub quality_view: QualityView,
     /// When 'r' was last pressed, for a transient "re-probing" note.
     pub refresh_at: Option<Instant>,
 
@@ -602,7 +643,8 @@ impl AppState {
             q_col: 0,
             q_sort: None,
             traceroute: None,
-            show_traceroute: false,
+            hop_monitor: None,
+            quality_view: QualityView::Graph,
             refresh_at: None,
             input_mode: InputMode::Normal,
             input_buffer: String::new(),

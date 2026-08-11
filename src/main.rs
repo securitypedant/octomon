@@ -22,7 +22,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use surge_ping::Client;
 use tokio::sync::{Notify, mpsc};
 
-use app::{AppState, InputMode, Panel, SpeedStatus, TargetStat};
+use app::{AppState, InputMode, Panel, QualityView, SpeedStatus, TargetStat};
 use config::Config;
 
 /// Handles shared with the input loop for issuing side effects.
@@ -233,11 +233,20 @@ enum Side {
     Refresh,
     AddTarget(String),
     Traceroute(IpAddr, String),
+    HopMonitor(IpAddr, String),
     SaveProvider(String),
 }
 
-/// Move the target cursor by `delta` through the current display order.
-fn move_selection(s: &mut AppState, delta: isize) {
+/// Move whichever cursor the Connection Quality panel is currently showing: the
+/// hop list when monitoring a path, otherwise the target list.
+fn move_quality_cursor(s: &mut AppState, delta: isize) {
+    if s.quality_view == QualityView::HopMonitor
+        && let Some(m) = s.hop_monitor.as_mut()
+    {
+        let last = m.hops.len().saturating_sub(1) as isize;
+        m.selected = (m.selected as isize + delta).clamp(0, last.max(0)) as usize;
+        return;
+    }
     let order = s.quality_order();
     let Some(pos) = order.iter().position(|&i| i == s.selected) else {
         return;
@@ -379,10 +388,10 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.input_buffer.clear();
                 }
                 KeyCode::Up | KeyCode::Char('k') if s.focus == Panel::Quality => {
-                    move_selection(&mut s, -1);
+                    move_quality_cursor(&mut s, -1);
                 }
                 KeyCode::Down | KeyCode::Char('j') if s.focus == Panel::Quality => {
-                    move_selection(&mut s, 1);
+                    move_quality_cursor(&mut s, 1);
                 }
                 // ←/→ move the column cursor; Enter sorts by it (Space toggles).
                 KeyCode::Left if s.focus == Panel::Quality => {
@@ -398,18 +407,31 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         _ => Some((col, col != 0)),
                     };
                 }
-                // 'g' graphs the selected target (and exits the traceroute view).
+                // 'g' graphs the selected target (and leaves the path views).
                 KeyCode::Char('g') if s.focus == Panel::Quality => {
                     s.graph_target = s.selected;
-                    s.show_traceroute = false;
+                    s.quality_view = QualityView::Graph;
                 }
                 // Run a traceroute to the selected target.
                 KeyCode::Char('t') if s.focus == Panel::Quality => {
                     let running = s.traceroute.as_ref().is_some_and(|t| t.running);
                     if !running && let Some(t) = s.targets.get(s.selected) {
                         let (addr, label) = (t.addr, t.label.clone());
-                        s.show_traceroute = true;
+                        s.quality_view = QualityView::Traceroute;
                         side = Side::Traceroute(addr, label);
+                    }
+                }
+                // 'm' monitors every hop to the selected target, continuously.
+                // Pressing it again while already monitoring that destination
+                // just returns to the view rather than restarting the stats.
+                KeyCode::Char('m') if s.focus == Panel::Quality => {
+                    if let Some(t) = s.targets.get(s.selected) {
+                        let (addr, label) = (t.addr, t.label.clone());
+                        let already = s.hop_monitor.as_ref().is_some_and(|m| m.dest == addr);
+                        s.quality_view = QualityView::HopMonitor;
+                        if !already {
+                            side = Side::HopMonitor(addr, label);
+                        }
                     }
                 }
                 _ => {}
@@ -435,6 +457,12 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
         Side::Traceroute(addr, label) => {
             collectors::traceroute::start(ctx.state.clone(), addr, label);
         }
+        Side::HopMonitor(addr, label) => match ctx.ping_client.clone() {
+            Some(client) => {
+                collectors::hopmon::start(ctx.state.clone(), client, ctx.cfg.clone(), addr, label)
+            }
+            None => ctx.state.lock().unwrap().notice = Some("ICMP unavailable".to_string()),
+        },
         Side::SaveProvider(name) => {
             tokio::task::spawn_blocking(move || config::Config::persist_provider(&name));
         }
