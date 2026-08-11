@@ -7,7 +7,7 @@ network, the Wi-Fi, the ISP, or your own machine that's misbehaving.
 [![CI](https://github.com/securitypedant/octomon/actions/workflows/ci.yml/badge.svg)](https://github.com/securitypedant/octomon/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-![octomon screenshot](screenshot.png)
+![octomon screenshot](https://raw.githubusercontent.com/securitypedant/octomon/main/screenshot.png)
 
 ## What it shows
 
