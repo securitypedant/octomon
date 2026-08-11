@@ -5,6 +5,7 @@
 network, the Wi-Fi, the ISP, or your own machine that's misbehaving.
 
 [![CI](https://github.com/securitypedant/octomon/actions/workflows/ci.yml/badge.svg)](https://github.com/securitypedant/octomon/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/octomon.svg)](https://crates.io/crates/octomon)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 ![octomon screenshot](https://raw.githubusercontent.com/securitypedant/octomon/main/screenshot.png)
@@ -163,6 +164,18 @@ Install `traceroute` as well if your distribution omits it — see
 [Linux: external tools](#linux-external-tools) — and read
 [Linux: privileges](#linux-privileges): on Linux you will most likely want to
 run `sudo octomon`.
+
+### crates.io (any platform)
+
+If you already have Rust, this works everywhere and needs no tap or installer:
+
+```sh
+cargo install octomon
+```
+
+It builds from source, so it needs a Rust 1.88+ toolchain and takes a minute or
+two — the Homebrew and Linux routes above ship a prebuilt binary instead.
+Upgrade later with `cargo install octomon --force`.
 
 ### From source
 
