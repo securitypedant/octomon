@@ -3,6 +3,7 @@
 //! never span an `.await`.
 
 pub mod discovery;
+pub mod dns;
 pub mod hopmon;
 pub mod ndt7;
 pub mod netinfo;

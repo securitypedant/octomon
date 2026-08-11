@@ -1080,14 +1080,7 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
         ));
     }
 
-    lines.push(kv(
-        "dns",
-        if n.dns.is_empty() {
-            "-".into()
-        } else {
-            n.dns.join(", ")
-        },
-    ));
+    lines.push(dns_line(s));
 
     if let Some(w) = &n.wifi {
         // Live signal/tx come from the CoreWLAN graph below; keep the slower
@@ -1149,6 +1142,56 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
             )),
             bottom,
         );
+    }
+}
+
+/// The `dns` row, annotated with each resolver's measured response time. A
+/// resolver can answer pings in 2ms while taking 800ms to resolve, so the
+/// address alone tells you nothing about whether it is the problem.
+fn dns_line(s: &AppState) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!("{:<9}", "dns"),
+        Style::new().fg(Color::DarkGray),
+    )];
+    if s.netinfo.dns.is_empty() {
+        spans.push(Span::raw("-"));
+        return Line::from(spans);
+    }
+
+    for (i, server) in s.netinfo.dns.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", Style::new()));
+        }
+        spans.push(Span::raw(server.clone()));
+        let probe = s.dns.iter().find(|p| p.server.to_string() == *server);
+        match probe {
+            // A failing resolver is the headline, not its latency.
+            Some(p) if !p.status.is_empty() && p.last_ms.is_none() => {
+                spans.push(Span::styled(
+                    format!(" ({})", p.status),
+                    Style::new().fg(Color::Red).bold(),
+                ));
+            }
+            Some(p) => match p.last_ms {
+                Some(ms) => spans.push(Span::styled(
+                    format!(" ({ms:.0}ms)"),
+                    Style::new().fg(dns_color(ms)),
+                )),
+                None => spans.push(Span::styled(" (…)", Style::new().fg(Color::DarkGray))),
+            },
+            None => spans.push(Span::styled(" (…)", Style::new().fg(Color::DarkGray))),
+        }
+    }
+    Line::from(spans)
+}
+
+/// Resolver latency thresholds: a cached answer should be near the RTT to the
+/// resolver, so tens of ms is fine and hundreds is not.
+fn dns_color(ms: f64) -> Color {
+    match ms {
+        v if v < 30.0 => Color::Green,
+        v if v < 120.0 => Color::Yellow,
+        _ => Color::Red,
     }
 }
 
@@ -1618,6 +1661,36 @@ mod tests {
         assert!(out.contains("75%"));
         // An unresolved hop still occupies its ttl slot.
         assert!(out.contains(" 3 "));
+    }
+
+    #[test]
+    fn dns_row_annotates_each_resolver() {
+        use crate::app::DnsProbe;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let mut s = state_with_medium(LinkMedium::WiFi);
+        s.netinfo.dns = vec!["192.168.1.4".into(), "1.1.1.1".into(), "9.9.9.9".into()];
+
+        let mut slow = DnsProbe::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 4)));
+        slow.last_ms = Some(410.0);
+        slow.sent = 4;
+        slow.ok = 4;
+
+        let mut fast = DnsProbe::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
+        fast.last_ms = Some(9.0);
+        fast.sent = 4;
+        fast.ok = 4;
+
+        // A resolver that stopped answering reports why, not a latency.
+        let mut dead = DnsProbe::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)));
+        dead.sent = 4;
+        dead.status = "timeout".into();
+
+        s.dns = vec![slow, fast, dead];
+        let out = draw(&s, 200, 60);
+        assert!(out.contains("192.168.1.4 (410ms)"));
+        assert!(out.contains("1.1.1.1 (9ms)"));
+        assert!(out.contains("9.9.9.9 (timeout)"));
     }
 
     #[test]

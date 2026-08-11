@@ -433,6 +433,48 @@ impl NetInfo {
     }
 }
 
+/// Responsiveness of one DNS resolver.
+#[derive(Clone)]
+pub struct DnsProbe {
+    pub server: IpAddr,
+    /// Round-trip of the most recent query, or `None` if it failed.
+    pub last_ms: Option<f64>,
+    pub hist: History,
+    pub sent: u64,
+    pub ok: u64,
+    /// Why the last query failed ("SERVFAIL", "timeout"), else empty.
+    pub status: String,
+}
+
+impl DnsProbe {
+    pub fn new(server: IpAddr) -> Self {
+        Self {
+            server,
+            last_ms: None,
+            hist: History::new(300),
+            sent: 0,
+            ok: 0,
+            status: String::new(),
+        }
+    }
+
+    /// Mean round trip over the retained history.
+    pub fn mean_ms(&self) -> Option<f64> {
+        if self.hist.data.is_empty() {
+            return None;
+        }
+        Some(self.hist.data.iter().sum::<f64>() / self.hist.data.len() as f64)
+    }
+
+    /// Share of queries that went unanswered, as a percentage.
+    pub fn fail_pct(&self) -> f64 {
+        if self.sent == 0 {
+            return 0.0;
+        }
+        (self.sent - self.ok) as f64 / self.sent as f64 * 100.0
+    }
+}
+
 /// Live Wi-Fi signal, sampled frequently (CoreWLAN on macOS) for graphing.
 #[derive(Clone, Default)]
 pub struct SignalState {
@@ -603,6 +645,8 @@ pub struct AppState {
     pub throughput: Throughput,
     pub speedtest: SpeedTest,
     pub netinfo: NetInfo,
+    /// Per-resolver DNS responsiveness, in the order the interface reports them.
+    pub dns: Vec<DnsProbe>,
     pub signal: SignalState,
     pub vitals: Vitals,
     pub focus: Panel,
@@ -670,6 +714,7 @@ impl AppState {
             throughput: Throughput::default(),
             speedtest: SpeedTest::default(),
             netinfo: NetInfo::default(),
+            dns: Vec::new(),
             signal: SignalState::default(),
             vitals: Vitals::default(),
             focus: Panel::Quality,

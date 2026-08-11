@@ -47,6 +47,13 @@ pub struct Config {
     /// Public-IP discovery endpoint (plain-text IP response). Added as a target
     /// on startup. Set to "" to disable.
     pub public_ip_url: String,
+    /// How often each configured DNS resolver is probed, in milliseconds.
+    pub dns_interval_ms: u64,
+    /// Per-query DNS timeout, in milliseconds.
+    pub dns_timeout_ms: u64,
+    /// Name looked up when probing resolvers. A widely cached name measures what
+    /// applications actually experience; something obscure measures recursion.
+    pub dns_probe_name: String,
 }
 
 impl Default for Config {
@@ -71,6 +78,9 @@ impl Default for Config {
             librespeed_server_list: "https://librespeed.org/backend-servers/servers.json"
                 .to_string(),
             public_ip_url: "https://api.ipify.org".to_string(),
+            dns_interval_ms: 5000,
+            dns_timeout_ms: 2000,
+            dns_probe_name: "example.com".to_string(),
         }
     }
 }
@@ -96,6 +106,12 @@ impl Config {
     }
     pub fn sample_interval(&self) -> Duration {
         Duration::from_millis(self.sample_interval_ms)
+    }
+    pub fn dns_interval(&self) -> Duration {
+        Duration::from_millis(self.dns_interval_ms.max(500))
+    }
+    pub fn dns_timeout(&self) -> Duration {
+        Duration::from_millis(self.dns_timeout_ms.max(100))
     }
 
     /// The config file path: `$XDG_CONFIG_HOME/octomon/config.toml`, or

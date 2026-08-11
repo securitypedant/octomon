@@ -144,6 +144,7 @@ async fn main() -> Result<()> {
     // Spawn collectors, each on its own cadence.
     tokio::spawn(collectors::throughput::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::vitals::run(state.clone(), cfg.clone()));
+    tokio::spawn(collectors::dns::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::netinfo::run(
         state.clone(),
         netinfo_refresh.clone(),
@@ -616,6 +617,24 @@ fn print_snapshot(s: &AppState) {
         );
     }
     println!("  dns={:?}", n.dns);
+    for p in &s.dns {
+        let rtt = p
+            .last_ms
+            .map(|v| format!("{v:.1}ms"))
+            .unwrap_or_else(|| "—".into());
+        let mean = p
+            .mean_ms()
+            .map(|v| format!("{v:.1}ms"))
+            .unwrap_or_else(|| "—".into());
+        println!(
+            "    resolver {:<16} last={rtt:<8} avg={mean:<8} fail={:.0}% ({}/{}) {}",
+            p.server.to_string(),
+            p.fail_pct(),
+            p.ok,
+            p.sent,
+            p.status
+        );
+    }
     if let Some(w) = &n.wifi {
         println!(
             "  wifi: ssid={} phy={} ch={} signal={} tx={}",
