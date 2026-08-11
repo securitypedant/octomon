@@ -1400,7 +1400,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         left.len()
     } as u16;
 
-    let w = if two_col { 78 } else { 40 }.min(area.width);
+    let w = if two_col { 80 } else { 42 }.min(area.width);
     let h = (body_h + 3).min(area.height); // +2 border, +1 footer
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
@@ -1423,13 +1423,19 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
 
+    // A trailing column of padding, so the longest description does not sit
+    // flush against the border.
+    let pad = |r: Rect| Rect {
+        width: r.width.saturating_sub(1),
+        ..r
+    };
     if two_col {
         let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(inner);
-        f.render_widget(Paragraph::new(left), cols[0]);
-        f.render_widget(Paragraph::new(right), cols[1]);
+        f.render_widget(Paragraph::new(left), pad(cols[0]));
+        f.render_widget(Paragraph::new(right), pad(cols[1]));
     } else {
-        f.render_widget(Paragraph::new(left), inner);
+        f.render_widget(Paragraph::new(left), pad(inner));
     }
 }
 

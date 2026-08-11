@@ -569,13 +569,11 @@ mod linux {
             .stdin(std::process::Stdio::null())
             .output()
             .await
+            // Only a failure to run means "unsupported" — `ss` not installed.
             .ok()?;
-        let samples = parse_ss(&String::from_utf8_lossy(&out.stdout));
-        if samples.is_empty() {
-            None
-        } else {
-            Some(samples)
-        }
+        // An empty result is a normal moment with no open TCP sockets, not a
+        // reason to disable per-process bandwidth for the rest of the session.
+        Some(parse_ss(&String::from_utf8_lossy(&out.stdout)))
     }
 
     /// Parse `ss -tinpeH`. Each socket spans two lines: the address line carries

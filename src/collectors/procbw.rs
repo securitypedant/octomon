@@ -54,6 +54,9 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
     // process total.
     let mut totals: HashMap<u32, u64> = HashMap::new();
     let mut prev_at = Instant::now();
+    // False until a baseline exists, so the first sample only records counters
+    // rather than attributing their history to one interval.
+    let mut primed = false;
     let mut ticker = tokio::time::interval(Duration::from_secs(2));
 
     loop {
@@ -69,15 +72,24 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
         // Sum each counter's delta onto its owning process.
         let mut agg: HashMap<u32, (f64, f64, f64, String)> = HashMap::new();
         for s in &sample {
-            let Some((pin, pout, pretx)) = prev.get(&s.key) else {
-                // First sighting of this counter: nothing to diff against yet.
-                // Counting its total here would report a socket's whole history
-                // as one interval's traffic.
-                continue;
+            let (d_in, d_out, d_retx) = match prev.get(&s.key) {
+                Some((pin, pout, pretx)) => (
+                    s.bytes_in.saturating_sub(*pin),
+                    s.bytes_out.saturating_sub(*pout),
+                    s.retx.saturating_sub(*pretx),
+                ),
+                // A counter not seen before. Skipping it loses most real
+                // traffic: an ordinary web request opens a socket, transfers,
+                // and closes well inside one sampling interval, so it is only
+                // ever observed once. Its counters start at zero when the
+                // socket opens, so the whole total *is* recent traffic.
+                //
+                // Only from the second sample onward: on the first, every
+                // socket is new and long-lived ones would dump their entire
+                // history as one interval's worth.
+                None if primed => (s.bytes_in, s.bytes_out, s.retx),
+                None => continue,
             };
-            let d_in = s.bytes_in.saturating_sub(*pin);
-            let d_out = s.bytes_out.saturating_sub(*pout);
-            let d_retx = s.retx.saturating_sub(*pretx);
             if d_in == 0 && d_out == 0 && d_retx == 0 {
                 continue;
             }
@@ -111,6 +123,7 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
             .map(|s| (s.key, (s.bytes_in, s.bytes_out, s.retx)))
             .collect();
         prev_at = now;
+        primed = true;
 
         state.lock().unwrap().processes = list;
     }
