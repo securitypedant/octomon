@@ -115,6 +115,7 @@ async fn main() -> Result<()> {
             .into_iter()
             .map(|t| (t.name, t.provides, t.package))
             .collect();
+        s.privilege_notice = platform::tools::privilege_notice();
         s.notice = platform::tools::missing_notice();
     }
 
@@ -123,13 +124,25 @@ async fn main() -> Result<()> {
     let netinfo_refresh = Arc::new(Notify::new()); // 'r'
 
     // Shared ICMP client so targets can be added at runtime.
+    // Unprivileged datagram ICMP needs the kernel to allow it. macOS always
+    // does; on Linux it depends on net.ipv4.ping_group_range, which several
+    // distributions ship closed. Failing here disables every latency feature,
+    // so the reason has to reach the user rather than a log nobody reads.
     let ping_client = match Client::new(&surge_ping::Config::default()) {
         Ok(c) => Some(Arc::new(c)),
         Err(e) => {
             tracing::error!("failed to create ICMP client: {e}");
+            state.lock().unwrap().icmp_error = Some(icmp_help(&e.to_string()));
             None
         }
     };
+    {
+        // Interrupt only for things that will visibly not work. A clean setup
+        // starts straight into the dashboard.
+        let mut s = state.lock().unwrap();
+        s.show_startup_notice =
+            !cli.check && (s.icmp_error.is_some() || !s.missing_tools.is_empty());
+    }
     // Raised by the netinfo collector when the machine moves to a different
     // network, so path-dependent state can be rebuilt.
     let network_changed = Arc::new(Notify::new());
@@ -255,6 +268,73 @@ async fn run_ui(
     Ok(())
 }
 
+/// Clear everything the focused panel has accumulated. "Reset" should leave no
+/// stale figure behind: a graph that keeps its history after a reset makes the
+/// numbers beside it look wrong.
+fn reset_panel(s: &mut AppState) {
+    match s.focus {
+        Panel::Quality => {
+            for t in &mut s.targets {
+                t.reset();
+            }
+            // The path monitor's hops carry their own statistics and charts.
+            if let Some(m) = s.hop_monitor.as_mut() {
+                for h in &mut m.hops {
+                    if let Some(stat) = h.stat.as_mut() {
+                        stat.reset();
+                    }
+                }
+            }
+            s.traceroute = None;
+        }
+        Panel::Bandwidth => {
+            s.throughput.down_hist.data.clear();
+            s.throughput.up_hist.data.clear();
+            s.throughput.down_bps = 0.0;
+            s.throughput.up_bps = 0.0;
+            s.processes.clear();
+            s.link_errors = crate::app::LinkErrors {
+                iface: s.link_errors.iface.clone(),
+                ..Default::default()
+            };
+        }
+        Panel::NetInfo => {
+            s.signal.rssi_hist.data.clear();
+            s.signal.tx_hist.data.clear();
+            for p in &mut s.dns {
+                p.hist.data.clear();
+                p.sent = 0;
+                p.ok = 0;
+                p.last_ms = None;
+                p.status.clear();
+            }
+        }
+        Panel::Vitals => {
+            s.vitals.cpu_hist.data.clear();
+            s.vitals.mem_hist.data.clear();
+            s.vitals.pressure_hist.data.clear();
+        }
+    }
+    s.notice = Some("panel data reset".to_string());
+}
+
+/// Turn an ICMP socket failure into something the user can act on. The raw
+/// error ("Permission denied") says nothing about the fix.
+fn icmp_help(err: &str) -> String {
+    if cfg!(target_os = "linux") {
+        format!(
+            "ICMP unavailable ({err}). Latency, path monitoring and traceroute targets need \
+             unprivileged ping sockets. Enable them for everyone with:\n\
+             \x20   sudo sysctl -w net.ipv4.ping_group_range=\"0 2147483647\"\n\
+             \x20 (persist: echo 'net.ipv4.ping_group_range=0 2147483647' | sudo tee \
+             /etc/sysctl.d/99-ping.conf)\n\
+             \x20 Or grant just octomon: sudo setcap cap_net_raw+ep $(which octomon)"
+        )
+    } else {
+        format!("ICMP unavailable ({err}). Latency and path features are disabled.")
+    }
+}
+
 /// Side effects to run after releasing the state lock.
 enum Side {
     None,
@@ -348,6 +428,16 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
         let mut s = ctx.state.lock().unwrap();
         s.notice = None; // any key clears a transient notice
 
+        // The setup modal is dismissed by any key, and swallows it so a stray
+        // press does not also trigger an action behind the modal.
+        if s.show_startup_notice && s.input_mode == InputMode::Normal {
+            s.show_startup_notice = false;
+            if !matches!(key.code, KeyCode::Char('q')) && !(ctrl && key.code == KeyCode::Char('c'))
+            {
+                return;
+            }
+        }
+
         match s.input_mode {
             // --- modal text entry: adding a target ---
             InputMode::AddTarget => match key.code {
@@ -405,19 +495,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 // and reports back, so no file I/O happens on the key path.
                 KeyCode::Char('l') => s.logging_requested = !s.logging_requested,
                 // Shift+R resets the focused panel's accumulated data.
-                KeyCode::Char('R') => match s.focus {
-                    Panel::Quality => {
-                        for t in &mut s.targets {
-                            t.reset();
-                        }
-                    }
-                    Panel::Bandwidth => {
-                        s.throughput.down_hist.data.clear();
-                        s.throughput.up_hist.data.clear();
-                        s.processes.clear();
-                    }
-                    _ => {}
-                },
+                KeyCode::Char('R') => reset_panel(&mut s),
                 // 'v' cycles the speed-test provider (Bandwidth panel) + persists.
                 KeyCode::Char('v') if s.focus == Panel::Bandwidth => {
                     let n = s.speedtest_provider_names.len();
@@ -878,6 +956,63 @@ mod tests {
         let mut s = monitor_state(vec![silent(1), silent(2)]);
         move_cursor(&mut s, 1);
         assert_eq!(s.hop_monitor.as_ref().unwrap().selected, 0);
+    }
+
+    /// "Reset" must leave nothing stale: a graph that keeps its history makes
+    /// the freshly-zeroed figures beside it look wrong.
+    #[test]
+    fn shift_r_clears_everything_in_the_panel() {
+        let mut s = monitor_state(vec![live(1)]);
+        s.targets = vec![TargetStat::new(
+            "t".into(),
+            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+        )];
+        s.targets[0].record_reply(12.0);
+        if let Some(stat) = s.hop_monitor.as_mut().unwrap().hops[0].stat.as_mut() {
+            stat.record_reply(9.0);
+        }
+
+        reset_panel(&mut s);
+        assert!(s.targets[0].history.data.is_empty(), "target history");
+        assert_eq!(s.targets[0].sent, 0);
+        // The monitored hops carry their own statistics and charts.
+        let hop = &s.hop_monitor.as_ref().unwrap().hops[0];
+        assert!(
+            hop.stat.as_ref().unwrap().history.data.is_empty(),
+            "hop history"
+        );
+
+        // Bandwidth clears its traces, rates and error counters.
+        s.focus = Panel::Bandwidth;
+        s.throughput.down_hist.push(10.0);
+        s.throughput.down_bps = 10.0;
+        s.link_errors.rx_err_total = 5;
+        s.link_errors.iface = "en0".into();
+        reset_panel(&mut s);
+        assert!(s.throughput.down_hist.data.is_empty());
+        assert_eq!(s.throughput.down_bps, 0.0);
+        assert_eq!(s.link_errors.rx_err_total, 0);
+        assert_eq!(s.link_errors.iface, "en0", "which interface is not data");
+
+        // Network clears signal and resolver history.
+        s.focus = Panel::NetInfo;
+        s.signal.rssi_hist.push(-50.0);
+        let mut probe = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
+        probe.hist.push(9.0);
+        probe.sent = 3;
+        s.dns = vec![probe];
+        reset_panel(&mut s);
+        assert!(s.signal.rssi_hist.data.is_empty());
+        assert!(s.dns[0].hist.data.is_empty());
+        assert_eq!(s.dns[0].sent, 0);
+
+        // Machine clears its histories.
+        s.focus = Panel::Vitals;
+        s.vitals.cpu_hist.push(50.0);
+        s.vitals.pressure_hist.push(60.0);
+        reset_panel(&mut s);
+        assert!(s.vitals.cpu_hist.data.is_empty());
+        assert!(s.vitals.pressure_hist.data.is_empty());
     }
 
     /// A monitor left running against a deleted target keeps probing every hop

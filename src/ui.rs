@@ -47,9 +47,95 @@ pub fn render(f: &mut Frame, s: &AppState) {
 
     footer(f, s, root[2]);
 
-    if s.show_help {
+    // Setup problems come first: with ICMP unavailable most of the dashboard is
+    // dead, and a one-line footer notice is far too easy to miss.
+    if s.show_startup_notice {
+        startup_notice(f, s, f.area());
+    } else if s.show_help {
         help_overlay(f, s, f.area());
     }
+}
+
+/// Modal shown once at startup when something will visibly not work. Dismissed
+/// by any key; the same detail stays available in `[?]` help afterwards.
+fn startup_notice(f: &mut Frame, s: &AppState, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    if let Some(err) = &s.icmp_error {
+        lines.push(Line::from(Span::styled(
+            " ⚠ Latency features are disabled",
+            Style::new().fg(Color::Red).bold(),
+        )));
+        for part in err.split('\n') {
+            lines.push(Line::from(Span::styled(
+                format!(" {}", part.trim_end()),
+                Style::new().fg(Color::Gray),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
+
+    if !s.missing_tools.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " ⚠ Missing tools",
+            Style::new().fg(Color::Yellow).bold(),
+        )));
+        for (name, provides, package) in &s.missing_tools {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {name:<13}"), Style::new().fg(Color::Yellow)),
+                Span::styled((*provides).to_string(), Style::new().fg(Color::Gray)),
+            ]));
+            lines.push(Line::from(Span::styled(
+                format!("               {package}"),
+                Style::new().fg(Color::DarkGray),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
+
+    // Always worth stating, since it silently narrows per-process bandwidth.
+    if let Some(note) = &s.privilege_notice {
+        lines.push(Line::from(Span::styled(
+            " ℹ Privileges",
+            Style::new().fg(Color::Cyan).bold(),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!(" {note}"),
+            Style::new().fg(Color::Gray),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    if lines.is_empty() {
+        return;
+    }
+
+    let w = 76u16.min(area.width);
+    // Long guidance wraps, so counting logical lines under-measures and clips
+    // the bottom of the modal — which is where the least-obvious advice sits.
+    let text_w = w.saturating_sub(2).max(1) as usize;
+    let wrapped: usize = lines
+        .iter()
+        .map(|l| l.width().max(1).div_ceil(text_w))
+        .sum();
+    let h = (wrapped as u16 + 3).min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, rect);
+    let outer = Block::bordered()
+        .title(Span::styled(" octomon · setup ", Style::new().bold()))
+        .title_bottom(Span::styled(
+            " press any key to continue ",
+            Style::new().fg(Color::DarkGray),
+        ))
+        .border_style(Style::new().fg(Color::Yellow));
+    let inner = outer.inner(rect);
+    f.render_widget(outer, rect);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn header(f: &mut Frame, s: &AppState, area: Rect) {

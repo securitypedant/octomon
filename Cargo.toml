@@ -1,6 +1,6 @@
 [package]
 name = "octomon"
-version = "0.3.0-rc.1"
+version = "0.3.0-rc.2"
 edition = "2024"
 description = "Btop-style terminal network monitor: latency, bandwidth, and Wi-Fi signal"
 repository = "https://github.com/securitypedant/octomon"
@@ -28,6 +28,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 clap = { version = "4.6.6", features = ["derive"] }
 crossterm = "0.29.0"
 directories = "6.0.0"
+libc = "0.2"
 futures-util = "0.3.33"
 netdev = "0.46.0"
 ratatui = "0.30.2"

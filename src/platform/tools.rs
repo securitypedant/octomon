@@ -81,6 +81,43 @@ pub fn exists(name: &str) -> bool {
     })
 }
 
+/// True when running with an effective uid of 0.
+pub fn is_root() -> bool {
+    // SAFETY: geteuid() takes no arguments, cannot fail, and only reads the
+    // calling process's own credentials.
+    #[cfg(unix)]
+    unsafe {
+        libc::geteuid() == 0
+    }
+    #[cfg(not(unix))]
+    false
+}
+
+/// What is degraded by running unprivileged, if anything.
+///
+/// octomon is built to work without root, but two things are genuinely
+/// narrower: on Linux, ICMP needs the kernel's ping-socket range opened (which
+/// several distributions ship closed), and per-process bandwidth can only ever
+/// see the calling user's own processes.
+pub fn privilege_notice() -> Option<String> {
+    if is_root() {
+        return None;
+    }
+    if cfg!(target_os = "linux") {
+        Some(
+            "Running unprivileged. Per-process bandwidth covers only your own processes; \
+             system daemons and other users are invisible. If latency is also empty, the \
+             kernel's ping-socket range is closed — see above."
+                .to_string(),
+        )
+    } else {
+        Some(
+            "Running unprivileged. Per-process bandwidth covers only your own processes."
+                .to_string(),
+        )
+    }
+}
+
 /// Tools that are missing, in the order [`required`] lists them.
 pub fn missing() -> Vec<Tool> {
     required().into_iter().filter(|t| !exists(t.name)).collect()

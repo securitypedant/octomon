@@ -11,25 +11,37 @@ network, the Wi-Fi, the ISP, or your own machine that's misbehaving.
 
 ## What it shows
 
-Four panels, all updating live, all **unprivileged** (no `sudo`):
+Four panels, all updating live, and designed to run **without `sudo`** (see
+[Linux: ICMP permissions](#linux-icmp-permissions) for the one caveat):
 
 - **Connection Quality** — ICMP latency to configurable targets with a full
   distribution (last / avg / p95 / max), **jitter**, **packet loss**, and a
   **bufferbloat** grade (latency inflation under load). Auto-discovers your
-  **gateway and the next hops** on startup, and can **traceroute** any target.
+  **gateway and the next hops** on startup, can **traceroute** any target, and
+  can **continuously monitor every hop** on the path (MTR-style) with per-hop
+  loss, latency and an inline trace.
 - **Bandwidth** — live up/down throughput, an on-demand **speed test** with a
   choice of provider (**Cloudflare / M-Lab / LibreSpeed**), and **per-process**
   talkers showing which apps are using the network (with retransmit rate and
-  session totals).
+  session totals). Speed-test history is kept and browsable.
 - **Network** — interface, **connection type** (Wi-Fi / Ethernet / cellular /
   VPN tunnel), IP/DHCP, gateway, DNS, Wi-Fi SSID/PHY/channel, and a link graph
   matched to the medium: a **live Wi-Fi signal graph** (RSSI / noise / tx-rate)
   on wireless, or **link utilisation against negotiated capacity** on a cable.
   A **tunnelled default route** (Cloudflare WARP, Tailscale, WireGuard…) is
   detected and named, so missing traceroute hops and an unreachable gateway
-  read as "the VPN is encapsulating the path" rather than a fault.
-- **Machine** — CPU and memory, framed only as a "is my box the bottleneck?"
-  signal.
+  read as "the VPN is encapsulating the path" rather than a fault. Each **DNS
+  resolver is timed** — slow DNS is invisible to ICMP but is one of the most
+  common causes of "the internet feels broken" — and **Wi-Fi airspace
+  congestion** counts how many nearby networks share or overlap your channel.
+- **Machine** — framed only as "is my box the bottleneck?": CPU with the
+  busiest core called out, **per-core meters** (full-screen), **memory
+  pressure** rather than a misleading used/total, **load average**, **interface
+  errors and drops** as a share of packets carried, and **thermal throttling**
+  (macOS), which collapses throughput while CPU reads idle.
+
+Any session can be **recorded to CSV** with `l` — tidy one-measurement-per-row
+data that pivots straight into pandas, Excel or Grafana.
 
 ## Platform support
 
@@ -40,8 +52,10 @@ Four panels, all updating live, all **unprivileged** (no `sudo`):
   `nmcli` for the neighbour scan (NetworkManager's cache is readable
   unprivileged, unlike `iw scan`), and `ss -tinp` for per-process bandwidth.
   Each degrades to "unavailable" rather than failing if its tool is missing.
-  Note that `ss` covers **TCP only**, and only your own processes — Linux has no
-  unprivileged per-process byte counter (see
+  Note that `ss` covers **TCP only** — UDP and QUIC traffic (much of modern
+  browsing) carries no per-socket byte counters and cannot be attributed — and
+  only your own processes unless run as root. Linux has no unprivileged
+  per-process byte counter (see
   [Why everything runs unprivileged](#why-everything-runs-unprivileged)).
 - **Windows** — later.
 
@@ -54,19 +68,46 @@ what's missing and which package provides it (see `[?]` help).
 | Tool | Package | Needed for | Ships by default? |
 |---|---|---|---|
 | `traceroute` | `traceroute` | path discovery, `[t]`, `[m]` path monitor | Debian yes (priority `standard`); **Ubuntu and Fedora no** |
-| `ss` | `iproute2` / `iproute` | per-process bandwidth | Yes, effectively everywhere |
+| `ss` | `iproute2` / `iproute` | per-process bandwidth (TCP only) | Yes, effectively everywhere |
 | `nmcli` | `network-manager` / `NetworkManager` | Wi-Fi details, airspace congestion | Fedora yes (in Core); Ubuntu/Debian desktop yes, server no |
 | `iw` | `iw` | Wi-Fi details (fallback for `nmcli`) | Debian desktop yes; **Ubuntu and Fedora no** |
 
-The one worth installing up front is `traceroute`:
+The ones worth installing up front are `traceroute` and `iw`:
 
 ```sh
-sudo apt install traceroute     # Debian / Ubuntu
-sudo dnf install traceroute     # Fedora / RHEL
+sudo apt install traceroute iw     # Debian / Ubuntu
+sudo dnf install traceroute iw     # Fedora / RHEL
 ```
 
-Everything else degrades to "unavailable" rather than failing. Live Wi-Fi signal
+Everything else degrades to "unavailable" rather than failing, and octomon tells
+you at startup what is missing and which package provides it. Live Wi-Fi signal
 reads `/proc/net/wireless` directly and needs no package at all.
+
+### Linux: ICMP permissions
+
+Latency, path monitoring and traceroute targets use **unprivileged ping
+sockets** rather than raw sockets, so octomon does not need root. Whether that
+works depends on a kernel setting that some distributions — Ubuntu among them —
+ship closed. If the Connection Quality panel stays empty and adding a target
+reports "ICMP unavailable", that is why.
+
+Open it for everyone (this is what macOS does by default):
+
+```sh
+sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
+# persist across reboots
+echo 'net.ipv4.ping_group_range=0 2147483647' | sudo tee /etc/sysctl.d/99-ping.conf
+```
+
+Or grant the capability to octomon alone:
+
+```sh
+sudo setcap cap_net_raw+ep "$(which octomon)"
+```
+
+Running `sudo octomon` also works, and additionally lets per-process bandwidth
+see *every* process rather than only your own — `ss` cannot report other users'
+sockets unprivileged. Nothing else needs root.
 
 ## Install
 
@@ -123,6 +164,7 @@ octomon                      # launch the dashboard
 octomon -t Home=192.168.1.1  # add extra ICMP targets (repeatable)
 octomon --no-speedtest       # disable the speed test
 octomon --ping-interval 500  # override the ping interval (ms)
+octomon --log                # start recording to CSV immediately (headless recorder)
 octomon --check              # print a one-shot text snapshot and exit (no TUI)
 octomon --help
 ```
@@ -137,19 +179,24 @@ octomon --help
 | `p` | Pause auto-refresh |
 | `r` | Re-probe network info |
 | `w` | Cycle the stats window (30 / 60 / 300s) |
+| `n` | Move between sub-panes of the focused panel |
+| `l` | Start / stop recording the session to CSV |
 | `?` | Help overlay |
-| `q` / `Esc` | Quit |
+| `Esc` | Back out of a view / leave full-screen |
+| `q` / `Ctrl+C` | Quit |
+| **Navigation** | |
+| `↑` `↓` (or `j` `k`) | Move the cursor |
+| `PgUp` / `PgDn` | Move by ten |
+| `←` `→` · `Enter` · `Space` | Move sort column · sort · toggle direction |
+| `Shift+R` | Reset everything this panel has accumulated |
 | **Connection Quality** | |
 | `a` / `d` | Add / delete a target (add accepts an IP or DNS name) |
-| `↑` `↓` (or `j` `k`) | Select a target |
 | `g` | Graph the selected target's latency |
-| `t` | Traceroute the selected target |
-| `←` `→` · `Enter` · `Space` | Move sort column · sort · toggle direction |
-| `Shift+R` | Reset this panel's data |
+| `t` | Traceroute the selected target once |
+| `m` | Continuously monitor every hop to the target (MTR-style) |
 | **Bandwidth** | |
 | `v` | Cycle the speed-test provider (saved to config) |
-| `←` `→` · `Enter` · `Space` | Sort top talkers by column |
-| `Shift+R` | Reset this panel's data |
+| `n` | Switch between Processes and Speed Test History (full-screen) |
 
 ## Speed-test providers
 
@@ -173,6 +220,10 @@ On first run octomon writes a config file you can edit:
 - **Data:** `~/.local/share/octomon/speedtests.jsonl` (honours
   `$XDG_DATA_HOME`). Timestamped speed-test history, one JSON object per line;
   the recent runs are shown in the full-screen Bandwidth view.
+- **Recordings:** `~/.local/share/octomon/octomon-<timestamp>.csv`, written
+  while recording is on. Tidy format — `timestamp,category,subject,metric,value,unit`
+  — one measurement per row, so targets, hops and resolvers appearing or
+  disappearing mid-session never produce a ragged file.
 
 ## How it works
 

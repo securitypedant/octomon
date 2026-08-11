@@ -1608,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "octomon"
-version = "0.3.0-rc.1"
+version = "0.3.0-rc.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1616,6 +1616,7 @@ dependencies = [
  "crossterm",
  "directories",
  "futures-util",
+ "libc",
  "netdev",
  "objc2",
  "objc2-core-wlan",

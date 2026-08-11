@@ -970,6 +970,13 @@ pub struct AppState {
     pub paused: bool,
     /// Help overlay visible.
     pub show_help: bool,
+    /// Set when the ICMP socket could not be opened, with guidance on the fix.
+    /// Everything latency-related is dead without it.
+    pub icmp_error: Option<String>,
+    /// Startup problems worth interrupting for, shown until dismissed.
+    pub show_startup_notice: bool,
+    /// What is degraded by running unprivileged, when anything is.
+    pub privilege_notice: Option<String>,
     /// External tools absent from this machine: (name, what it provides, how to
     /// install). Probed once at startup so failures can be explained precisely.
     pub missing_tools: Vec<(&'static str, &'static str, &'static str)>,
@@ -1022,6 +1029,9 @@ impl AppState {
             notice: None,
             paused: false,
             show_help: false,
+            icmp_error: None,
+            show_startup_notice: false,
+            privilege_notice: None,
             missing_tools: Vec::new(),
             logging_requested: false,
             log: None,

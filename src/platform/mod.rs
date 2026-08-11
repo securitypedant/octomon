@@ -6,8 +6,15 @@ use crate::app::WifiInfo;
 
 pub mod tools;
 
-/// A single process's cumulative network counters at a point in time.
+/// One counter source at a point in time, attributed to a process.
+///
+/// What a sample *counts* differs by platform: macOS reports per-process
+/// totals, Linux per-socket ones. `key` identifies the counter so successive
+/// samples can be diffed correctly — summing a process's live sockets is not
+/// monotonic, because a closing socket takes its bytes out of the total.
 pub struct ProcSample {
+    /// Identity of the counter itself: a pid on macOS, a socket inode on Linux.
+    pub key: u64,
     pub pid: u32,
     pub name: String,
     pub bytes_in: u64,
@@ -175,6 +182,7 @@ mod macos {
                 continue;
             };
             samples.push(ProcSample {
+                key: pid as u64,
                 pid,
                 name: name.to_string(),
                 bytes_in: get(&row, i_in).parse().unwrap_or(0),
@@ -558,7 +566,7 @@ mod linux {
     /// current user's processes.
     pub async fn proc_net_sample() -> Option<Vec<ProcSample>> {
         let out = tokio::process::Command::new("ss")
-            .args(["-tinpH"])
+            .args(["-tinpeH"])
             .stdin(std::process::Stdio::null())
             .output()
             .await
@@ -571,12 +579,17 @@ mod linux {
         }
     }
 
-    /// Parse `ss -tinpH`. Each socket spans two lines: the address line carries
-    /// `users:(("name",pid=123,fd=4))`, and the following line the tcp_info
-    /// fields including `bytes_sent:`, `bytes_received:` and `retrans:a/b`.
+    /// Parse `ss -tinpeH`. Each socket spans two lines: the address line carries
+    /// `users:(("name",pid=123,fd=4))` and `ino:NNN`, and the following line the
+    /// tcp_info fields including `bytes_sent:`, `bytes_received:` and
+    /// `retrans:a/b`.
+    ///
+    /// One sample per *socket*, keyed by inode. Aggregating to the process here
+    /// would be wrong: `ss` lists only open sockets, so a process total falls
+    /// when a connection closes, and the drop cancels out real traffic.
     fn parse_ss(text: &str) -> Vec<ProcSample> {
-        let mut by_pid: HashMap<u32, ProcSample> = HashMap::new();
-        let mut current: Option<(u32, String)> = None;
+        let mut out: Vec<ProcSample> = Vec::new();
+        let mut current: Option<(u32, String, u64)> = None;
 
         for line in text.lines() {
             let trimmed = line.trim();
@@ -586,44 +599,55 @@ mod linux {
             // An indented continuation line holds this socket's counters.
             let is_continuation = line.starts_with([' ', '\t']) && current.is_some();
             if is_continuation {
-                let (pid, name) = current.clone().unwrap();
-                let entry = by_pid.entry(pid).or_insert_with(|| ProcSample {
+                let (pid, name, key) = current.take().unwrap();
+                let mut sample = ProcSample {
+                    key,
                     pid,
                     name,
                     bytes_in: 0,
                     bytes_out: 0,
                     retx: 0,
-                });
+                };
                 for tok in trimmed.split_whitespace() {
                     if let Some(v) = tok.strip_prefix("bytes_sent:") {
-                        entry.bytes_out += v.parse().unwrap_or(0);
+                        sample.bytes_out = v.parse().unwrap_or(0);
                     } else if let Some(v) = tok.strip_prefix("bytes_received:") {
-                        entry.bytes_in += v.parse().unwrap_or(0);
+                        sample.bytes_in = v.parse().unwrap_or(0);
                     } else if let Some(v) = tok.strip_prefix("retrans:") {
                         // "retrans:0/12" — cumulative total is after the slash.
                         let total = v.split('/').nth(1).unwrap_or("0");
-                        entry.retx += total.parse().unwrap_or(0);
+                        sample.retx = total.parse().unwrap_or(0);
                     }
                 }
+                out.push(sample);
                 continue;
             }
             current = parse_ss_users(trimmed);
         }
-        by_pid.into_values().collect()
+        out
     }
 
-    /// Pull ("name", pid) out of `users:(("firefox",pid=1234,fd=56))`.
-    fn parse_ss_users(line: &str) -> Option<(u32, String)> {
+    /// Pull (pid, name, socket inode) out of an address line such as
+    /// `... users:(("firefox",pid=1234,fd=56)) ino:4426481 sk:1001`.
+    fn parse_ss_users(line: &str) -> Option<(u32, String, u64)> {
         let rest = line.split("users:((").nth(1)?;
         let name = rest.split('"').nth(1)?.to_string();
-        let pid = rest.split("pid=").nth(1)?;
-        let pid: u32 = pid
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>()
-            .parse()
-            .ok()?;
-        Some((pid, name))
+        let digits = |s: &str| -> Option<u64> {
+            s.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .ok()
+        };
+        let pid = digits(rest.split("pid=").nth(1)?)? as u32;
+        // Without `-e` there is no inode; fall back to the pid so the sample is
+        // still usable, just coarser.
+        let ino = line
+            .split("ino:")
+            .nth(1)
+            .and_then(digits)
+            .unwrap_or(pid as u64);
+        Some((pid, name, ino))
     }
 
     #[cfg(test)]
