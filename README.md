@@ -129,6 +129,48 @@ per-process bandwidth reads `nettop`; Wi-Fi signal reads CoreWLAN directly; the
 rest comes from `sysinfo` and `netdev`. Latency is validated to match the
 system `ping`, so the jitter you see is the network's, not the tool's.
 
+## Why everything runs unprivileged
+
+octomon never asks for `sudo`, and that is a deliberate design constraint rather
+than an accident of what was easy to build.
+
+A network monitor is exactly the kind of tool you reach for when something is
+already wrong — often on a machine that isn't yours, or a work laptop where you
+don't have admin, or over SSH on a box you'd rather not escalate on. A tool that
+demands root at that moment is a tool you don't run. Requiring privilege also
+changes what the tool *is*: a root process that opens raw sockets and reads every
+process's traffic is a much larger thing to trust, needs a much closer audit, and
+turns a diagnostic you run casually into a decision you have to think about.
+
+So the rule is: if a measurement can only be had with elevated privilege, octomon
+does without it and says so, rather than gating the whole tool behind a password
+prompt. In practice this costs less than you'd expect — latency uses unprivileged
+datagram ICMP (`SOCK_DGRAM`), path discovery uses UDP-probe `traceroute`,
+per-process bandwidth uses `nettop`, and Wi-Fi comes from CoreWLAN and
+`system_profiler`. Everything in the dashboard today is measured this way.
+
+### What privileges would unlock
+
+We may add an *optional* privileged mode later — strictly opt-in, never required,
+and never the default. These are the things currently left on the table, and what
+each would need:
+
+| Capability | Needs | What it would add |
+|---|---|---|
+| Packet capture (BPF / libpcap) | root or BPF device access | Latency and loss of your *real* traffic instead of synthetic probes; per-flow and per-connection breakdown; DNS timing measured from actual queries rather than a probe |
+| System-wide per-process attribution | root | `nettop` only reports the current user's processes, so traffic from system daemons and other users is missing today |
+| Live per-process sampling | root / NetworkExtension entitlement | `nettop -L 1` takes ~5s per sample, which is why the Processes list updates slowly |
+| Which process owns a tunnel | root | `lsof` exposes `utun` ownership, but only for root-owned VPN daemons — so VPNs are identified from the tunnel's address ranges instead |
+| Neighbour SSIDs and their signal strength | Location Services permission | macOS redacts SSIDs without it, so airspace congestion counts networks per channel but cannot weight them by how loud each one is |
+| True channel airtime utilisation | root (monitor mode) | Counting nearby APs approximates congestion; measuring actual airtime busy-ratio would quantify it — but monitor mode disassociates the radio |
+| Raw sockets | root | ICMP traceroute rather than UDP probes, DSCP/ToS-marked probes to measure per-class queuing, and path-MTU discovery with the DF bit |
+| eBPF socket tracing (Linux) | `CAP_BPF` / root | Per-socket retransmits and latency attributed to the owning process, without sampling |
+| System-wide TCP state (Linux) | root | `/proc/net/tcp` and `ss` show your own sockets unprivileged; everything else needs elevation |
+
+If any of this lands, it will be behind an explicit flag, will degrade cleanly to
+the unprivileged path when it isn't available, and the unprivileged build will
+stay fully functional on its own.
+
 ## Network & privacy
 
 octomon is a read-only monitor, but as a *network* tool it does make outbound
