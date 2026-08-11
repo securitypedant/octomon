@@ -1084,86 +1084,89 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
 /// version so users can report what they're actually on.
 fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     let row = |k: &str, d: &str| {
-        // Pad generously so long key combos keep a gap before the description.
         Line::from(vec![
-            Span::styled(format!("  {k:<15}"), Style::new().fg(Color::Cyan)),
-            Span::styled(format!("  {d}"), Style::new().fg(Color::Gray)),
+            Span::styled(format!(" {k:<11}"), Style::new().fg(Color::Cyan)),
+            Span::styled(d.to_string(), Style::new().fg(Color::Gray)),
         ])
     };
-    let mut lines = vec![
+    let head = |t: &str| {
         Line::from(Span::styled(
-            "  Global",
+            format!(" {t}"),
             Style::new().fg(Color::White).bold(),
-        )),
-        row("Tab / ⇧Tab", "cycle panel focus (fwd / back)"),
-        row("f", "toggle full-screen of focused panel"),
+        ))
+    };
+
+    // Two columns, so the whole key set fits an 80x24 terminal without
+    // scrolling. Descriptions are kept short enough for a half-width column.
+    let mut left = vec![
+        head("Global"),
+        row("Tab / ⇧Tab", "cycle panels"),
+        row("f", "full-screen focused panel"),
+        row("n", "next sub-pane in panel"),
+        row("Esc", "back / exit full-screen"),
         row("s", "run speed test"),
-        row("p", "pause / resume auto-refresh"),
+        row("p", "pause / resume refresh"),
         row("r", "re-probe network info"),
-        row("w", "cycle stats window (30/60/300s)"),
-        row("l", "start / stop recording this session to CSV"),
+        row("w", "stats window 30/60/300s"),
+        row("l", "start / stop CSV recording"),
         row("?", "toggle this help"),
-        row("Esc", "back out of a view / full-screen"),
-        row("q", "quit"),
+        row("q / Ctrl+C", "quit"),
         Line::from(""),
-        Line::from(Span::styled(
-            "  Connection Quality",
-            Style::new().fg(Color::White).bold(),
-        )),
-        row("a", "add a target (IP or DNS name)"),
-        row("d / Del", "delete the selected target"),
-        row("g", "graph selected target (exits traceroute)"),
-        row("t", "traceroute the selected target"),
-        row("m", "monitor every hop continuously (MTR-style)"),
-        row("n", "move between sub-panes of this panel"),
-        row("↑/↓ or j/k", "select a target (or hop, when monitoring)"),
+        head("Navigation"),
+        row("↑/↓ or j/k", "move the cursor"),
+        row("PgUp/PgDn", "move by ten"),
         row("←/→", "move sort-column cursor"),
-        row("Enter", "sort by the cursor column"),
-        row("Space", "toggle sort direction"),
+        row("Enter", "sort by that column"),
+        row("Space", "reverse sort direction"),
         row("Shift+R", "reset this panel's data"),
+    ];
+
+    let mut right = vec![
+        head("Connection Quality"),
+        row("a", "add target (pre-fills hop)"),
+        row("d / Del", "delete selected target"),
+        row("g", "graph selected target"),
+        row("t", "traceroute once"),
+        row("m", "monitor every hop (MTR)"),
         Line::from(""),
-        Line::from(Span::styled(
-            "  Bandwidth",
-            Style::new().fg(Color::White).bold(),
-        )),
-        row("n", "switch Processes / Speed Test History (full-screen)"),
-        row("↑/↓ PgUp/PgDn", "page through speed-test history"),
-        row("v", "cycle speed-test provider (saved)"),
-        row("←/→", "move top-talkers column cursor"),
-        row("Enter / Space", "sort by column / toggle direction"),
-        row("Shift+R", "reset this panel's data"),
+        head("Bandwidth"),
+        row("v", "cycle speed-test provider"),
+        row("n", "processes ⇄ speed history"),
         Line::from(""),
+        head("Network"),
+        row("r", "re-probe"),
+        row("f", "full-screen for DNS graphs"),
     ];
 
     // Only shown when something is actually absent, with the package that
     // provides it — which tools ship by default varies a lot by distribution.
     if !s.missing_tools.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  Missing tools",
+        right.push(Line::from(""));
+        right.push(Line::from(Span::styled(
+            " Missing tools",
             Style::new().fg(Color::Yellow).bold(),
         )));
-        for (name, provides, package) in &s.missing_tools {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {name:<15}"), Style::new().fg(Color::Yellow)),
-                Span::styled(format!("  {provides}"), Style::new().fg(Color::Gray)),
+        for (name, _provides, package) in &s.missing_tools {
+            right.push(Line::from(vec![
+                Span::styled(format!(" {name:<11}"), Style::new().fg(Color::Yellow)),
+                Span::styled(package.to_string(), Style::new().fg(Color::DarkGray)),
             ]));
-            lines.push(Line::from(Span::styled(
-                format!("                   {package}"),
-                Style::new().fg(Color::DarkGray),
-            )));
         }
-        lines.push(Line::from(""));
     }
 
-    lines.push(Line::from(Span::styled(
-        "  press ? or Esc to close",
-        Style::new().fg(Color::DarkGray),
-    )));
+    // Below this width the columns would truncate descriptions, so stack them
+    // and accept scrolling on a very narrow terminal.
+    let two_col = area.width >= 76;
+    let body_h = if two_col {
+        left.len().max(right.len())
+    } else {
+        left.push(Line::from(""));
+        left.append(&mut right);
+        left.len()
+    } as u16;
 
-    // Size to the content (plus borders) so no shortcut is cut off; the
-    // terminal is the only cap.
-    let w = 60u16.min(area.width);
-    let h = (lines.len() as u16 + 2).min(area.height);
+    let w = if two_col { 78 } else { 40 }.min(area.width);
+    let h = (body_h + 3).min(area.height); // +2 border, +1 footer
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -1172,17 +1175,27 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     };
 
     f.render_widget(Clear, rect);
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::bordered()
-                .title(Span::styled(
-                    format!(" octomon v{} · Shortcuts ", env!("CARGO_PKG_VERSION")),
-                    Style::new().bold(),
-                ))
-                .border_style(Style::new().fg(Color::Cyan)),
-        ),
-        rect,
-    );
+    let outer = Block::bordered()
+        .title(Span::styled(
+            format!(" octomon v{} · Shortcuts ", env!("CARGO_PKG_VERSION")),
+            Style::new().bold(),
+        ))
+        .title_bottom(Span::styled(
+            " press ? or Esc to close ",
+            Style::new().fg(Color::DarkGray),
+        ))
+        .border_style(Style::new().fg(Color::Cyan));
+    let inner = outer.inner(rect);
+    f.render_widget(outer, rect);
+
+    if two_col {
+        let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(inner);
+        f.render_widget(Paragraph::new(left), cols[0]);
+        f.render_widget(Paragraph::new(right), cols[1]);
+    } else {
+        f.render_widget(Paragraph::new(left), inner);
+    }
 }
 
 fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
@@ -2134,6 +2147,77 @@ mod tests {
             ..Default::default()
         });
         assert!(!draw(&s, 200, 60).contains("airspace"));
+    }
+
+    /// Every key the app binds should be discoverable from the help overlay,
+    /// and the overlay has to fit a standard 80x24 terminal without clipping.
+    #[test]
+    fn help_lists_every_key_and_fits_a_standard_terminal() {
+        let mut s = AppState::new(vec![]);
+        s.show_help = true;
+        let out = draw(&s, 80, 24);
+        for c in out.as_bytes().chunks(80) {
+            println!("{}", String::from_utf8_lossy(c).trim_end());
+        }
+
+        for key in [
+            "Tab",
+            "f",
+            "n",
+            "Esc",
+            "s",
+            "p",
+            "r",
+            "w",
+            "l",
+            "?",
+            "q / Ctrl+C",
+            "PgUp/PgDn",
+            "Enter",
+            "Space",
+            "Shift+R",
+            "a",
+            "d / Del",
+            "g",
+            "t",
+            "m",
+            "v",
+        ] {
+            assert!(out.contains(key), "help is missing a binding for {key:?}");
+        }
+        // The closing hint sits in the bottom border; if the box overflowed the
+        // terminal it would be the first thing lost.
+        assert!(out.contains("press ? or Esc to close"));
+        assert!(out.contains(&format!("octomon v{}", env!("CARGO_PKG_VERSION"))));
+
+        // The column split must not clip descriptions. These are the longest
+        // in each column and were truncated before the key field was narrowed.
+        for desc in [
+            "cycle panels",
+            "add target (pre-fills hop)",
+            "full-screen focused panel",
+            "back / exit full-screen",
+            "start / stop CSV recording",
+            "monitor every hop (MTR)",
+            "cycle speed-test provider",
+            "processes ⇄ speed history",
+            "full-screen for DNS graphs",
+        ] {
+            assert!(
+                out.contains(desc),
+                "truncated in the help overlay: {desc:?}"
+            );
+        }
+    }
+
+    /// A narrow terminal stacks the columns rather than truncating them.
+    #[test]
+    fn help_falls_back_to_one_column_when_narrow() {
+        let mut s = AppState::new(vec![]);
+        s.show_help = true;
+        let out = draw(&s, 50, 40);
+        assert!(out.contains("Connection Quality"));
+        assert!(out.contains("cycle panels"));
     }
 
     #[test]
