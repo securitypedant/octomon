@@ -106,6 +106,14 @@ async fn main() -> Result<()> {
         s.speedtest_provider_idx = sel;
         s.speed_history = store::load_recent(50);
         s.logging_requested = cli.log;
+        // Which tools ship by default varies sharply by distribution, so a
+        // missing binary is a normal condition. Say so up front rather than
+        // letting the affected feature silently never appear.
+        s.missing_tools = platform::tools::missing()
+            .into_iter()
+            .map(|t| (t.name, t.provides, t.package))
+            .collect();
+        s.notice = platform::tools::missing_notice();
     }
 
     // Triggers fired by key presses.

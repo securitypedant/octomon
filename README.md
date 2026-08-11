@@ -45,6 +45,29 @@ Four panels, all updating live, all **unprivileged** (no `sudo`):
   [Why everything runs unprivileged](#why-everything-runs-unprivileged)).
 - **Windows** — later.
 
+### Linux: external tools
+
+octomon shells out to a few system tools. Which of these ship by default varies
+sharply by distribution, so octomon probes for them at startup and tells you
+what's missing and which package provides it (see `[?]` help).
+
+| Tool | Package | Needed for | Ships by default? |
+|---|---|---|---|
+| `traceroute` | `traceroute` | path discovery, `[t]`, `[m]` path monitor | Debian yes (priority `standard`); **Ubuntu and Fedora no** |
+| `ss` | `iproute2` / `iproute` | per-process bandwidth | Yes, effectively everywhere |
+| `nmcli` | `network-manager` / `NetworkManager` | Wi-Fi details, airspace congestion | Fedora yes (in Core); Ubuntu/Debian desktop yes, server no |
+| `iw` | `iw` | Wi-Fi details (fallback for `nmcli`) | Debian desktop yes; **Ubuntu and Fedora no** |
+
+The one worth installing up front is `traceroute`:
+
+```sh
+sudo apt install traceroute     # Debian / Ubuntu
+sudo dnf install traceroute     # Fedora / RHEL
+```
+
+Everything else degrades to "unavailable" rather than failing. Live Wi-Fi signal
+reads `/proc/net/wireless` directly and needs no package at all.
+
 ## Install
 
 ### Homebrew (macOS)

@@ -46,7 +46,7 @@ pub fn render(f: &mut Frame, s: &AppState) {
     footer(f, s, root[2]);
 
     if s.show_help {
-        help_overlay(f, f.area());
+        help_overlay(f, s, f.area());
     }
 }
 
@@ -81,8 +81,11 @@ fn header(f: &mut Frame, s: &AppState, area: Rect) {
     match &s.log {
         Some(log) => {
             let secs = log.started.elapsed().as_secs();
+            // Gap goes outside the styled span, or it renders as a red block
+            // hanging off the left of the dot.
+            left.push(Span::raw("  "));
             left.push(Span::styled(
-                "  ● REC",
+                "● REC",
                 Style::new().fg(Color::White).bg(Color::Red).bold(),
             ));
             left.push(Span::styled(
@@ -825,7 +828,18 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
     };
     match s.proc_status {
         ProcStatus::Unsupported => {
-            return dim(f, "per-process bandwidth unavailable on this platform");
+            // Distinguish "this OS has no unprivileged source" from "the tool
+            // that provides it simply isn't installed" — the second is fixable.
+            let tool = if cfg!(target_os = "linux") {
+                "ss"
+            } else {
+                "nettop"
+            };
+            let msg = match s.missing_tools.iter().find(|(n, _, _)| *n == tool) {
+                Some((n, _, pkg)) => format!("per-process bandwidth needs {n} — {pkg}"),
+                None => "per-process bandwidth unavailable on this platform".to_string(),
+            };
+            return dim(f, &msg);
         }
         ProcStatus::Probing => return dim(f, "detecting per-process bandwidth… (~5s)"),
         ProcStatus::Supported if s.processes.is_empty() => return dim(f, "sampling processes…"),
@@ -906,7 +920,7 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
 
 /// Centered modal listing all keyboard shortcuts, titled with the running
 /// version so users can report what they're actually on.
-fn help_overlay(f: &mut Frame, area: Rect) {
+fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     let row = |k: &str, d: &str| {
         // Pad generously so long key combos keep a gap before the description.
         Line::from(vec![
@@ -914,7 +928,7 @@ fn help_overlay(f: &mut Frame, area: Rect) {
             Span::styled(format!("  {d}"), Style::new().fg(Color::Gray)),
         ])
     };
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             "  Global",
             Style::new().fg(Color::White).bold(),
@@ -954,11 +968,32 @@ fn help_overlay(f: &mut Frame, area: Rect) {
         row("Enter / Space", "sort by column / toggle direction"),
         row("Shift+R", "reset this panel's data"),
         Line::from(""),
-        Line::from(Span::styled(
-            "  press ? or Esc to close",
-            Style::new().fg(Color::DarkGray),
-        )),
     ];
+
+    // Only shown when something is actually absent, with the package that
+    // provides it — which tools ship by default varies a lot by distribution.
+    if !s.missing_tools.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  Missing tools",
+            Style::new().fg(Color::Yellow).bold(),
+        )));
+        for (name, provides, package) in &s.missing_tools {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {name:<15}"), Style::new().fg(Color::Yellow)),
+                Span::styled(format!("  {provides}"), Style::new().fg(Color::Gray)),
+            ]));
+            lines.push(Line::from(Span::styled(
+                format!("                   {package}"),
+                Style::new().fg(Color::DarkGray),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "  press ? or Esc to close",
+        Style::new().fg(Color::DarkGray),
+    )));
 
     // Size to the content (plus borders) so no shortcut is cut off; the
     // terminal is the only cap.

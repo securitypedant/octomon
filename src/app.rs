@@ -887,6 +887,9 @@ pub struct AppState {
     pub paused: bool,
     /// Help overlay visible.
     pub show_help: bool,
+    /// External tools absent from this machine: (name, what it provides, how to
+    /// install). Probed once at startup so failures can be explained precisely.
+    pub missing_tools: Vec<(&'static str, &'static str, &'static str)>,
     /// Set by the UI to ask the logger to start/stop; the logger owns the file.
     pub logging_requested: bool,
     /// Present while a recording is actually open.
@@ -932,6 +935,7 @@ impl AppState {
             notice: None,
             paused: false,
             show_help: false,
+            missing_tools: Vec::new(),
             logging_requested: false,
             log: None,
             should_quit: false,

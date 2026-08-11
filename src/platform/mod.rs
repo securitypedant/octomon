@@ -4,6 +4,8 @@
 
 use crate::app::WifiInfo;
 
+pub mod tools;
+
 /// A single process's cumulative network counters at a point in time.
 pub struct ProcSample {
     pub pid: u32,
@@ -306,22 +308,77 @@ mod linux {
         None
     }
 
-    /// Wi-Fi details via `iw dev <if> link`, plus neighbours from NetworkManager's
-    /// cached scan. `iw scan` needs CAP_NET_ADMIN, but `nmcli` reads the cache
-    /// unprivileged, so congestion works without elevation where NM is present.
+    /// Wi-Fi details, preferring `nmcli` over `iw`.
+    ///
+    /// `iw` is the obvious choice but is absent from a default Ubuntu install
+    /// (only *suggested* by netplan-generator, which apt never pulls in) and
+    /// from Fedora's Core group. NetworkManager ships in Fedora's Core and on
+    /// every mainstream desktop, so `nmcli` reaches more machines — and it reads
+    /// the scan cache unprivileged, where `iw scan` needs CAP_NET_ADMIN.
     pub async fn wifi_details() -> Option<WifiInfo> {
-        let iface = wireless_iface()?;
-        let out = tokio::process::Command::new("iw")
-            .args(["dev", &iface, "link"])
+        let mut info = match nmcli_active().await {
+            Some(info) => info,
+            None => {
+                let iface = wireless_iface()?;
+                let out = tokio::process::Command::new("iw")
+                    .args(["dev", &iface, "link"])
+                    .output()
+                    .await
+                    .ok()?;
+                if !out.status.success() {
+                    return None;
+                }
+                parse_iw_link(&String::from_utf8_lossy(&out.stdout))?
+            }
+        };
+        info.neighbours = scan_neighbours().await;
+        Some(info)
+    }
+
+    /// The connected network, from NetworkManager's view.
+    async fn nmcli_active() -> Option<WifiInfo> {
+        let out = tokio::process::Command::new("nmcli")
+            .args([
+                "-t",
+                "-f",
+                "ACTIVE,SSID,CHAN,FREQ,SIGNAL,RATE",
+                "device",
+                "wifi",
+                "list",
+            ])
             .output()
             .await
             .ok()?;
         if !out.status.success() {
             return None;
         }
-        let mut info = parse_iw_link(&String::from_utf8_lossy(&out.stdout))?;
-        info.neighbours = scan_neighbours().await;
-        Some(info)
+        parse_nmcli_active(&String::from_utf8_lossy(&out.stdout))
+    }
+
+    /// `nmcli -t` rows are colon-separated:
+    /// "yes:my-network:36:5180 MHz:74:270 Mbit/s". Only the active row matters.
+    fn parse_nmcli_active(text: &str) -> Option<WifiInfo> {
+        for line in text.lines() {
+            let f: Vec<&str> = line.split(':').collect();
+            if f.len() < 4 || f[0].trim() != "yes" {
+                continue;
+            }
+            let channel: u16 = f[2].trim().parse().ok()?;
+            let mhz: u32 = f[3].split_whitespace().next()?.parse().ok()?;
+            let (_, band) = channel_from_freq(mhz)?;
+            let mut info = WifiInfo {
+                ssid: f[1].trim().to_string(),
+                // nmcli exposes no channel width; 20MHz under-counts overlap
+                // rather than inventing it.
+                channel: format!("{channel} ({band}GHz, 20MHz)"),
+                ..Default::default()
+            };
+            if let Some(rate) = f.get(5) {
+                info.tx_rate = rate.trim().to_string();
+            }
+            return Some(info);
+        }
+        None
     }
 
     /// First interface listed in `/proc/net/wireless`.
@@ -539,6 +596,24 @@ mod linux {
             assert_eq!(channel_from_freq(5805), Some((161, 5)));
             assert_eq!(channel_from_freq(6135), Some((37, 6)));
             assert_eq!(channel_from_freq(1234), None);
+        }
+
+        #[test]
+        fn nmcli_active_row_gives_ssid_and_channel() {
+            let text = "no:neighbour-net:1:2412 MHz:47:130 Mbit/s\n\
+                        yes:my-network:36:5180 MHz:74:270 Mbit/s\n\
+                        no:other:161:5805 MHz:30:54 Mbit/s\n";
+            let info = parse_nmcli_active(text).expect("an active row");
+            assert_eq!(info.ssid, "my-network");
+            assert_eq!(info.channel, "36 (5GHz, 20MHz)");
+            assert_eq!(info.tx_rate, "270 Mbit/s");
+            assert_eq!(info.channel_spec().unwrap().band_ghz, 5);
+        }
+
+        #[test]
+        fn nmcli_with_no_active_network_falls_through() {
+            assert!(parse_nmcli_active("no:a:1:2412 MHz:47:130 Mbit/s\n").is_none());
+            assert!(parse_nmcli_active("").is_none());
         }
 
         #[test]
