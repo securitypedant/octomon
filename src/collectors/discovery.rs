@@ -12,10 +12,15 @@ use crate::app::{AppState, TargetStat};
 use crate::collectors::ping;
 use crate::config::Config;
 
-const PROBE: &str = "1.1.1.1";
 const MAX_HOPS: usize = 4; // gateway (1) + next three
 
 pub async fn run(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) {
+    // Configurable: the useful probe target depends on the network. Empty
+    // disables discovery entirely, like `public_ip_url`.
+    let probe = cfg.discovery_probe.trim().to_string();
+    if probe.is_empty() {
+        return;
+    }
     let out = Command::new("traceroute")
         .args([
             "-n",
@@ -25,7 +30,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) 
             "1",
             "-m",
             &MAX_HOPS.to_string(),
-            PROBE,
+            &probe,
         ])
         .stdin(std::process::Stdio::null())
         .output()
@@ -44,7 +49,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) 
         let label = if ttl == 1 {
             "gateway".to_string()
         } else {
-            format!("hop {ttl}→{PROBE}")
+            format!("hop {ttl}→{probe}")
         };
 
         let (id, added) = {
@@ -170,4 +175,41 @@ fn parse_hop(line: &str) -> Option<(u8, IpAddr)> {
     let ttl: u8 = it.next()?.parse().ok()?;
     let addr: IpAddr = it.next()?.parse().ok()?;
     Some((ttl, addr))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovery_probe_defaults_to_cloudflare_and_can_be_disabled() {
+        assert_eq!(Config::default().discovery_probe, "1.1.1.1");
+
+        // An empty value disables discovery, matching `public_ip_url`.
+        let cfg = Config {
+            discovery_probe: "  ".to_string(),
+            ..Default::default()
+        };
+        assert!(cfg.discovery_probe.trim().is_empty());
+    }
+
+    #[test]
+    fn a_configured_probe_survives_a_round_trip_through_toml() {
+        let cfg = Config {
+            discovery_probe: "9.9.9.9".to_string(),
+            ..Default::default()
+        };
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(text.contains("discovery_probe = \"9.9.9.9\""));
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.discovery_probe, "9.9.9.9");
+    }
+
+    /// An older config without the key must still load, taking the default.
+    #[test]
+    fn missing_key_falls_back_to_the_default() {
+        let cfg: Config = toml::from_str("ping_interval_ms = 500").unwrap();
+        assert_eq!(cfg.discovery_probe, "1.1.1.1");
+        assert_eq!(cfg.ping_interval_ms, 500);
+    }
 }

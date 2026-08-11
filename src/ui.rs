@@ -1065,7 +1065,10 @@ fn render_speedtest(f: &mut Frame, s: &AppState, area: Rect) {
             st.progress * 100.0,
             st.live_mbps
         );
-        let color = if st.phase == "upload" {
+        // The phase reads "Cloudflare · upload", so an equality test against
+        // "upload" never matched and the bar stayed green for both directions.
+        // Magenta matches the up-throughput series elsewhere in the UI.
+        let color = if st.phase.contains("upload") {
             Color::Magenta
         } else {
             Color::Green
@@ -1074,7 +1077,11 @@ fn render_speedtest(f: &mut Frame, s: &AppState, area: Rect) {
             Gauge::default()
                 .ratio(st.progress.clamp(0.0, 1.0))
                 .label(label)
-                .gauge_style(Style::new().fg(color)),
+                // An explicit background gives the label readable contrast on
+                // both sides of the bar edge: ratatui swaps fg/bg for the cells
+                // the bar covers, so without a bg set the text ends up as the
+                // terminal's default foreground on a saturated fill.
+                .gauge_style(Style::new().fg(color).bg(Color::Black)),
             area,
         );
     } else {
@@ -1798,12 +1805,6 @@ fn signal_graph(f: &mut Frame, s: &AppState, area: Rect) {
         r if r >= -72 => Color::Yellow,
         _ => Color::Red,
     };
-    let band = match sig_color {
-        Color::Green => "green",
-        Color::Yellow => "yellow",
-        _ => "red",
-    };
-
     // Both series share a normalised 0..1 y-axis so their trends overlay: RSSI
     // as signal quality (−30 best … −100 worst); tx-rate against its own peak.
     let want = (area.width as usize).saturating_mul(2).max(20);
@@ -1822,14 +1823,24 @@ fn signal_graph(f: &mut Frame, s: &AppState, area: Rect) {
     // a dead link rather than a missing measurement, so the series is dropped.
     let tx_max = tx.iter().copied().fold(0.0_f64, f64::max);
     let has_tx = tx_max > 0.0;
-    let title = if has_tx {
-        format!(
-            " signal {} dBm ({band}) · tx {:.0} Mbps (cyan) ",
-            sig.rssi_dbm, sig.tx_rate_mbps,
-        )
+    // Each figure is drawn in its own series' colour, so naming the colour in
+    // the text ("(cyan)") is redundant — and wrong if the palette ever changes.
+    let mut title = vec![
+        Span::styled(" signal ", Style::new().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{} dBm", sig.rssi_dbm),
+            Style::new().fg(sig_color).bold(),
+        ),
+    ];
+    if has_tx {
+        title.push(Span::styled(" · tx ", Style::new().fg(Color::DarkGray)));
+        title.push(Span::styled(
+            format!("{:.0} Mbps ", sig.tx_rate_mbps),
+            Style::new().fg(Color::Cyan).bold(),
+        ));
     } else {
-        format!(" signal {} dBm ({band}) ", sig.rssi_dbm)
-    };
+        title.push(Span::raw(" "));
+    }
 
     let sig_pts: Vec<(f64, f64)> = (0..len)
         .map(|i| (i as f64, ((rssi[i] + 100.0) / 70.0).clamp(0.0, 1.0)))
@@ -1856,7 +1867,7 @@ fn signal_graph(f: &mut Frame, s: &AppState, area: Rect) {
         );
     }
     let chart = Chart::new(datasets)
-        .block(Block::new().title(Span::styled(title, Style::new().fg(Color::DarkGray))))
+        .block(Block::new().title(Line::from(title)))
         .x_axis(Axis::default().bounds([0.0, xmax]))
         .y_axis(Axis::default().bounds([0.0, 1.05]));
     f.render_widget(chart, area);
@@ -2347,6 +2358,27 @@ mod tests {
         );
         // The peak still reaches the top.
         assert_eq!(data.iter().copied().max().unwrap(), 5_000_000);
+    }
+
+    /// The gauge label must stay legible where the fill runs underneath it.
+    #[test]
+    fn speedtest_gauge_labels_upload_and_stays_readable() {
+        use crate::app::SpeedStatus;
+
+        let mut s = AppState::new(vec![]);
+        s.focus = Panel::Bandwidth;
+        s.speedtest.status = SpeedStatus::Running;
+        s.speedtest.progress = 0.5;
+        s.speedtest.live_mbps = 42.0;
+
+        // Real phase strings are qualified by provider, which is why an equality
+        // test against "upload" silently never fired.
+        s.speedtest.phase = "Cloudflare · upload".into();
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("upload"));
+
+        s.speedtest.phase = "Cloudflare · download".into();
+        assert!(draw(&s, 120, 30).contains("download"));
     }
 
     /// Spiky latency must not blank the trace: a single 240ms outlier among

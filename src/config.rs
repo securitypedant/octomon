@@ -47,6 +47,10 @@ pub struct Config {
     /// Public-IP discovery endpoint (plain-text IP response). Added as a target
     /// on startup. Set to "" to disable.
     pub public_ip_url: String,
+    /// Address (or hostname) traced at startup to find the gateway and the next
+    /// few hops toward the internet, which are added as targets. Pick something
+    /// reliably reachable and beyond your ISP. Set to "" to disable discovery.
+    pub discovery_probe: String,
     /// How often each configured DNS resolver is probed, in milliseconds.
     pub dns_interval_ms: u64,
     /// Per-query DNS timeout, in milliseconds.
@@ -78,6 +82,7 @@ impl Default for Config {
             librespeed_server_list: "https://librespeed.org/backend-servers/servers.json"
                 .to_string(),
             public_ip_url: "https://api.ipify.org".to_string(),
+            discovery_probe: "1.1.1.1".to_string(),
             dns_interval_ms: 5000,
             dns_timeout_ms: 2000,
             dns_probe_name: "example.com".to_string(),
