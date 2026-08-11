@@ -326,7 +326,7 @@ pub enum SubPane {
 }
 
 /// Which chart the Connection Quality panel shows beneath the target table.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QualityView {
     /// Latency history for the graphed target.
     Graph,
@@ -855,6 +855,8 @@ pub struct AppState {
     pub speedtest_provider_idx: usize,
     /// Recent speed-test results (oldest → newest), persisted to disk.
     pub speed_history: Vec<crate::store::SpeedRecord>,
+    /// How many results are stored on disk, which can exceed what is loaded.
+    pub speed_total: usize,
     /// Top processes by current network throughput (highest first).
     pub processes: Vec<ProcBandwidth>,
     /// Availability of per-process attribution on this platform.
@@ -930,6 +932,7 @@ impl AppState {
             speedtest_provider_names: Vec::new(),
             speedtest_provider_idx: 0,
             speed_history: Vec::new(),
+            speed_total: 0,
             processes: Vec::new(),
             proc_status: ProcStatus::Probing,
             bw_col: 1,

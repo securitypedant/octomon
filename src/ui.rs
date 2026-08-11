@@ -7,7 +7,7 @@ use ratatui::style::Modifier;
 use ratatui::symbols::Marker;
 use ratatui::widgets::{
     Axis, Block, Cell, Chart, Clear, Dataset, Gauge, GraphType, LineGauge, Paragraph, Row,
-    Sparkline, Table, Wrap,
+    Sparkline, SparklineBar, Table, Wrap,
 };
 
 use crate::app::{
@@ -258,7 +258,19 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     ]);
 
     let order = s.quality_order();
-    let rows = order.iter().map(|&i| {
+    // Scroll so the cursor stays visible: with a path monitor open below, the
+    // target list gets few rows and the selection would otherwise fall off it.
+    let rows_avail = (parts[1].height.saturating_sub(1)) as usize;
+    let cursor = order.iter().position(|&i| i == s.selected).unwrap_or(0);
+    let first = if rows_avail == 0 {
+        0
+    } else {
+        cursor.saturating_sub(rows_avail - 1)
+    };
+    let hidden_above = first;
+    let hidden_below = order.len().saturating_sub(first + rows_avail);
+
+    let rows = order.iter().skip(first).take(rows_avail).map(|&i| {
         let t = &s.targets[i];
         let loss = t.loss_pct();
         let st = t.stats(n);
@@ -288,10 +300,13 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         ])
         .style(style)
     });
+    // The metric columns are fixed; the name and address split whatever the
+    // panel has left, so a long hostname is not clipped at 13 characters while
+    // the right-hand side of the panel sits empty.
     let widths = [
         Constraint::Length(2),
-        Constraint::Length(13),
-        Constraint::Length(16),
+        Constraint::Min(14),
+        Constraint::Min(16),
         Constraint::Length(8),
         Constraint::Length(8),
         Constraint::Length(8),
@@ -299,6 +314,28 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         Constraint::Length(6),
     ];
     f.render_widget(Table::new(rows, widths).header(header), parts[1]);
+
+    // Tell the user the list continues rather than just cutting it off.
+    if hidden_above > 0 || hidden_below > 0 {
+        let mut parts_txt = Vec::new();
+        if hidden_above > 0 {
+            parts_txt.push(format!("↑{hidden_above}"));
+        }
+        if hidden_below > 0 {
+            parts_txt.push(format!("↓{hidden_below}"));
+        }
+        let txt = format!(" {} more ", parts_txt.join(" "));
+        let x = parts[1].x + parts[1].width.saturating_sub(txt.len() as u16 + 1);
+        f.render_widget(
+            Paragraph::new(Span::styled(txt, Style::new().fg(Color::Yellow))),
+            Rect {
+                x,
+                y: parts[1].y,
+                width: parts[1].width.min(14),
+                height: 1,
+            },
+        );
+    }
 
     match s.quality_view {
         QualityView::Graph => latency_graph(f, s, n, parts[2]),
@@ -391,9 +428,16 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
 
     let header = Row::new(["ttl", "address", "loss", "last", "avg", "p95", "jitter"])
         .style(Style::new().fg(Color::Gray).bold());
+    // When the path doesn't fit, give up the last row to say so — silently
+    // truncating hides exactly the far end of the path you were looking for.
     let rows_avail = inner.height.saturating_sub(1) as usize;
     let all_rows = hop_rows(&m.hops);
-    let visible: Vec<&HopRow> = all_rows.iter().take(rows_avail).collect();
+    let overflow = all_rows.len().saturating_sub(rows_avail);
+    let visible: Vec<&HopRow> = if overflow > 0 && rows_avail > 0 {
+        all_rows.iter().take(rows_avail - 1).collect()
+    } else {
+        all_rows.iter().take(rows_avail).collect()
+    };
 
     let rows = visible.iter().map(|row| match row {
         // Left blank here and drawn afterwards across the whole row, since the
@@ -492,11 +536,16 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                 // instead of stretching a short history across the full width.
                 let width = (data.len() as u16).min(spark_w);
                 let max = data.iter().copied().max().unwrap_or(1).max(1);
+                // Colour each bar by how bad that individual sample was, not by
+                // the hop's current state: a row that is green throughout except
+                // for a red patch tells you the trouble was transient, which
+                // height alone makes you squint to work out.
+                let bars: Vec<SparklineBar> = data
+                    .iter()
+                    .map(|&v| SparklineBar::from(v).style(Style::new().fg(rtt_color(v as f64))))
+                    .collect();
                 f.render_widget(
-                    Sparkline::default()
-                        .data(data)
-                        .max(max)
-                        .style(Style::new().fg(latency_color(stat.last_rtt_ms, stat.loss_pct()))),
+                    Sparkline::default().data(bars).max(max),
                     Rect {
                         x: inner.x + table_w + 1 + (spark_w - width),
                         y,
@@ -506,6 +555,22 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                 );
             }
         }
+    }
+
+    if overflow > 0 && rows_avail > 0 {
+        let y = inner.y + inner.height.saturating_sub(1);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!("… +{overflow} more — press [f] for full screen"),
+                Style::new().fg(Color::Yellow),
+            ))),
+            Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            },
+        );
     }
 
     if let Some(chart_area) = chart_area {
@@ -570,23 +635,28 @@ fn hop_chart(f: &mut Frame, m: &crate::app::HopMonitor, n: usize, area: Rect) {
         Dataset::default()
             .marker(Marker::Braille)
             .graph_type(GraphType::Line)
-            .style(Style::new().fg(latency_color(stat.last_rtt_ms, stat.loss_pct())))
+            .style(Style::new().fg(SERIES_COLOR))
             .data(&series),
         Dataset::default()
             .marker(Marker::Braille)
             .graph_type(GraphType::Line)
-            .style(Style::new().fg(Color::Yellow))
+            .style(Style::new().fg(P95_COLOR))
             .data(&p95_line),
     ];
     let chart = Chart::new(datasets)
-        .block(Block::new().title(Span::styled(
-            format!(
-                " p95 {p95:.0}ms · loss {:.0}% · jitter {:.1} ",
-                stat.loss_pct(),
-                stat.jitter_ms
+        .block(Block::new().title(Line::from(vec![
+            Span::styled(" latency ", Style::new().fg(SERIES_COLOR)),
+            Span::styled("· p95 ", Style::new().fg(Color::DarkGray)),
+            Span::styled(format!("{p95:.0}ms"), Style::new().fg(P95_COLOR)),
+            Span::styled(
+                format!(
+                    " · loss {:.0}% · jitter {:.1} ",
+                    stat.loss_pct(),
+                    stat.jitter_ms
+                ),
+                Style::new().fg(Color::DarkGray),
             ),
-            Style::new().fg(Color::DarkGray),
-        )))
+        ])))
         .x_axis(Axis::default().bounds([0.0, xmax]))
         .y_axis(
             Axis::default()
@@ -715,20 +785,23 @@ fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
         Dataset::default()
             .marker(Marker::Braille)
             .graph_type(GraphType::Line)
-            .style(Style::new().fg(Color::Cyan))
+            .style(Style::new().fg(SERIES_COLOR))
             .data(&series),
         Dataset::default()
             .marker(Marker::Braille)
             .graph_type(GraphType::Line)
-            .style(Style::new().fg(Color::Yellow))
+            .style(Style::new().fg(P95_COLOR))
             .data(&p95_line),
     ];
 
+    // Each label is drawn in its series' colour, so the legend needs no key.
     let chart = Chart::new(datasets)
-        .block(Block::new().title(Span::styled(
-            format!(" latency · {}   p95 {p95:.0}ms ", t.label),
-            Style::new().fg(Color::DarkGray),
-        )))
+        .block(Block::new().title(Line::from(vec![
+            Span::styled(" latency ", Style::new().fg(Color::DarkGray)),
+            Span::styled(t.label.clone(), Style::new().fg(SERIES_COLOR)),
+            Span::styled("   p95 ", Style::new().fg(Color::DarkGray)),
+            Span::styled(format!("{p95:.0}ms "), Style::new().fg(P95_COLOR)),
+        ])))
         .x_axis(Axis::default().bounds([0.0, xmax]))
         .y_axis(
             Axis::default()
@@ -815,7 +888,10 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
 
     let graphs =
         Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
-    let (ddata, dmax) = spark_floor(&tp.down_hist, graphs[0].width, graphs[0].height);
+    // The title line inside each Sparkline's block costs a row, so the trace is
+    // scaled against one row fewer than the area it is given.
+    let spark_h = |r: Rect| r.height.saturating_sub(1);
+    let (ddata, dmax) = spark_floor(&tp.down_hist, graphs[0].width, spark_h(graphs[0]));
     let down = Sparkline::default()
         .data(ddata)
         .max(dmax)
@@ -826,7 +902,7 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
         )));
     f.render_widget(down, graphs[0]);
 
-    let (udata, umax) = spark_floor(&tp.up_hist, graphs[1].width, graphs[1].height);
+    let (udata, umax) = spark_floor(&tp.up_hist, graphs[1].width, spark_h(graphs[1]));
     let up = Sparkline::default()
         .data(udata)
         .max(umax)
@@ -849,7 +925,19 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
         f.render_widget(pblock, cols[0]);
         top_talkers(f, s, pinner, talkers);
 
-        let sblock = block("Speed Test History", on_history);
+        // The saved count is the point of a history; when it outgrows what is
+        // held in memory, say so rather than implying the rest is gone.
+        let title = match s.speed_total {
+            0 => "Speed Test History".to_string(),
+            total if total > s.speed_history.len() => {
+                format!(
+                    "Speed Test History · {} of {total} saved",
+                    s.speed_history.len()
+                )
+            }
+            total => format!("Speed Test History · {total} saved"),
+        };
+        let sblock = block(&title, on_history);
         let sinner = sblock.inner(cols[1]);
         f.render_widget(sblock, cols[1]);
         speedtest_results(f, s, sinner, on_history);
@@ -928,18 +1016,21 @@ fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
 /// data plus the explicit max to scale against.
 fn spark_floor(hist: &crate::app::History, width: u16, height: u16) -> (Vec<u64>, u64) {
     let data = hist.tail_u64(width as usize);
+    // A sparkline cell has 8 vertical levels, so the smallest value that renders
+    // anything is max / (rows*8).
+    let levels = (height as u64).saturating_mul(8).max(8);
     let max = data.iter().copied().max().unwrap_or(0);
     if max == 0 {
-        return (data, 1); // no activity → nothing to show
+        // Idle link: still draw the baseline, so the chart reads as "zero
+        // throughput" rather than "no data" — an empty panel looks broken.
+        return (vec![1; data.len()], levels);
     }
-    // A sparkline cell has 8 vertical levels; the smallest visible value is
-    // max / (rows*8). Floor non-zero samples to that so they show a pixel.
-    let levels = (height as u64).saturating_mul(8).max(8);
-    let floor = (max / levels).max(1);
-    let data = data
-        .iter()
-        .map(|&v| if v > 0 { v.max(floor) } else { 0 })
-        .collect();
+    // Floor every sample, including zeros, so the trace keeps an unbroken
+    // baseline across quiet stretches instead of disappearing. Rounded up:
+    // ratatui truncates `value * levels / max`, so a floor computed by plain
+    // division lands just under one tick and renders nothing.
+    let floor = max.div_ceil(levels).max(1);
+    let data = data.iter().map(|&v| v.max(floor)).collect();
     (data, max)
 }
 
@@ -1341,7 +1432,21 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
     if let Some(w) = &n.wifi {
         // Live signal/tx come from the CoreWLAN graph below; keep the slower
         // system_profiler details (SSID / PHY / channel) here.
-        lines.push(kv("ssid", dash(&w.ssid)));
+        // macOS returns the literal string "<redacted>" for the network name
+        // unless the caller holds Location Services authorisation — Apple treats
+        // an SSID as location-revealing. Say why, rather than showing a bare
+        // placeholder that reads like an octomon bug.
+        if w.ssid.contains("redacted") {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<9}", "ssid"), Style::new().fg(Color::DarkGray)),
+                Span::styled(
+                    "hidden — needs Location Services",
+                    Style::new().fg(Color::DarkGray).italic(),
+                ),
+            ]));
+        } else {
+            lines.push(kv("ssid", dash(&w.ssid)));
+        }
         lines.push(kv(
             "wifi",
             format!("{}  ch {}", dash(&w.phy), dash(&w.channel)),
@@ -1390,7 +1495,13 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
     }
 
     let graph = link_graph(s);
-    let graph_h = if graph == LinkGraph::None { 0 } else { 5 };
+    // Full-screen has room for a signal trace worth reading; five rows in a
+    // split panel is all that fits, but it is cramped when the panel is large.
+    let graph_h = match (graph, s.fullscreen) {
+        (LinkGraph::None, _) => 0,
+        (_, true) => 10,
+        (_, false) => 5,
+    };
 
     // Full-screen charts each resolver's response time, which is where slow DNS
     // actually becomes visible. The text block shrinks to its content so the
@@ -1915,6 +2026,22 @@ fn fmt_bytes(n: u64) -> String {
     }
 }
 
+/// Colour a single round-trip sample. Unlike [`latency_color`] this judges one
+/// measurement in isolation, so a trace can show what each moment looked like.
+fn rtt_color(ms: f64) -> Color {
+    match ms {
+        v if v < 50.0 => Color::Green,
+        v if v < 150.0 => Color::Yellow,
+        _ => Color::Red,
+    }
+}
+
+/// Series colours for the latency charts. Deliberately outside the
+/// green/yellow/red scale, which means "how bad is this" everywhere else — a
+/// green trace line would read as a verdict rather than as a series.
+const SERIES_COLOR: Color = Color::Cyan;
+const P95_COLOR: Color = Color::Magenta;
+
 fn latency_color(last: Option<f64>, loss: f64) -> Color {
     if loss >= 5.0 || last.is_none() {
         return Color::Red;
@@ -2183,6 +2310,154 @@ mod tests {
 
     /// Every key the app binds should be discoverable from the help overlay,
     /// and the overlay has to fit a standard 80x24 terminal without clipping.
+    /// The throughput trace must keep a visible baseline even at zero, so an
+    /// idle link reads as "nothing flowing" rather than "the panel is broken".
+    #[test]
+    fn bandwidth_sparkline_always_shows_a_baseline() {
+        let mut h = crate::app::History::new(64);
+
+        // Completely idle.
+        for _ in 0..10 {
+            h.push(0.0);
+        }
+        let (data, max) = spark_floor(&h, 10, 3);
+        assert!(data.iter().all(|&v| v > 0), "every cell must render");
+        assert!(
+            data.iter().all(|&v| v * 8 * 3 / max >= 1),
+            "each must reach at least the lowest of the 8 sub-cell levels"
+        );
+        assert!(
+            data.iter().all(|&v| v * 8 * 3 / max == 1),
+            "and no more than one, so idle stays visually flat"
+        );
+
+        // A quiet stretch inside real traffic keeps its baseline too.
+        let mut h2 = crate::app::History::new(64);
+        for v in [0.0, 5_000_000.0, 0.0, 0.0, 1_000_000.0] {
+            h2.push(v);
+        }
+        let (data, max) = spark_floor(&h2, 5, 3);
+        assert_eq!(max, 5_000_000, "scale still comes from the real peak");
+        assert!(
+            data.iter().all(|&v| v * 8 * 3 / max >= 1),
+            "zero samples still occupy the bottom row"
+        );
+        // The peak still reaches the top.
+        assert_eq!(data.iter().copied().max().unwrap(), 5_000_000);
+    }
+
+    /// A long target list must stay navigable when the path monitor squeezes it.
+    #[test]
+    fn target_list_scrolls_to_keep_the_cursor_visible() {
+        use crate::app::{QualityView, TargetStat};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let targets: Vec<TargetStat> = (1..=30)
+            .map(|i| {
+                TargetStat::new(
+                    format!("target-{i}"),
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, i as u8)),
+                )
+            })
+            .collect();
+        let mut s = AppState::new(targets);
+        s.focus = Panel::Quality;
+        s.quality_view = QualityView::Graph;
+
+        // Cursor at the top: the first entries are on screen.
+        s.selected = 0;
+        let out = draw(&s, 100, 24);
+        assert!(out.contains("target-1"));
+
+        // Cursor near the end: the view has scrolled to it, and says so.
+        s.selected = 29;
+        let out = draw(&s, 100, 24);
+        assert!(out.contains("target-30"), "cursor row must be visible");
+        assert!(out.contains("more"), "should indicate the list continues");
+    }
+
+    /// A long hostname should use the panel, not be clipped at a fixed width.
+    #[test]
+    fn long_target_names_use_the_available_width() {
+        use crate::app::TargetStat;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let name = "a-very-long-host.example.com";
+        let s = AppState::new(vec![TargetStat::new(
+            name.into(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        )]);
+        assert!(draw(&s, 120, 24).contains(name));
+    }
+
+    #[test]
+    fn hop_list_says_when_it_has_more_than_fits() {
+        use crate::app::{HopMonitor, MonitoredHop, QualityView, TargetStat};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let hops: Vec<MonitoredHop> = (1..=25)
+            .map(|ttl| {
+                let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, ttl));
+                let mut st = TargetStat::new(format!("hop {ttl}"), addr);
+                st.record_reply(10.0);
+                MonitoredHop {
+                    ttl,
+                    addr: Some(addr),
+                    stat: Some(st),
+                }
+            })
+            .collect();
+
+        let mut s = AppState::new(vec![]);
+        s.focus = Panel::Quality;
+        s.quality_view = QualityView::HopMonitor;
+        s.hop_monitor = Some(HopMonitor {
+            target: "dest".into(),
+            dest: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            hops,
+            discovering: false,
+            generation: 1,
+            selected: 0,
+        });
+
+        let out = draw(&s, 120, 24);
+        assert!(
+            out.contains("press [f] for full screen"),
+            "a truncated path must say so"
+        );
+    }
+
+    #[test]
+    fn speed_history_reports_how_many_are_saved() {
+        let record = |at: i64| crate::store::SpeedRecord {
+            at,
+            provider: "Cloudflare".into(),
+            down_mbps: 100.0,
+            up_mbps: 10.0,
+            idle_ms: None,
+            loaded_ms: None,
+        };
+
+        let mut s = AppState::new(vec![]);
+        s.focus = Panel::Bandwidth;
+        s.fullscreen = true;
+        s.speed_history = (0..3).map(record).collect();
+        s.speed_total = 3;
+        assert!(draw(&s, 160, 40).contains("3 saved"));
+
+        // When the file holds more than is loaded, both numbers are shown so
+        // the older results do not look lost.
+        s.speed_total = 812;
+        assert!(draw(&s, 160, 40).contains("3 of 812 saved"));
+
+        // Nothing recorded yet: no misleading zero.
+        s.speed_history.clear();
+        s.speed_total = 0;
+        let out = draw(&s, 160, 40);
+        assert!(out.contains("Speed Test History"));
+        assert!(!out.contains("saved"));
+    }
+
     #[test]
     fn help_lists_every_key_and_fits_a_standard_terminal() {
         let mut s = AppState::new(vec![]);

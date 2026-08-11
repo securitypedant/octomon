@@ -104,7 +104,9 @@ async fn main() -> Result<()> {
         s.samples_per_sec = 1000.0 / cfg.ping_interval_ms.max(1) as f64;
         s.speedtest_provider_names = provider_names;
         s.speedtest_provider_idx = sel;
-        s.speed_history = store::load_recent(500);
+        let (history, total) = store::load_recent(500);
+        s.speed_history = history;
+        s.speed_total = total;
         s.logging_requested = cli.log;
         // Which tools ship by default varies sharply by distribution, so a
         // missing binary is a normal condition. Say so up front rather than
@@ -264,6 +266,30 @@ enum Side {
     SaveProvider(String),
 }
 
+/// Remove the selected target, pulling the dependent cursors back into range.
+fn delete_selected_target(s: &mut AppState) {
+    if s.selected >= s.targets.len() {
+        return;
+    }
+    let idx = s.selected;
+    // A path monitor outlives its target otherwise, quietly probing every hop
+    // toward an address the user just removed.
+    let addr = s.targets[idx].addr;
+    if s.hop_monitor.as_ref().is_some_and(|m| m.dest == addr) {
+        s.hop_monitor = None;
+        if s.quality_view == QualityView::HopMonitor {
+            s.quality_view = QualityView::Graph;
+        }
+    }
+    s.targets.remove(idx);
+    let last = s.targets.len().saturating_sub(1);
+    s.selected = s.selected.min(last);
+    if s.graph_target >= idx {
+        s.graph_target = s.graph_target.saturating_sub(1);
+    }
+    s.graph_target = s.graph_target.min(last);
+}
+
 /// Move whichever cursor holds focus: the sub-pane's when one is active,
 /// otherwise the panel's primary list.
 fn move_cursor(s: &mut AppState, delta: isize) {
@@ -418,16 +444,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 },
                 // Delete the selected target.
                 KeyCode::Char('d') | KeyCode::Delete if s.focus == Panel::Quality => {
-                    if s.selected < s.targets.len() {
-                        let idx = s.selected;
-                        s.targets.remove(idx);
-                        let last = s.targets.len().saturating_sub(1);
-                        s.selected = s.selected.min(last);
-                        if s.graph_target >= idx {
-                            s.graph_target = s.graph_target.saturating_sub(1);
-                        }
-                        s.graph_target = s.graph_target.min(last);
-                    }
+                    delete_selected_target(&mut s);
                 }
                 // Bandwidth: move the top-talkers column cursor and sort.
                 KeyCode::Left if s.focus == Panel::Bandwidth => {
@@ -833,6 +850,31 @@ mod tests {
         let mut s = monitor_state(vec![silent(1), silent(2)]);
         move_cursor(&mut s, 1);
         assert_eq!(s.hop_monitor.as_ref().unwrap().selected, 0);
+    }
+
+    /// A monitor left running against a deleted target keeps probing every hop
+    /// toward an address the user just removed.
+    #[test]
+    fn deleting_the_monitored_target_stops_the_monitor() {
+        let dest = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+        let mut s = monitor_state(vec![live(1)]);
+        s.hop_monitor.as_mut().unwrap().dest = dest;
+        s.targets = vec![
+            TargetStat::new("other".into(), IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9))),
+            TargetStat::new("monitored".into(), dest),
+        ];
+
+        // Deleting an unrelated target leaves the monitor alone.
+        s.selected = 0;
+        delete_selected_target(&mut s);
+        assert!(s.hop_monitor.is_some());
+        assert_eq!(s.quality_view, QualityView::HopMonitor);
+
+        // Deleting the monitored one stops it and leaves the path view.
+        s.selected = 0; // "monitored" is now the only entry
+        delete_selected_target(&mut s);
+        assert!(s.hop_monitor.is_none(), "monitor should stop");
+        assert_eq!(s.quality_view, QualityView::Graph);
     }
 
     /// 'n' needs a second pane to move to; the Bandwidth panel gains one in

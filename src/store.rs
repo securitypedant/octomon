@@ -72,20 +72,23 @@ pub fn append(rec: &SpeedRecord) {
     }
 }
 
-/// Load the most recent `n` records (oldest → newest).
-pub fn load_recent(n: usize) -> Vec<SpeedRecord> {
+/// Load the most recent `n` records (oldest → newest), plus how many are stored
+/// in total — the UI shows both, so "showing 500 of 812" stays honest when the
+/// history outgrows what is kept in memory.
+pub fn load_recent(n: usize) -> (Vec<SpeedRecord>, usize) {
     let Some(path) = path() else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
     let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
     let mut recs: Vec<SpeedRecord> = text
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
+    let total = recs.len();
     if recs.len() > n {
         recs.drain(0..recs.len() - n);
     }
-    recs
+    (recs, total)
 }

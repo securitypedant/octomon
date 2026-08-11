@@ -38,10 +38,13 @@ pub async fn run(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) 
         let Some((ttl, addr)) = parse_hop(line) else {
             continue;
         };
+        // Name what the hop is on the way *to*: "hop 3" alone leaves you
+        // wondering hop 3 of which path, since these come from one traceroute
+        // toward the internet rather than from anywhere in the target list.
         let label = if ttl == 1 {
             "gateway".to_string()
         } else {
-            format!("hop {ttl}")
+            format!("hop {ttl}→{PROBE}")
         };
 
         let (id, added) = {

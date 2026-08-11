@@ -141,6 +141,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>, cfg: crate::
                 };
                 crate::store::append(&record);
                 s.speed_history.push(record);
+                s.speed_total += 1;
 
                 s.speedtest.status = SpeedStatus::Done;
                 s.speedtest.provider = r.provider;
