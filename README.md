@@ -11,8 +11,10 @@ network, the Wi-Fi, the ISP, or your own machine that's misbehaving.
 
 ## What it shows
 
-Four panels, all updating live, and designed to run **without `sudo`** (see
-[Linux: ICMP permissions](#linux-icmp-permissions) for the one caveat):
+Four panels, all updating live. On macOS everything works unprivileged. On
+Linux, plain `sudo octomon` is the path of least resistance — see
+[Linux: privileges](#linux-privileges) for what needs it and why, and how to
+avoid it if you would rather:
 
 - **Connection Quality** — ICMP latency to configurable targets with a full
   distribution (last / avg / p95 / max), **jitter**, **packet loss**, and a
@@ -54,9 +56,8 @@ data that pivots straight into pandas, Excel or Grafana.
   Each degrades to "unavailable" rather than failing if its tool is missing.
   Note that `ss` covers **TCP only** — UDP and QUIC traffic (much of modern
   browsing) carries no per-socket byte counters and cannot be attributed — and
-  only your own processes unless run as root. Linux has no unprivileged
-  per-process byte counter (see
-  [Why everything runs unprivileged](#why-everything-runs-unprivileged)).
+  only your own processes unless run as root (see
+  [Linux: privileges](#linux-privileges)).
 - **Windows** — later.
 
 ### Linux: external tools
@@ -83,15 +84,24 @@ Everything else degrades to "unavailable" rather than failing, and octomon tells
 you at startup what is missing and which package provides it. Live Wi-Fi signal
 reads `/proc/net/wireless` directly and needs no package at all.
 
-### Linux: ICMP permissions
+### Linux: privileges
 
-Latency, path monitoring and traceroute targets use **unprivileged ping
-sockets** rather than raw sockets, so octomon does not need root. Whether that
-works depends on a kernel setting that some distributions — Ubuntu among them —
-ship closed. If the Connection Quality panel stays empty and adding a target
-reports "ICMP unavailable", that is why.
+**The short version: run `sudo octomon` on Linux.** Two things are narrower or
+broken without it, and only one of them can be fixed by configuration.
 
-Open it for everyone (this is what macOS does by default):
+| Feature | Unprivileged | With `sudo` |
+|---|---|---|
+| Latency, path monitor, traceroute targets | Broken on many distributions, fixable — see below | Works |
+| Per-process bandwidth | Your own processes only | Every process |
+| Everything else | Works | Works |
+
+octomon starts by telling you which of these apply on your machine.
+
+**ICMP.** Latency uses *unprivileged ping sockets* rather than raw sockets, so
+in principle no root is needed — but that depends on `net.ipv4.ping_group_range`,
+which several distributions (Ubuntu among them) ship closed. If Connection
+Quality stays empty and adding a target reports "ICMP unavailable", that is why.
+Fix it once, for everyone, which is what macOS does by default:
 
 ```sh
 sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
@@ -99,15 +109,21 @@ sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
 echo 'net.ipv4.ping_group_range=0 2147483647' | sudo tee /etc/sysctl.d/99-ping.conf
 ```
 
-Or grant the capability to octomon alone:
+Or grant the capability to the binary alone:
 
 ```sh
 sudo setcap cap_net_raw+ep "$(which octomon)"
 ```
 
-Running `sudo octomon` also works, and additionally lets per-process bandwidth
-see *every* process rather than only your own — `ss` cannot report other users'
-sockets unprivileged. Nothing else needs root.
+**Per-process bandwidth.** This one has no unprivileged workaround. `ss` cannot
+report other users' sockets without root, so unprivileged octomon sees only your
+own processes — system daemons and anything running as another user are simply
+invisible. Note that `ss` is also TCP-only regardless of privileges: QUIC and
+HTTP/3 traffic, which is much of modern browsing, carries no per-socket byte
+counters and cannot be attributed at all.
+
+So: fix the sysctl and run as yourself if you mainly care about latency and the
+path monitor; use `sudo` if you want the full picture.
 
 ## Install
 
@@ -144,7 +160,9 @@ sudo install -m755 octomon /usr/local/bin/octomon
 ```
 
 Install `traceroute` as well if your distribution omits it — see
-[Linux: external tools](#linux-external-tools) above.
+[Linux: external tools](#linux-external-tools) — and read
+[Linux: privileges](#linux-privileges): on Linux you will most likely want to
+run `sudo octomon`.
 
 ### From source
 
@@ -249,10 +267,17 @@ turns a diagnostic you run casually into a decision you have to think about.
 
 So the rule is: if a measurement can only be had with elevated privilege, octomon
 does without it and says so, rather than gating the whole tool behind a password
-prompt. In practice this costs less than you'd expect — latency uses unprivileged
-datagram ICMP (`SOCK_DGRAM`), path discovery uses UDP-probe `traceroute`,
-per-process bandwidth uses `nettop`, and Wi-Fi comes from CoreWLAN and
-`system_profiler`. Everything in the dashboard today is measured this way.
+prompt. On macOS this costs nothing — latency uses unprivileged datagram ICMP
+(`SOCK_DGRAM`), path discovery uses UDP-probe `traceroute`, per-process bandwidth
+uses `nettop`, and Wi-Fi comes from CoreWLAN and `system_profiler`. Every panel
+is fully populated without root.
+
+Linux is where the principle meets its limits, and it is worth being blunt about
+it: unprivileged ICMP depends on a sysctl that distributions often ship closed,
+and per-process bandwidth genuinely cannot see other users' sockets without
+root. octomon still runs, still tells you exactly what is degraded and why, and
+never silently pretends — but `sudo octomon` is the honest recommendation there.
+See [Linux: privileges](#linux-privileges).
 
 ### What privileges would unlock
 
