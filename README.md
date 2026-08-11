@@ -80,6 +80,31 @@ brew install octomon
 
 Then just `octomon`. Upgrade later with `brew upgrade octomon`.
 
+### Linux
+
+Pre-built binaries are statically linked against musl, so one download runs on
+any distribution — Alpine through RHEL — with no glibc-version matching.
+
+The installer script picks the right architecture and drops the binary in
+`~/.cargo/bin`:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/securitypedant/octomon/releases/latest/download/octomon-installer.sh | sh
+```
+
+Or take the tarball directly, if you would rather not pipe a script to a shell:
+
+```sh
+# x86_64 (most desktops and servers); use aarch64- for ARM machines
+curl -LO https://github.com/securitypedant/octomon/releases/latest/download/octomon-x86_64-unknown-linux-musl.tar.xz
+tar xf octomon-x86_64-unknown-linux-musl.tar.xz
+sudo install -m755 octomon /usr/local/bin/octomon
+```
+
+Install `traceroute` as well if your distribution omits it — see
+[Linux: external tools](#linux-external-tools) above.
+
 ### From source
 
 Requires a recent Rust toolchain (1.88+):
