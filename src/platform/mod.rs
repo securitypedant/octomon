@@ -163,7 +163,46 @@ mod macos {
         if !out.status.success() {
             return None;
         }
-        parse(&String::from_utf8_lossy(&out.stdout))
+        // One invocation feeds both: this probe takes ~10-15s, so the neighbour
+        // scan rides along with the current-network details rather than paying
+        // that cost twice.
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut info = parse(&text)?;
+        info.neighbours = parse_neighbours(&text);
+        Some(info)
+    }
+
+    /// Channels of every other network the radio can see, from the
+    /// "Other Local Wi-Fi Networks" block of the same report. SSIDs are ignored
+    /// — macOS redacts them without Location permission, and congestion only
+    /// depends on spectrum occupancy.
+    fn parse_neighbours(text: &str) -> Vec<crate::app::Neighbour> {
+        let mut lines = text.lines();
+        let Some(header) = lines
+            .by_ref()
+            .find(|l| l.trim() == "Other Local Wi-Fi Networks:")
+        else {
+            return Vec::new();
+        };
+        let header_indent = indent(header);
+
+        let mut out = Vec::new();
+        for line in lines {
+            if line.trim().is_empty() {
+                continue;
+            }
+            // A line no deeper than the header ends this block.
+            if indent(line) <= header_indent {
+                break;
+            }
+            if let Some((k, v)) = line.split_once(':')
+                && k.trim() == "Channel"
+                && let Some(n) = crate::app::parse_channel(v.trim())
+            {
+                out.push(n);
+            }
+        }
+        out
     }
 
     fn parse(text: &str) -> Option<WifiInfo> {

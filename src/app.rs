@@ -325,6 +325,55 @@ pub enum QualityView {
     HopMonitor,
 }
 
+/// Another access point sharing the airspace. SSIDs are deliberately not kept:
+/// modern macOS redacts them without Location permission, and congestion only
+/// depends on where each network sits in the spectrum.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Neighbour {
+    pub channel: u16,
+    /// 2, 5 or 6 (GHz).
+    pub band_ghz: u16,
+    pub width_mhz: u16,
+}
+
+impl Neighbour {
+    /// Centre frequency in MHz. Channel numbering is band-relative, so the band
+    /// is what makes two channel numbers comparable at all.
+    pub fn centre_mhz(&self) -> u32 {
+        let base = match self.band_ghz {
+            2 => 2407,
+            6 => 5950,
+            _ => 5000,
+        };
+        base + 5 * self.channel as u32
+    }
+
+    /// Whether two networks' occupied spectrum intersects. Adjacent-channel
+    /// interference is what actually degrades throughput — counting only exact
+    /// channel matches badly understates 2.4GHz congestion, where the common
+    /// 1/6/11 spacing exists precisely because neighbours bleed into each other.
+    pub fn overlaps(&self, other: &Neighbour) -> bool {
+        if self.band_ghz != other.band_ghz {
+            return false;
+        }
+        let half = |n: &Neighbour| (n.width_mhz.max(20) / 2) as u32;
+        let (a, b) = (self.centre_mhz(), other.centre_mhz());
+        let (ha, hb) = (half(self), half(other));
+        a.abs_diff(b) < ha + hb
+    }
+}
+
+/// How crowded the airspace is around the channel in use.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct Congestion {
+    /// Networks on exactly the same channel.
+    pub co_channel: usize,
+    /// Networks whose spectrum overlaps ours without matching it.
+    pub overlapping: usize,
+    /// Every network seen, on any band.
+    pub total: usize,
+}
+
 /// Wi-Fi radio details (best-effort, platform-specific).
 #[derive(Clone, Default)]
 pub struct WifiInfo {
@@ -333,6 +382,62 @@ pub struct WifiInfo {
     pub channel: String,
     pub rssi: String,
     pub tx_rate: String,
+    /// Other networks visible from this radio.
+    pub neighbours: Vec<Neighbour>,
+}
+
+impl WifiInfo {
+    /// Parse the channel description macOS reports, e.g. "161 (5GHz, 80MHz)".
+    pub fn channel_spec(&self) -> Option<Neighbour> {
+        parse_channel(&self.channel)
+    }
+
+    /// Crowding around our own channel. `None` until a scan has happened.
+    pub fn congestion(&self) -> Option<Congestion> {
+        let ours = self.channel_spec()?;
+        if self.neighbours.is_empty() {
+            return Some(Congestion {
+                total: 0,
+                ..Default::default()
+            });
+        }
+        let mut c = Congestion {
+            total: self.neighbours.len(),
+            ..Default::default()
+        };
+        for n in &self.neighbours {
+            if n.band_ghz == ours.band_ghz && n.channel == ours.channel {
+                c.co_channel += 1;
+            } else if n.overlaps(&ours) {
+                c.overlapping += 1;
+            }
+        }
+        Some(c)
+    }
+}
+
+/// Parse "161 (5GHz, 80MHz)" — the shape macOS reports channels in.
+pub fn parse_channel(s: &str) -> Option<Neighbour> {
+    let mut it = s.split_whitespace();
+    let channel: u16 = it.next()?.parse().ok()?;
+    // The parenthesised part is optional; assume 20MHz on 2.4GHz without it.
+    let rest = s.split_once('(').map(|(_, r)| r.trim_end_matches(')'));
+    let (mut band_ghz, mut width_mhz) = (if channel > 14 { 5 } else { 2 }, 20u16);
+    if let Some(rest) = rest {
+        for part in rest.split(',') {
+            let part = part.trim();
+            if let Some(b) = part.strip_suffix("GHz") {
+                band_ghz = b.trim().parse().unwrap_or(band_ghz);
+            } else if let Some(w) = part.strip_suffix("MHz") {
+                width_mhz = w.trim().parse().unwrap_or(width_mhz);
+            }
+        }
+    }
+    Some(Neighbour {
+        channel,
+        band_ghz,
+        width_mhz,
+    })
 }
 
 /// How the default-route interface actually carries traffic. Drives which
@@ -609,6 +714,77 @@ mod tests {
         assert!(!moved(&|n| n.dns = vec!["9.9.9.9".into()]), "dns");
         assert!(!moved(&|n| n.mac = "aa:bb:cc:dd:ee:ff".into()), "mac");
         assert!(!moved(&|n| n.link_detail = "1000 Mb".into()), "link speed");
+    }
+
+    #[test]
+    fn channel_spec_parses_the_macos_shape() {
+        let n = parse_channel("161 (5GHz, 80MHz)").unwrap();
+        assert_eq!((n.channel, n.band_ghz, n.width_mhz), (161, 5, 80));
+        let n = parse_channel("6 (2GHz, 20MHz)").unwrap();
+        assert_eq!((n.channel, n.band_ghz, n.width_mhz), (6, 2, 20));
+        // Bare channel numbers still classify by band and assume 20MHz.
+        assert_eq!(parse_channel("11").unwrap().band_ghz, 2);
+        assert_eq!(parse_channel("44").unwrap().band_ghz, 5);
+        assert!(parse_channel("").is_none());
+    }
+
+    #[test]
+    fn overlap_follows_spectrum_not_channel_numbers() {
+        let n = |channel, band_ghz, width_mhz| Neighbour {
+            channel,
+            band_ghz,
+            width_mhz,
+        };
+        // 2.4GHz channels sit 5MHz apart while occupying 20MHz, so neighbouring
+        // numbers bleed into each other...
+        assert!(n(1, 2, 20).overlaps(&n(3, 2, 20)));
+        assert!(n(1, 2, 20).overlaps(&n(4, 2, 20)));
+        // ...but 1 / 6 / 11 are 25MHz apart, which is exactly why that trio is
+        // the canonical non-overlapping set.
+        assert!(!n(1, 2, 20).overlaps(&n(6, 2, 20)));
+        assert!(!n(6, 2, 20).overlaps(&n(11, 2, 20)));
+        // An 80MHz channel swallows its 20MHz neighbours.
+        assert!(n(157, 5, 80).overlaps(&n(161, 5, 20)));
+        assert!(!n(36, 5, 20).overlaps(&n(149, 5, 20)));
+        // Same channel number in different bands is not the same spectrum.
+        assert!(!n(6, 2, 20).overlaps(&n(6, 5, 20)));
+    }
+
+    #[test]
+    fn congestion_separates_co_channel_from_overlap() {
+        let w = WifiInfo {
+            channel: "6 (2GHz, 20MHz)".into(),
+            neighbours: vec![
+                Neighbour {
+                    channel: 6,
+                    band_ghz: 2,
+                    width_mhz: 20,
+                }, // co-channel
+                Neighbour {
+                    channel: 8,
+                    band_ghz: 2,
+                    width_mhz: 20,
+                }, // overlapping
+                Neighbour {
+                    channel: 11,
+                    band_ghz: 2,
+                    width_mhz: 20,
+                }, // clear
+                Neighbour {
+                    channel: 44,
+                    band_ghz: 5,
+                    width_mhz: 80,
+                }, // other band
+            ],
+            ..Default::default()
+        };
+        let c = w.congestion().unwrap();
+        assert_eq!(c.co_channel, 1);
+        assert_eq!(c.overlapping, 1);
+        assert_eq!(c.total, 4);
+
+        // Without a known channel there is nothing to be congested relative to.
+        assert!(WifiInfo::default().congestion().is_none());
     }
 
     #[test]

@@ -1112,6 +1112,30 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
             "wifi",
             format!("{}  ch {}", dash(&w.phy), dash(&w.channel)),
         ));
+        // How crowded our channel is. Overlap matters as much as an exact
+        // match, which is why both are counted separately.
+        if let Some(c) = w.congestion().filter(|c| c.total > 0) {
+            let busy = c.co_channel + c.overlapping;
+            let color = match busy {
+                0..=2 => Color::Green,
+                3..=6 => Color::Yellow,
+                _ => Color::Red,
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{:<9}", "airspace"),
+                    Style::new().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("{} co-ch · {} overlap", c.co_channel, c.overlapping),
+                    Style::new().fg(color),
+                ),
+                Span::styled(
+                    format!(" · {} nearby", c.total),
+                    Style::new().fg(Color::DarkGray),
+                ),
+            ]));
+        }
     } else if n.medium == LinkMedium::WiFi {
         lines.push(Line::from(Span::styled(
             "gathering Wi-Fi details…",
@@ -1713,6 +1737,43 @@ mod tests {
         assert!(out.contains("192.168.1.4 (410ms)"));
         assert!(out.contains("1.1.1.1 (9ms)"));
         assert!(out.contains("9.9.9.9 (timeout)"));
+    }
+
+    #[test]
+    fn airspace_row_appears_only_with_scan_results() {
+        use crate::app::{Neighbour, WifiInfo};
+
+        let mut s = state_with_medium(LinkMedium::WiFi);
+        s.netinfo.wifi = Some(WifiInfo {
+            ssid: "home".into(),
+            phy: "802.11ax".into(),
+            channel: "161 (5GHz, 80MHz)".into(),
+            neighbours: vec![
+                Neighbour {
+                    channel: 161,
+                    band_ghz: 5,
+                    width_mhz: 80,
+                },
+                Neighbour {
+                    channel: 157,
+                    band_ghz: 5,
+                    width_mhz: 20,
+                },
+            ],
+            ..Default::default()
+        });
+        let out = draw(&s, 200, 60);
+        assert!(out.contains("airspace"));
+        assert!(out.contains("1 co-ch"));
+        assert!(out.contains("2 nearby"));
+
+        // A radio with no scan data shows no airspace row at all, rather than
+        // claiming an empty airspace.
+        s.netinfo.wifi = Some(WifiInfo {
+            channel: "161 (5GHz, 80MHz)".into(),
+            ..Default::default()
+        });
+        assert!(!draw(&s, 200, 60).contains("airspace"));
     }
 
     #[test]

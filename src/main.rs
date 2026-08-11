@@ -650,6 +650,12 @@ fn print_snapshot(s: &AppState) {
             "  wifi: ssid={} phy={} ch={} signal={} tx={}",
             w.ssid, w.phy, w.channel, w.rssi, w.tx_rate
         );
+        if let Some(c) = w.congestion() {
+            println!(
+                "  airspace: {} co-channel, {} overlapping, {} networks nearby",
+                c.co_channel, c.overlapping, c.total
+            );
+        }
     }
     let sig = &s.signal;
     if sig.present {
