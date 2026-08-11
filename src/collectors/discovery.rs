@@ -63,6 +63,66 @@ pub async fn run(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) 
     }
 }
 
+/// Re-run discovery after the machine moved to a different network: the old
+/// gateway and hops belong to a network that is no longer reachable, so they are
+/// dropped before the path is walked again. Hand-added targets are left alone.
+pub async fn refresh(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) {
+    {
+        let mut s = state.lock().unwrap();
+        s.targets.retain(|t| !t.discovered);
+        // The cursors index into `targets`, so they have to be pulled back in.
+        let last = s.targets.len().saturating_sub(1);
+        s.selected = s.selected.min(last);
+        s.graph_target = s.graph_target.min(last);
+    }
+    run(state.clone(), client.clone(), cfg.clone()).await;
+    public_ip(state, client, cfg).await;
+}
+
+/// Watch for the network changing under us and rebuild everything derived from
+/// it: the discovered targets, and the path monitor if one is running.
+pub async fn watch(
+    state: Arc<Mutex<AppState>>,
+    client: Arc<Client>,
+    cfg: Config,
+    changed: Arc<tokio::sync::Notify>,
+) {
+    let mut seen = state.lock().unwrap().net_change_seq;
+    loop {
+        // A slow fallback tick alongside the signal, so a change landing while
+        // a rebuild is already in flight is still noticed.
+        tokio::select! {
+            _ = changed.notified() => {}
+            _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => {}
+        }
+        let (seq, monitoring) = {
+            let s = state.lock().unwrap();
+            (
+                s.net_change_seq,
+                s.hop_monitor.as_ref().map(|m| (m.dest, m.target.clone())),
+            )
+        };
+        if seq == seen {
+            continue;
+        }
+        seen = seq;
+
+        refresh(state.clone(), client.clone(), cfg.clone()).await;
+
+        // A path monitored on the old network says nothing about the new one.
+        if let Some((dest, label)) = monitoring {
+            let label = label.split(" (").next().unwrap_or(&label).to_string();
+            crate::collectors::hopmon::start(
+                state.clone(),
+                client.clone(),
+                cfg.clone(),
+                dest,
+                label,
+            );
+        }
+    }
+}
+
 /// Discover the machine's public IP from `cfg.public_ip_url` (a plain-text IP
 /// endpoint) and add it as a target. No-op if the URL is empty or the response
 /// isn't a valid IP.

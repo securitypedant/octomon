@@ -10,7 +10,7 @@ use tokio::sync::Notify;
 
 use crate::app::{AppState, LinkMedium, NetInfo};
 
-pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>) {
+pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc<Notify>) {
     let mut ticker = tokio::time::interval(Duration::from_secs(5));
     // Identifying the VPN behind a tunnel can fall back to scanning the process
     // table, so the answer is cached per tunnel device rather than redone every
@@ -55,9 +55,19 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>) {
             // Preserve Wi-Fi details, which are populated on a slower cadence by
             // the dedicated wifi collector, across these frequent base refreshes.
             let mut s = state.lock().unwrap();
+            let was = s.netinfo.identity();
+            let now = info.identity();
             let prev_wifi = s.netinfo.wifi.take();
+            let moved = !s.netinfo.iface.is_empty() && was != now;
             s.netinfo = info;
-            s.netinfo.wifi = prev_wifi;
+            s.netinfo.wifi = if moved { None } else { prev_wifi };
+            if moved {
+                // Everything derived from the old network — discovered hops, the
+                // path monitor, which interface throughput reads — is now stale.
+                s.net_change_seq += 1;
+                s.notice = Some(format!("network changed → {}", s.netinfo.iface));
+                changed.notify_waiters();
+            }
         }
     }
 }

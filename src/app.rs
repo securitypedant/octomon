@@ -407,6 +407,20 @@ pub struct NetInfo {
 }
 
 impl NetInfo {
+    /// Fingerprint of "which network am I on". When this changes, the gateway,
+    /// the path to the internet, and which interface carries traffic may all be
+    /// different, so anything derived from them has to be rebuilt.
+    pub fn identity(&self) -> String {
+        format!(
+            "{}|{}|{}|{}|{}",
+            self.iface,
+            self.ipv4.join(","),
+            self.gateway_ip,
+            self.tunnel_iface,
+            self.medium as u8,
+        )
+    }
+
     /// Tunnel description for display: the vendor when known, else generic.
     pub fn tunnel_label(&self) -> Option<String> {
         self.tunnel.as_ref().map(|v| {
@@ -527,6 +541,35 @@ mod tests {
     }
 
     #[test]
+    fn network_identity_tracks_what_invalidates_the_path() {
+        let base = NetInfo {
+            iface: "en0".into(),
+            ipv4: vec!["192.168.1.89/23".into()],
+            gateway_ip: "192.168.1.1".into(),
+            medium: LinkMedium::WiFi,
+            ..Default::default()
+        };
+
+        // Things that mean "different network" must change the fingerprint.
+        let moved = |f: &dyn Fn(&mut NetInfo)| {
+            let mut n = base.clone();
+            f(&mut n);
+            n.identity() != base.identity()
+        };
+        assert!(moved(&|n| n.iface = "en7".into()), "interface");
+        assert!(moved(&|n| n.ipv4 = vec!["10.0.0.5/24".into()]), "subnet");
+        assert!(moved(&|n| n.gateway_ip = "10.0.0.1".into()), "gateway");
+        assert!(moved(&|n| n.tunnel_iface = "utun6".into()), "vpn came up");
+        assert!(moved(&|n| n.medium = LinkMedium::Ethernet), "medium");
+
+        // Things that don't change which network we're on must not, or every
+        // DHCP-driven DNS tweak would tear down the discovered targets.
+        assert!(!moved(&|n| n.dns = vec!["9.9.9.9".into()]), "dns");
+        assert!(!moved(&|n| n.mac = "aa:bb:cc:dd:ee:ff".into()), "mac");
+        assert!(!moved(&|n| n.link_detail = "1000 Mb".into()), "link speed");
+    }
+
+    #[test]
     fn loss_pct_counts_window() {
         let mut t = TargetStat::new("t".into(), IpAddr::V4(Ipv4Addr::LOCALHOST));
         t.record_reply(10.0);
@@ -602,6 +645,9 @@ pub struct AppState {
     pub quality_view: QualityView,
     /// When 'r' was last pressed, for a transient "re-probing" note.
     pub refresh_at: Option<Instant>,
+    /// Bumped by the netinfo collector whenever [`NetInfo::identity`] changes.
+    /// Collectors whose results depend on the network watch this and rebuild.
+    pub net_change_seq: u64,
 
     // --- Modal / global UI state ---
     pub input_mode: InputMode,
@@ -646,6 +692,7 @@ impl AppState {
             hop_monitor: None,
             quality_view: QualityView::Graph,
             refresh_at: None,
+            net_change_seq: 0,
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
             notice: None,

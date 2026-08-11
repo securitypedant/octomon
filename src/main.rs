@@ -114,6 +114,10 @@ async fn main() -> Result<()> {
             None
         }
     };
+    // Raised by the netinfo collector when the machine moves to a different
+    // network, so path-dependent state can be rebuilt.
+    let network_changed = Arc::new(Notify::new());
+
     if let Some(client) = ping_client.clone() {
         collectors::ping::spawn_all(state.clone(), client.clone(), cfg.clone());
         // Auto-discover the gateway + next hops, and the public IP, as targets.
@@ -125,8 +129,14 @@ async fn main() -> Result<()> {
             ));
             tokio::spawn(collectors::discovery::public_ip(
                 state.clone(),
+                client.clone(),
+                cfg.clone(),
+            ));
+            tokio::spawn(collectors::discovery::watch(
+                state.clone(),
                 client,
                 cfg.clone(),
+                network_changed.clone(),
             ));
         }
     }
@@ -137,6 +147,7 @@ async fn main() -> Result<()> {
     tokio::spawn(collectors::netinfo::run(
         state.clone(),
         netinfo_refresh.clone(),
+        network_changed.clone(),
     ));
     tokio::spawn(collectors::wifi::run(
         state.clone(),
