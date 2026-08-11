@@ -927,7 +927,8 @@ fn help_overlay(f: &mut Frame, area: Rect) {
         row("w", "cycle stats window (30/60/300s)"),
         row("l", "start / stop recording this session to CSV"),
         row("?", "toggle this help"),
-        row("q / Esc", "quit"),
+        row("Esc", "back out of a view / full-screen"),
+        row("q", "quit"),
         Line::from(""),
         Line::from(Span::styled(
             "  Connection Quality",
@@ -1345,16 +1346,11 @@ fn signal_graph(f: &mut Frame, s: &AppState, area: Rect) {
         r if r >= -72 => Color::Yellow,
         _ => Color::Red,
     };
-    let title = format!(
-        " signal {} dBm ({}) · tx {:.0} Mbps (cyan) ",
-        sig.rssi_dbm,
-        match sig_color {
-            Color::Green => "green",
-            Color::Yellow => "yellow",
-            _ => "red",
-        },
-        sig.tx_rate_mbps,
-    );
+    let band = match sig_color {
+        Color::Green => "green",
+        Color::Yellow => "yellow",
+        _ => "red",
+    };
 
     // Both series share a normalised 0..1 y-axis so their trends overlay: RSSI
     // as signal quality (−30 best … −100 worst); tx-rate against its own peak.
@@ -1369,27 +1365,44 @@ fn signal_graph(f: &mut Frame, s: &AppState, area: Rect) {
     if len == 0 {
         return;
     }
-    let tx_max = tx.iter().copied().fold(1.0_f64, f64::max);
+    // Not every platform reports a bitrate — Linux's /proc/net/wireless has no
+    // such field. Drawing a flat zero line and a "tx 0 Mbps" title would read as
+    // a dead link rather than a missing measurement, so the series is dropped.
+    let tx_max = tx.iter().copied().fold(0.0_f64, f64::max);
+    let has_tx = tx_max > 0.0;
+    let title = if has_tx {
+        format!(
+            " signal {} dBm ({band}) · tx {:.0} Mbps (cyan) ",
+            sig.rssi_dbm, sig.tx_rate_mbps,
+        )
+    } else {
+        format!(" signal {} dBm ({band}) ", sig.rssi_dbm)
+    };
+
     let sig_pts: Vec<(f64, f64)> = (0..len)
         .map(|i| (i as f64, ((rssi[i] + 100.0) / 70.0).clamp(0.0, 1.0)))
         .collect();
     let tx_pts: Vec<(f64, f64)> = (0..len)
-        .map(|i| (i as f64, (tx[i] / tx_max).clamp(0.0, 1.0)))
+        .map(|i| (i as f64, (tx[i] / tx_max.max(1.0)).clamp(0.0, 1.0)))
         .collect();
     let xmax = (len - 1).max(1) as f64;
 
-    let datasets = vec![
+    let mut datasets = vec![
         Dataset::default()
             .marker(Marker::Braille)
             .graph_type(GraphType::Line)
             .style(Style::new().fg(sig_color))
             .data(&sig_pts),
-        Dataset::default()
-            .marker(Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::new().fg(Color::Cyan))
-            .data(&tx_pts),
     ];
+    if has_tx {
+        datasets.push(
+            Dataset::default()
+                .marker(Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::new().fg(Color::Cyan))
+                .data(&tx_pts),
+        );
+    }
     let chart = Chart::new(datasets)
         .block(Block::new().title(Span::styled(title, Style::new().fg(Color::DarkGray))))
         .x_axis(Axis::default().bounds([0.0, xmax]))

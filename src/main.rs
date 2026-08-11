@@ -317,8 +317,17 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
 
             // --- normal navigation ---
             InputMode::Normal => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => s.should_quit = true,
+                KeyCode::Char('q') => s.should_quit = true,
                 KeyCode::Char('c') if ctrl => s.should_quit = true,
+                // Esc backs out of whatever view you're in — it must never quit,
+                // since reaching for it to leave a sub-view would kill the app.
+                KeyCode::Esc => {
+                    if s.fullscreen {
+                        s.fullscreen = false;
+                    } else if s.quality_view != QualityView::Graph {
+                        s.quality_view = QualityView::Graph;
+                    }
+                }
                 KeyCode::Char('?') => s.show_help = true,
                 KeyCode::Tab => s.focus = next_panel(s.focus),
                 KeyCode::BackTab => s.focus = prev_panel(s.focus),

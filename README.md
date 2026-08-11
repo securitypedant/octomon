@@ -34,9 +34,15 @@ Four panels, all updating live, all **unprivileged** (no `sudo`):
 ## Platform support
 
 - **macOS** — fully supported (this is the v1 target).
-- **Linux** — planned for **release 2**. The collectors are already behind
-  platform seams, but the macOS-specific probes (per-process bandwidth, Wi-Fi
-  signal/details) are not yet wired up for Linux.
+- **Linux** — supported. Latency, path monitoring, DNS, throughput, machine
+  vitals and recording are fully cross-platform. The platform-specific probes
+  read `/proc/net/wireless` for signal, `iw dev <if> link` for Wi-Fi details,
+  `nmcli` for the neighbour scan (NetworkManager's cache is readable
+  unprivileged, unlike `iw scan`), and `ss -tinp` for per-process bandwidth.
+  Each degrades to "unavailable" rather than failing if its tool is missing.
+  Note that `ss` covers **TCP only**, and only your own processes — Linux has no
+  unprivileged per-process byte counter (see
+  [Why everything runs unprivileged](#why-everything-runs-unprivileged)).
 - **Windows** — later.
 
 ## Install
