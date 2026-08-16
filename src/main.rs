@@ -62,6 +62,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    use_utf8_console();
     let cli = Cli::parse();
 
     // Base config from file/defaults, then apply CLI overrides.
@@ -316,6 +317,28 @@ fn reset_panel(s: &mut AppState) {
         }
     }
     s.notice = Some("panel data reset".to_string());
+}
+
+/// Make the Windows console read our output as UTF-8.
+///
+/// A console defaults to a legacy OEM codepage (437, 850, 866…). Rust converts
+/// to UTF-16 and calls `WriteConsoleW` when it can prove stdout is a console,
+/// but falls back to writing raw UTF-8 bytes when it cannot — under a pipe, a
+/// redirect, or a terminal that does not present a console handle. Those bytes
+/// then get decoded as OEM and every non-ASCII glyph arrives mangled: the "↓"
+/// in the bandwidth listing shows up as "Γåô". One call up front covers both
+/// paths. No-op everywhere else.
+fn use_utf8_console() {
+    #[cfg(windows)]
+    {
+        // SAFETY: sets a property of the calling process's console. Fails
+        // harmlessly (returning 0) when there is no console attached at all.
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleOutputCP(
+                windows_sys::Win32::Globalization::CP_UTF8,
+            )
+        };
+    }
 }
 
 /// Turn an ICMP socket failure into something the user can act on. The raw
@@ -853,11 +876,16 @@ fn print_snapshot(s: &AppState) {
         v.mem_total / 1_048_576,
         v.mem_pressure_pct
     );
+    // Windows has no load average and sysinfo reports zeros, which read as a
+    // permanently idle machine rather than an absent measurement. Matches what
+    // the dashboard does with the same figures.
+    let load = if cfg!(windows) {
+        String::new()
+    } else {
+        format!("load={:.2} {:.2} {:.2} ", v.load.0, v.load.1, v.load.2)
+    };
     println!(
-        "  load={:.2} {:.2} {:.2} over {} cores  swap={}/{} MiB",
-        v.load.0,
-        v.load.1,
-        v.load.2,
+        "  {load}over {} cores  swap={}/{} MiB",
         v.core_count(),
         v.swap_used / 1_048_576,
         v.swap_total / 1_048_576
