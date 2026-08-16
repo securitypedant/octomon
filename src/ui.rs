@@ -2683,7 +2683,16 @@ mod tests {
         // Cores are numbered from 1 for display; index 2 is core 3.
         assert!(out.contains("core 3 88%"));
         assert!(out.contains("68% used"), "pressure, not used/total");
-        assert!(out.contains("2.80 2.90 2.90"));
+        // Windows has no load-average concept and sysinfo reports zeros there,
+        // so the row is suppressed rather than rendered as a measured idle.
+        if cfg!(windows) {
+            assert!(
+                !out.contains("load "),
+                "Windows has no load average to show"
+            );
+        } else {
+            assert!(out.contains("2.80 2.90 2.90"));
+        }
         assert!(out.contains("CPU limited to 70%"));
         assert!(out.contains("Battery Power"));
 
