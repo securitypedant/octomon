@@ -766,6 +766,10 @@ fn print_snapshot(s: &AppState) {
         }
         app::ProcStatus::Probing => println!("  per-process bandwidth: probing…"),
         app::ProcStatus::Unsupported => println!("  per-process bandwidth: unsupported"),
+        app::ProcStatus::NeedsPrivilege => println!(
+            "  per-process bandwidth: needs privilege (run elevated, or join \
+             \"Performance Log Users\")"
+        ),
     }
 
     let n = &s.netinfo;

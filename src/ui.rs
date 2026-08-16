@@ -1242,6 +1242,15 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
             };
             return dim(f, &msg);
         }
+        ProcStatus::NeedsPrivilege => {
+            // Actionable, unlike Unsupported. Both routes are named because the
+            // group is granted once where elevation is per-run.
+            return dim(
+                f,
+                "per-process bandwidth needs an ETW session — run elevated, or join \
+                 the \"Performance Log Users\" group",
+            );
+        }
         ProcStatus::Probing => return dim(f, "detecting per-process bandwidth… (~5s)"),
         ProcStatus::Supported if s.processes.is_empty() => return dim(f, "sampling processes…"),
         ProcStatus::Supported => {}

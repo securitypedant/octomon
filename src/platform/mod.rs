@@ -8,6 +8,8 @@ pub mod tools;
 pub mod traceroute;
 
 #[cfg(windows)]
+mod etw;
+#[cfg(windows)]
 mod windows;
 
 /// One counter source at a point in time, attributed to a process.
@@ -39,13 +41,21 @@ pub async fn proc_net_sample() -> Option<Vec<ProcSample>> {
     linux::proc_net_sample().await
 }
 
-/// `None`: Windows has no unprivileged per-process byte counter.
-/// `GetPerTcpConnectionEStats` needs administrator rights to enable, ETW's
-/// `Microsoft-Windows-Kernel-Network` provider needs a trace session, and
-/// Resource Monitor's figures come from that same session.
+/// Windows has no *unprivileged* source, but it does have a privileged one:
+/// an ETW session on `Microsoft-Windows-Kernel-Network`, which is what Task
+/// Manager reads. `None` without the rights to open it.
 #[cfg(windows)]
 pub async fn proc_net_sample() -> Option<Vec<ProcSample>> {
-    None
+    tokio::task::spawn_blocking(etw::sample).await.ok()?
+}
+
+/// Whether the platform has a per-process source that privilege would unlock.
+///
+/// Distinguishes "this OS cannot do it" from "this OS can, but not as you" —
+/// the second is actionable and the first is not, and reporting the second as
+/// the first would be a lie about the platform.
+pub fn proc_needs_privilege() -> bool {
+    cfg!(windows)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]

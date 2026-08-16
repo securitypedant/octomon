@@ -252,7 +252,12 @@ pub enum ProcStatus {
     #[default]
     Probing,
     Supported,
+    /// No source on this platform at all.
     Unsupported,
+    /// A source exists but the process cannot reach it — Windows gates its
+    /// only one behind an ETW session. Distinct from `Unsupported` because it
+    /// is something the user can actually do something about.
+    NeedsPrivilege,
 }
 
 /// Per-process network throughput (bytes/sec), derived from successive samples,

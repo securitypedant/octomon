@@ -61,7 +61,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_WiFi",
     "Win32_Security",
+    "Win32_System_Diagnostics_Etw",
     "Win32_System_Power",
+    "Win32_System_Time",
 ] }
 
 # The profile that 'dist' will build with
