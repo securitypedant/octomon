@@ -35,7 +35,9 @@ install-updater = false
 # runner than through a cross-compile from the x64 image. Kept last: a TOML
 # sub-table swallows every key that follows it.
 # Extra steps for dist's build job; see the file for why.
-github-build-setup = "build-setup.yml"
+# Path is relative to .github/workflows/. Kept outside that directory so
+# GitHub does not try to run this fragment as a workflow in its own right.
+github-build-setup = "../build-setup.yml"
 
 [dist.github-custom-runners]
 aarch64-pc-windows-msvc = "windows-11-arm"
