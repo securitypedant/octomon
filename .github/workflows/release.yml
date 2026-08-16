@@ -127,6 +127,9 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      - name: "Install clang (Windows ARM64)"
+        if: "${{ matrix.runner == 'windows-11-arm' }}"
+        run: "choco install llvm --no-progress -y"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest

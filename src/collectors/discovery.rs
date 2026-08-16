@@ -11,6 +11,7 @@ use tokio::process::Command;
 use crate::app::{AppState, TargetStat};
 use crate::collectors::ping;
 use crate::config::Config;
+use crate::platform::traceroute as tr;
 
 const MAX_HOPS: usize = 4; // gateway (1) + next three
 
@@ -21,17 +22,8 @@ pub async fn run(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) 
     if probe.is_empty() {
         return;
     }
-    let out = Command::new("traceroute")
-        .args([
-            "-n",
-            "-q",
-            "1",
-            "-w",
-            "1",
-            "-m",
-            &MAX_HOPS.to_string(),
-            &probe,
-        ])
+    let out = Command::new(tr::PROGRAM)
+        .args(tr::args(MAX_HOPS, &probe))
         .stdin(std::process::Stdio::null())
         .output()
         .await;
@@ -40,7 +32,11 @@ pub async fn run(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) 
     };
 
     for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let Some((ttl, addr)) = parse_hop(line) else {
+        // Only hops that answered can be pinged; a `*` hop has no address.
+        let Some(hop) = tr::parse_hop(line) else {
+            continue;
+        };
+        let (ttl, Some(addr)) = (hop.ttl, hop.addr.and_then(|a| a.parse::<IpAddr>().ok())) else {
             continue;
         };
         // Name what the hop is on the way *to*: "hop 3" alone leaves you
@@ -167,14 +163,6 @@ pub async fn public_ip(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Co
     if added {
         ping::spawn_for(state, client, cfg, id, addr);
     }
-}
-
-/// Parse a hop line, returning (ttl, addr) only for hops that responded.
-fn parse_hop(line: &str) -> Option<(u8, IpAddr)> {
-    let mut it = line.split_whitespace();
-    let ttl: u8 = it.next()?.parse().ok()?;
-    let addr: IpAddr = it.next()?.parse().ok()?;
-    Some((ttl, addr))
 }
 
 #[cfg(test)]

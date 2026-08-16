@@ -252,7 +252,12 @@ pub enum ProcStatus {
     #[default]
     Probing,
     Supported,
+    /// No source on this platform at all.
     Unsupported,
+    /// A source exists but the process cannot reach it — Windows gates its
+    /// only one behind an ETW session. Distinct from `Unsupported` because it
+    /// is something the user can actually do something about.
+    NeedsPrivilege,
 }
 
 /// Per-process network throughput (bytes/sec), derived from successive samples,
@@ -596,7 +601,8 @@ impl DnsProbe {
 pub struct SignalState {
     pub present: bool,
     pub rssi_dbm: i32,
-    pub noise_dbm: i32,
+    /// `None` where the platform measures no noise floor (Windows).
+    pub noise_dbm: Option<i32>,
     pub tx_rate_mbps: f64,
     pub rssi_hist: History,
     pub tx_hist: History,

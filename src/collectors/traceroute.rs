@@ -9,7 +9,11 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use crate::app::{AppState, Hop, Traceroute};
+use crate::app::{AppState, Traceroute};
+use crate::platform::traceroute as tr;
+
+/// Hops beyond this are rarely actionable, and each costs a probe.
+const MAX_HOPS: usize = 20;
 
 /// Begin a traceroute to `addr`, replacing any previous result.
 pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr, label: String) {
@@ -23,8 +27,8 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr, label: String) {
             });
         }
 
-        let child = Command::new("traceroute")
-            .args(["-n", "-q", "1", "-w", "1", "-m", "20", &addr.to_string()])
+        let child = Command::new(tr::PROGRAM)
+            .args(tr::args(MAX_HOPS, &addr.to_string()))
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn();
@@ -32,7 +36,7 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr, label: String) {
         let mut child = match child {
             Ok(c) => c,
             Err(e) => {
-                finish(&state, Some(format!("traceroute unavailable: {e}")));
+                finish(&state, Some(format!("{} unavailable: {e}", tr::PROGRAM)));
                 return;
             }
         };
@@ -40,7 +44,7 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr, label: String) {
         if let Some(stdout) = child.stdout.take() {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                if let Some(hop) = parse_hop(&line) {
+                if let Some(hop) = tr::parse_hop(&line) {
                     let mut s = state.lock().unwrap();
                     if let Some(tr) = s.traceroute.as_mut() {
                         tr.hops.push(hop);
@@ -61,25 +65,4 @@ fn finish(state: &Arc<Mutex<AppState>>, err: Option<String>) {
     if let Some(e) = err {
         s.notice = Some(e);
     }
-}
-
-/// Parse a hop line like ` 5  157.131.209.65  187.819 ms` or ` 6  *`.
-/// The header ("traceroute to …") and blanks return `None`.
-pub(crate) fn parse_hop(line: &str) -> Option<Hop> {
-    let mut it = line.split_whitespace();
-    let ttl: u8 = it.next()?.parse().ok()?;
-    let second = it.next()?;
-    if second == "*" {
-        return Some(Hop {
-            ttl,
-            addr: None,
-            rtt_ms: None,
-        });
-    }
-    let rtt_ms = it.next().and_then(|v| v.parse::<f64>().ok());
-    Some(Hop {
-        ttl,
-        addr: Some(second.to_string()),
-        rtt_ms,
-    })
 }

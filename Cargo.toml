@@ -1,6 +1,6 @@
 [package]
 name = "octomon"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Btop-style terminal network monitor: latency, bandwidth, and Wi-Fi signal"
 repository = "https://github.com/securitypedant/octomon"
@@ -28,7 +28,6 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 clap = { version = "4.6.6", features = ["derive"] }
 crossterm = "0.29.0"
 directories = "6.0.0"
-libc = "0.2"
 futures-util = "0.3.33"
 netdev = "0.46.0"
 ratatui = "0.30.2"
@@ -43,10 +42,31 @@ toml = "1.1.4"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 
+[target.'cfg(unix)'.dependencies]
+# One call, in tools::is_privileged(). Kept off the Windows build so the
+# manifest says what is actually used there.
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-core-wlan = "0.3.2"
 objc2-foundation = "0.3.2"
+
+# Already in the dependency graph via mio/netdev/dirs-sys, so this selects
+# features rather than adding a crate. Preferred over the `windows` crate: no COM
+# machinery, and its crate name is `windows_sys`, which leaves the name `windows`
+# free for our own `platform::windows` module.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_NetworkManagement_WiFi",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Etw",
+    "Win32_System_Power",
+    "Win32_System_Time",
+] }
 
 # The profile that 'dist' will build with
 [profile.dist]

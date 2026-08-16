@@ -13,8 +13,33 @@ use crate::platform;
 // Keep enough for the full-screen view (10); the split view shows fewer.
 const TOP_N: usize = 10;
 
-/// Map pid → full process name via `ps` (nettop truncates names to ~15 chars).
-/// `comm` on macOS is the full executable path, so its basename is the name.
+/// Map pid → process name.
+///
+/// On unix this *enriches* the sample, whose names nettop truncates to ~15
+/// chars; `comm` is the full executable path, so its basename is the name. On
+/// Windows it is the only source there is — ETW events carry a pid and nothing
+/// else — so a miss here leaves a process unlabelled rather than abbreviated.
+#[cfg(windows)]
+async fn full_names() -> HashMap<u32, String> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+
+    tokio::task::spawn_blocking(|| {
+        // Names only: the default refresh also reads command lines, environment
+        // and disk usage for every process, which is a lot of work every 2s.
+        let mut sys = System::new_with_specifics(
+            RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
+        );
+        sys.refresh_processes(ProcessesToUpdate::All, true);
+        sys.processes()
+            .iter()
+            .map(|(pid, proc)| (pid.as_u32(), proc.name().to_string_lossy().to_string()))
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+#[cfg(not(windows))]
 async fn full_names() -> HashMap<u32, String> {
     let mut map = HashMap::new();
     let Ok(out) = tokio::process::Command::new("ps")
@@ -40,7 +65,11 @@ async fn full_names() -> HashMap<u32, String> {
 pub async fn run(state: Arc<Mutex<AppState>>) {
     // Probe support once; mark unsupported (not just "empty") if unavailable.
     if platform::proc_net_sample().await.is_none() {
-        state.lock().unwrap().proc_status = ProcStatus::Unsupported;
+        state.lock().unwrap().proc_status = if platform::proc_needs_privilege() {
+            ProcStatus::NeedsPrivilege
+        } else {
+            ProcStatus::Unsupported
+        };
         return;
     }
     state.lock().unwrap().proc_status = ProcStatus::Supported;

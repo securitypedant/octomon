@@ -1,0 +1,9 @@
+# Injected into dist's build-local-artifacts job via `github-build-setup` in
+# dist-workspace.toml. Everything else dist generates is target-agnostic, so
+# this is the only place a per-runner prerequisite can go.
+- name: Install clang (Windows ARM64)
+  # ring compiles its C sources with clang on Windows AArch64 — see the FIXME in
+  # its build.rs — and the build fails outright without one on PATH. Only this
+  # runner needs it; every other image already has a usable compiler.
+  if: ${{ matrix.runner == 'windows-11-arm' }}
+  run: choco install llvm --no-progress -y

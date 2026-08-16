@@ -8,7 +8,7 @@ cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
-installers = ["shell", "homebrew"]
+installers = ["shell", "powershell", "homebrew"]
 # Homebrew tap to publish the (binary) formula into
 tap = "securitypedant/homebrew-octomon"
 publish-jobs = ["homebrew"]
@@ -20,6 +20,8 @@ targets = [
     "aarch64-apple-darwin",
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
 ]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
@@ -27,3 +29,15 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
+
+# Build ARM64 Windows on ARM64 hardware. ring compiles its C with clang on
+# Windows AArch64 and fails without it, which is easier to satisfy on a native
+# runner than through a cross-compile from the x64 image. Kept last: a TOML
+# sub-table swallows every key that follows it.
+# Extra steps for dist's build job; see the file for why.
+# Path is relative to .github/workflows/. Kept outside that directory so
+# GitHub does not try to run this fragment as a workflow in its own right.
+github-build-setup = "../build-setup.yml"
+
+[dist.github-custom-runners]
+aarch64-pc-windows-msvc = "windows-11-arm"

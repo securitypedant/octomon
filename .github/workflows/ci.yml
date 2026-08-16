@@ -10,8 +10,17 @@ env:
 
 jobs:
   check:
-    name: fmt · clippy · build · test
-    runs-on: macos-latest
+    name: fmt · clippy · build · test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Report all platforms, not just whichever fails first — a Windows-only
+      # break should not hide a Linux one.
+      fail-fast: false
+      matrix:
+        # Every platform with target-specific code gets built and tested. Before
+        # this, only macOS ran, so the Linux parser tests in src/platform/mod.rs
+        # were compiled and executed nowhere.
+        os: [macos-latest, ubuntu-latest, windows-latest, windows-11-arm]
     steps:
       - uses: actions/checkout@v4
 
@@ -21,7 +30,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # ring builds its C code with clang on Windows AArch64 and errors out
+      # without it. Every other runner image already has a usable compiler.
+      - name: Install clang (Windows ARM64)
+        if: matrix.os == 'windows-11-arm'
+        run: choco install llvm --no-progress -y
+
+      # Formatting is platform-independent; checking it four times would only
+      # multiply the noise when it fails.
       - name: Format
+        if: matrix.os == 'macos-latest'
         run: cargo fmt --all -- --check
 
       - name: Clippy
@@ -32,6 +50,40 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      # Windows has no unprivileged per-process source, no ICMP guarantee and no
+      # Wi-Fi radio on a CI runner, so a good chunk of the Windows code can only
+      # be judged by running it on real hardware. Publishing the binary means
+      # that can happen without a Windows toolchain on the tester's machine.
+      # Release builds come from cargo-dist, not from here.
+      - name: Upload binary for manual testing
+        if: startsWith(matrix.os, 'windows')
+        uses: actions/upload-artifact@v4
+        with:
+          name: octomon-${{ matrix.os }}
+          path: target/release/octomon.exe
+          retention-days: 14
+          if-no-files-found: error
+
+  # One stable check for branch protection to require.
+  #
+  # Matrix jobs carry their OS in the reported context name, so requiring them
+  # directly means editing the protection rule every time a platform is added
+  # or dropped — and a required context that no job reports blocks merges
+  # forever, with no indication of why. This name is fixed and the rule can
+  # point at it permanently.
+  check-all:
+    name: fmt · clippy · build · test
+    needs: check
+    # Run even when a leg fails, so the result is a failure rather than a
+    # skipped check that never reports.
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every platform passed
+        run: |
+          echo "matrix result: ${{ needs.check.result }}"
+          [ "${{ needs.check.result }}" = "success" ]
 
   audit:
     name: cargo audit

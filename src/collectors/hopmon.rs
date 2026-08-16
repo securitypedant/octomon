@@ -18,8 +18,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::app::{AppState, HopMonitor, MonitoredHop, TargetStat};
-use crate::collectors::traceroute::parse_hop;
 use crate::config::Config;
+use crate::platform::traceroute as tr;
 
 /// Hops beyond this are rarely actionable and cost a probe each.
 const MAX_HOPS: usize = 20;
@@ -97,17 +97,8 @@ async fn discover(
     dest: IpAddr,
     generation: u64,
 ) {
-    let child = Command::new("traceroute")
-        .args([
-            "-n",
-            "-q",
-            "1",
-            "-w",
-            "1",
-            "-m",
-            &MAX_HOPS.to_string(),
-            &dest.to_string(),
-        ])
+    let child = Command::new(tr::PROGRAM)
+        .args(tr::args(MAX_HOPS, &dest.to_string()))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -122,14 +113,14 @@ async fn discover(
         {
             m.discovering = false;
         }
-        s.notice = Some("traceroute unavailable".to_string());
+        s.notice = Some(format!("{} unavailable", tr::PROGRAM));
         return;
     };
 
     if let Some(stdout) = child.stdout.take() {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            let Some(hop) = parse_hop(&line) else {
+            let Some(hop) = tr::parse_hop(&line) else {
                 continue;
             };
             let addr = hop.addr.as_ref().and_then(|a| a.parse::<IpAddr>().ok());

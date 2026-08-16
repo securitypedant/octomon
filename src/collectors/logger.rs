@@ -212,11 +212,17 @@ fn format_rows(s: &AppState, stamp: &str) -> String {
             s.signal.rssi_dbm.to_string(),
             "dBm",
         );
+        // Empty where the platform measures no noise floor: a blank cell reads
+        // as "not measured" to anything consuming the CSV, where 0 would be
+        // averaged in as a reading.
         row(
             "wifi",
             &s.netinfo.iface,
             "noise_dbm",
-            s.signal.noise_dbm.to_string(),
+            s.signal
+                .noise_dbm
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
             "dBm",
         );
         row(

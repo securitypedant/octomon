@@ -1227,16 +1227,29 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
         ProcStatus::Unsupported => {
             // Distinguish "this OS has no unprivileged source" from "the tool
             // that provides it simply isn't installed" — the second is fixable.
+            // Windows names no tool: its sources are in-process, and being
+            // unable to reach them is a privilege problem, reported separately.
             let tool = if cfg!(target_os = "linux") {
                 "ss"
-            } else {
+            } else if cfg!(target_os = "macos") {
                 "nettop"
+            } else {
+                ""
             };
             let msg = match s.missing_tools.iter().find(|(n, _, _)| *n == tool) {
                 Some((n, _, pkg)) => format!("per-process bandwidth needs {n} — {pkg}"),
                 None => "per-process bandwidth unavailable on this platform".to_string(),
             };
             return dim(f, &msg);
+        }
+        ProcStatus::NeedsPrivilege => {
+            // Actionable, unlike Unsupported. Both routes are named because the
+            // group is granted once where elevation is per-run.
+            return dim(
+                f,
+                "per-process bandwidth needs an ETW session — run elevated, or join \
+                 the \"Performance Log Users\" group",
+            );
         }
         ProcStatus::Probing => return dim(f, "detecting per-process bandwidth… (~5s)"),
         ProcStatus::Supported if s.processes.is_empty() => return dim(f, "sampling processes…"),
@@ -2052,22 +2065,35 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
     // "everything feels slow".
     let (l1, l5, l15) = v.load;
     let cores = v.core_count().max(1) as f64;
-    let mut load_spans = vec![
-        Span::styled("load ", Style::new().fg(Color::DarkGray)),
-        Span::styled(
-            format!("{l1:.2} {l5:.2} {l15:.2}"),
-            // Load beyond core count means work is queueing for CPU.
-            Style::new().fg(if l1 > cores {
-                Color::Red
-            } else if l1 > cores * 0.7 {
-                Color::Yellow
-            } else {
-                Color::Green
-            }),
-        ),
-    ];
+    // Windows has no load-average concept and sysinfo reports zeros for it,
+    // which would render as a measured, permanently idle machine rather than as
+    // a figure the platform does not have. Swap still means something there.
+    let mut load_spans = if cfg!(windows) {
+        Vec::new()
+    } else {
+        vec![
+            Span::styled("load ", Style::new().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{l1:.2} {l5:.2} {l15:.2}"),
+                // Load beyond core count means work is queueing for CPU.
+                Style::new().fg(if l1 > cores {
+                    Color::Red
+                } else if l1 > cores * 0.7 {
+                    Color::Yellow
+                } else {
+                    Color::Green
+                }),
+            ),
+        ]
+    };
     if v.swap_used > 0 {
-        load_spans.push(Span::styled("  swap ", Style::new().fg(Color::DarkGray)));
+        // Only separated from the load figures when there are any.
+        let label = if load_spans.is_empty() {
+            "swap "
+        } else {
+            "  swap "
+        };
+        load_spans.push(Span::styled(label, Style::new().fg(Color::DarkGray)));
         load_spans.push(Span::styled(
             fmt_bytes(v.swap_used),
             Style::new().fg(Color::Yellow),
@@ -2657,7 +2683,16 @@ mod tests {
         // Cores are numbered from 1 for display; index 2 is core 3.
         assert!(out.contains("core 3 88%"));
         assert!(out.contains("68% used"), "pressure, not used/total");
-        assert!(out.contains("2.80 2.90 2.90"));
+        // Windows has no load-average concept and sysinfo reports zeros there,
+        // so the row is suppressed rather than rendered as a measured idle.
+        if cfg!(windows) {
+            assert!(
+                !out.contains("load "),
+                "Windows has no load average to show"
+            );
+        } else {
+            assert!(out.contains("2.80 2.90 2.90"));
+        }
         assert!(out.contains("CPU limited to 70%"));
         assert!(out.contains("Battery Power"));
 
