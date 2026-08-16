@@ -65,6 +65,26 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  # One stable check for branch protection to require.
+  #
+  # Matrix jobs carry their OS in the reported context name, so requiring them
+  # directly means editing the protection rule every time a platform is added
+  # or dropped — and a required context that no job reports blocks merges
+  # forever, with no indication of why. This name is fixed and the rule can
+  # point at it permanently.
+  check-all:
+    name: fmt · clippy · build · test
+    needs: check
+    # Run even when a leg fails, so the result is a failure rather than a
+    # skipped check that never reports.
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every platform passed
+        run: |
+          echo "matrix result: ${{ needs.check.result }}"
+          [ "${{ needs.check.result }}" = "success" ]
+
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
