@@ -15,7 +15,9 @@ network, the Wi-Fi, the ISP, or your own machine that's misbehaving.
 Four panels, all updating live. On macOS everything works unprivileged. On
 Linux, plain `sudo octomon` is the path of least resistance — see
 [Linux: privileges](#linux-privileges) for what needs it and why, and how to
-avoid it if you would rather:
+avoid it if you would rather. On Windows everything works unprivileged except
+per-process bandwidth, which is a one-time group membership away — see
+[Windows: privileges](#windows-privileges):
 
 - **Connection Quality** — ICMP latency to configurable targets with a full
   distribution (last / avg / p95 / max), **jitter**, **packet loss**, and a
@@ -59,7 +61,14 @@ data that pivots straight into pandas, Excel or Grafana.
   browsing) carries no per-socket byte counters and cannot be attributed — and
   only your own processes unless run as root (see
   [Linux: privileges](#linux-privileges)).
-- **Windows** — later.
+- **Windows** — supported. Wi-Fi (signal, channel, airspace congestion) comes
+  from the Native Wifi API rather than parsing `netsh`, whose field *names* are
+  translated on a non-English install. Path discovery uses the built-in
+  `tracert`. Power source comes from `GetSystemPowerStatus`; there is no
+  thermal-throttle verdict to read, and no load average, so neither is shown.
+  Per-process bandwidth needs privilege — see
+  [Windows: privileges](#windows-privileges) — but it is the *only* platform
+  where it covers QUIC and HTTP/3.
 
 ### Linux: external tools
 
@@ -121,10 +130,47 @@ report other users' sockets without root, so unprivileged octomon sees only your
 own processes — system daemons and anything running as another user are simply
 invisible. Note that `ss` is also TCP-only regardless of privileges: QUIC and
 HTTP/3 traffic, which is much of modern browsing, carries no per-socket byte
-counters and cannot be attributed at all.
+counters and cannot be attributed at all. (Windows is the exception here: its
+ETW provider does report UDP — see
+[Windows: privileges](#windows-privileges).)
 
 So: fix the sysctl and run as yourself if you mainly care about latency and the
 path monitor; use `sudo` if you want the full picture.
+
+### Windows: privileges
+
+Everything except per-process bandwidth works unprivileged. That one panel
+needs an ETW session on `Microsoft-Windows-Kernel-Network` — the provider Task
+Manager's own Network column reads — and Windows gates opening one.
+
+| Feature | Unprivileged | With the ETW session |
+|---|---|---|
+| Latency, path monitor, DNS, throughput, vitals | full | full |
+| Wi-Fi signal, channel, tx rate | full | full |
+| Neighbouring networks / airspace congestion | needs Location services on | same |
+| Per-process bandwidth | unavailable | full, **including QUIC and HTTP/3** |
+
+There are two ways to get it, and the first is better:
+
+```powershell
+# Add yourself to Performance Log Users once, then sign out and back in.
+net localgroup "Performance Log Users" "%USERNAME%" /add
+```
+
+After that octomon attributes traffic per process every run, unelevated. The
+alternative is to start it from an elevated terminal, which works but has to be
+done every time.
+
+This is the one place Windows is *ahead* of the other platforms. Linux's `ss`
+and macOS's `nettop` are both TCP-only, so QUIC and HTTP/3 — much of modern
+browsing — cannot be attributed there at all. The ETW provider reports UDP too,
+so an elevated Windows build sees traffic the others structurally cannot.
+
+Wi-Fi neighbour scanning is a separate matter: it needs **Location services**
+enabled (Settings → Privacy & security → Location), which is Windows' own
+restriction on `WlanGetNetworkBssList`, not a privilege question. Without it the
+signal reading falls back from the beacon's exact dBm to Windows' documented
+quality-percentage mapping, and the congestion view goes quiet.
 
 ## Install
 
@@ -164,6 +210,30 @@ Install `traceroute` as well if your distribution omits it — see
 [Linux: external tools](#linux-external-tools) — and read
 [Linux: privileges](#linux-privileges): on Linux you will most likely want to
 run `sudo octomon`.
+
+### Windows
+
+Binaries are published for both x64 and ARM64. The PowerShell installer picks
+the right one and puts it in `~\.cargo\bin`:
+
+```powershell
+irm https://github.com/securitypedant/octomon/releases/latest/download/octomon-installer.ps1 | iex
+```
+
+Or take the zip directly:
+
+```powershell
+# Use octomon-aarch64-pc-windows-msvc.zip on ARM64 (Snapdragon, Surface Pro X).
+curl.exe -LO https://github.com/securitypedant/octomon/releases/latest/download/octomon-x86_64-pc-windows-msvc.zip
+Expand-Archive octomon-x86_64-pc-windows-msvc.zip -DestinationPath .
+```
+
+The binary is unsigned, so SmartScreen will warn on first run until the release
+builds reputation. Windows Terminal is recommended over the legacy console —
+the box-drawing characters and glyphs render correctly there without fiddling.
+
+Read [Windows: privileges](#windows-privileges) if you want the per-process
+bandwidth panel.
 
 ### crates.io (any platform)
 
@@ -292,6 +362,13 @@ root. octomon still runs, still tells you exactly what is degraded and why, and
 never silently pretends — but `sudo octomon` is the honest recommendation there.
 See [Linux: privileges](#linux-privileges).
 
+Windows sits between the two. Everything except per-process bandwidth is
+unprivileged, and that one panel needs an ETW session — but the rights to open
+one can be granted *once*, by joining Performance Log Users, rather than
+re-elevating every run. That fits the rule better than `sudo` does: the elevated
+capability is a property of the account, not of the process you launch. See
+[Windows: privileges](#windows-privileges).
+
 ### What privileges would unlock
 
 We may add an *optional* privileged mode later — strictly opt-in, never required,
@@ -301,7 +378,7 @@ each would need:
 | Capability | Needs | What it would add |
 |---|---|---|
 | Packet capture (BPF / libpcap) | root or BPF device access | Latency and loss of your *real* traffic instead of synthetic probes; per-flow and per-connection breakdown; DNS timing measured from actual queries rather than a probe |
-| System-wide per-process attribution | root | `nettop` only reports the current user's processes, so traffic from system daemons and other users is missing today |
+| System-wide per-process attribution (macOS, Linux) | root | `nettop` and `ss` only report the current user's processes, so traffic from system daemons and other users is missing today. Windows already has this via ETW |
 | Live per-process sampling | root / NetworkExtension entitlement | `nettop -L 1` takes ~5s per sample, which is why the Processes list updates slowly |
 | Which process owns a tunnel | root | `lsof` exposes `utun` ownership, but only for root-owned VPN daemons — so VPNs are identified from the tunnel's address ranges instead |
 | Neighbour SSIDs and their signal strength | Location Services permission | macOS redacts SSIDs without it, so airspace congestion counts networks per channel but cannot weight them by how loud each one is |
