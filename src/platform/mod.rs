@@ -7,6 +7,9 @@ use crate::app::WifiInfo;
 pub mod tools;
 pub mod traceroute;
 
+#[cfg(windows)]
+mod windows;
+
 /// One counter source at a point in time, attributed to a process.
 ///
 /// What a sample *counts* differs by platform: macOS reports per-process
@@ -36,7 +39,16 @@ pub async fn proc_net_sample() -> Option<Vec<ProcSample>> {
     linux::proc_net_sample().await
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// `None`: Windows has no unprivileged per-process byte counter.
+/// `GetPerTcpConnectionEStats` needs administrator rights to enable, ETW's
+/// `Microsoft-Windows-Kernel-Network` provider needs a trace session, and
+/// Resource Monitor's figures come from that same session.
+#[cfg(windows)]
+pub async fn proc_net_sample() -> Option<Vec<ProcSample>> {
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub async fn proc_net_sample() -> Option<Vec<ProcSample>> {
     None
 }
@@ -45,7 +57,9 @@ pub async fn proc_net_sample() -> Option<Vec<ProcSample>> {
 /// require location permission — only SSID/BSSID do).
 pub struct WifiSignal {
     pub rssi_dbm: i32,
-    pub noise_dbm: i32,
+    /// `None` where the platform measures no noise floor, as Windows does not.
+    /// Reporting 0 there would claim a 0 dBm floor rather than an absent one.
+    pub noise_dbm: Option<i32>,
     pub tx_rate_mbps: f64,
 }
 
@@ -60,7 +74,12 @@ pub fn wifi_signal() -> Option<WifiSignal> {
     linux::wifi_signal()
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+pub fn wifi_signal() -> Option<WifiSignal> {
+    windows::wifi_signal()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub fn wifi_signal() -> Option<WifiSignal> {
     None
 }
@@ -83,7 +102,12 @@ pub async fn thermal_state() -> Option<ThermalState> {
     macos::thermal_state().await
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+pub async fn thermal_state() -> Option<ThermalState> {
+    windows::thermal_state().await
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub async fn thermal_state() -> Option<ThermalState> {
     None
 }
@@ -99,7 +123,12 @@ pub async fn wifi_details() -> Option<WifiInfo> {
     linux::wifi_details().await
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+pub async fn wifi_details() -> Option<WifiInfo> {
+    windows::wifi_details().await
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub async fn wifi_details() -> Option<WifiInfo> {
     None
 }
@@ -125,7 +154,7 @@ mod macos {
             }
             Some(WifiSignal {
                 rssi_dbm: rssi,
-                noise_dbm: iface.noiseMeasurement() as i32,
+                noise_dbm: Some(iface.noiseMeasurement() as i32),
                 tx_rate_mbps: tx,
             })
         }
@@ -386,7 +415,7 @@ mod linux {
             }
             return Some(WifiSignal {
                 rssi_dbm: level as i32,
-                noise_dbm: noise as i32,
+                noise_dbm: Some(noise as i32),
                 // /proc/net/wireless has no bitrate; filled in by wifi_details.
                 tx_rate_mbps: 0.0,
             });
@@ -659,7 +688,7 @@ mod linux {
                         wlp3s0: 0000   70.  -40.  -95.       0      0      0\n";
             let s = parse_proc_wireless(text).expect("associated");
             assert_eq!(s.rssi_dbm, -40);
-            assert_eq!(s.noise_dbm, -95);
+            assert_eq!(s.noise_dbm, Some(-95));
         }
 
         #[test]

@@ -826,10 +826,15 @@ fn print_snapshot(s: &AppState) {
     }
     let sig = &s.signal;
     if sig.present {
+        // Noise is only measured on some platforms; say so rather than print a
+        // zero that reads as a measurement.
+        let noise = match sig.noise_dbm {
+            Some(n) => format!("{n} dBm"),
+            None => "n/a".to_string(),
+        };
         println!(
-            "  live signal (CoreWLAN): rssi={} dBm  noise={} dBm  tx={:.0} Mbps  ({} samples)",
+            "  live signal: rssi={} dBm  noise={noise}  tx={:.0} Mbps  ({} samples)",
             sig.rssi_dbm,
-            sig.noise_dbm,
             sig.tx_rate_mbps,
             sig.rssi_hist.data.len()
         );

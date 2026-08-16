@@ -596,7 +596,8 @@ impl DnsProbe {
 pub struct SignalState {
     pub present: bool,
     pub rssi_dbm: i32,
-    pub noise_dbm: i32,
+    /// `None` where the platform measures no noise floor (Windows).
+    pub noise_dbm: Option<i32>,
     pub tx_rate_mbps: f64,
     pub rssi_hist: History,
     pub tx_hist: History,
