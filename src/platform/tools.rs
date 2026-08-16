@@ -21,10 +21,14 @@ pub struct Tool {
 /// Tools relevant to the current platform, most important first.
 pub fn required() -> Vec<Tool> {
     let mut v = vec![Tool {
-        name: "traceroute",
+        // Named `tracert` on Windows. Taken from the one definition so the
+        // lookup and the spawn can never disagree.
+        name: crate::platform::traceroute::PROGRAM,
         provides: "path discovery, [t] traceroute, [m] path monitor",
         package: if cfg!(target_os = "macos") {
             "preinstalled on macOS"
+        } else if cfg!(windows) {
+            "preinstalled on Windows"
         } else {
             "apt install traceroute · dnf install traceroute"
         },
@@ -69,28 +73,95 @@ pub fn required() -> Vec<Tool> {
 }
 
 /// Whether `name` resolves on `PATH`. Uses the same lookup the shell would.
+///
+/// On Windows that means honouring `PATHEXT`: the file on disk is `TRACERT.EXE`,
+/// so joining the bare name finds nothing and every tool would be reported
+/// missing — which shows the startup notice before the user sees a dashboard.
 pub fn exists(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
     };
     std::env::split_paths(&path).any(|dir| {
-        let candidate = dir.join(name);
         // Existence is enough: an unexecutable hit would fail at spawn anyway,
         // and reporting it as present is more useful than claiming it's absent.
-        candidate.is_file()
+        if dir.join(name).is_file() {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            // PATHEXT is ';'-separated and its entries carry the leading dot.
+            std::env::var("PATHEXT")
+                .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+                .split(';')
+                .filter(|e| !e.is_empty())
+                .any(|ext| dir.join(format!("{name}{ext}")).is_file())
+        }
+        #[cfg(not(windows))]
+        false
     })
 }
 
-/// True when running with an effective uid of 0.
-pub fn is_root() -> bool {
+/// True when the process has whatever privilege its platform gates probes on:
+/// an effective uid of 0 on unix, and on Windows membership of a group that can
+/// open an ETW session. Not called `is_root` because Windows has no such thing.
+#[cfg(unix)]
+pub fn is_privileged() -> bool {
     // SAFETY: geteuid() takes no arguments, cannot fail, and only reads the
     // calling process's own credentials.
-    #[cfg(unix)]
-    unsafe {
-        libc::geteuid() == 0
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Windows gates per-process bandwidth on starting an ETW session, which
+/// Administrators can do — and so can members of Performance Log Users, which
+/// is the better answer for a monitoring tool since it is granted once rather
+/// than re-elevated every run. Either is enough, so both are checked.
+#[cfg(windows)]
+pub fn is_privileged() -> bool {
+    use windows_sys::Win32::Foundation::{FALSE, HANDLE};
+    use windows_sys::Win32::Security::{
+        AllocateAndInitializeSid, CheckTokenMembership, FreeSid, PSID, SECURITY_NT_AUTHORITY,
+    };
+
+    // Both are aliases in the BUILTIN domain, so they differ only in the RID.
+    const SECURITY_BUILTIN_DOMAIN_RID: u32 = 0x20;
+    const DOMAIN_ALIAS_RID_ADMINS: u32 = 0x220;
+    const DOMAIN_ALIAS_RID_LOGGING_USERS: u32 = 0x22c;
+
+    fn in_builtin_group(rid: u32) -> bool {
+        let authority = SECURITY_NT_AUTHORITY;
+        let mut sid: PSID = std::ptr::null_mut();
+        // SAFETY: builds a two-subauthority BUILTIN SID into `sid`, which is
+        // freed below on every path. The trailing zeros are the unused
+        // subauthority slots the signature requires.
+        let ok = unsafe {
+            AllocateAndInitializeSid(
+                &authority,
+                2,
+                SECURITY_BUILTIN_DOMAIN_RID,
+                rid,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                &mut sid,
+            )
+        };
+        if ok == FALSE || sid.is_null() {
+            return false;
+        }
+        let mut member = FALSE;
+        // SAFETY: a null token means "the calling thread's effective token".
+        // `member` is only trusted when the call reports success.
+        let checked =
+            unsafe { CheckTokenMembership(std::ptr::null_mut::<HANDLE>() as _, sid, &mut member) };
+        // SAFETY: `sid` came from AllocateAndInitializeSid and is not used after.
+        unsafe { FreeSid(sid) };
+        checked != FALSE && member != FALSE
     }
-    #[cfg(not(unix))]
-    false
+
+    in_builtin_group(DOMAIN_ALIAS_RID_ADMINS) || in_builtin_group(DOMAIN_ALIAS_RID_LOGGING_USERS)
 }
 
 /// What is degraded by running unprivileged, if anything.
@@ -100,10 +171,17 @@ pub fn is_root() -> bool {
 /// several distributions ship closed), and per-process bandwidth can only ever
 /// see the calling user's own processes.
 pub fn privilege_notice() -> Option<String> {
-    if is_root() {
+    if is_privileged() {
         return None;
     }
-    if cfg!(target_os = "linux") {
+    if cfg!(windows) {
+        Some(
+            "Running unprivileged. Per-process bandwidth needs an ETW session: run octomon \
+             from an elevated terminal, or add yourself to the local \"Performance Log Users\" \
+             group once and it works unelevated thereafter."
+                .to_string(),
+        )
+    } else if cfg!(target_os = "linux") {
         Some(
             "Running unprivileged. Per-process bandwidth covers only your own processes; \
              system daemons and other users are invisible. If latency is also empty, the \
@@ -149,20 +227,24 @@ mod tests {
 
     #[test]
     fn path_lookup_finds_real_binaries() {
-        // `sh` exists on every platform octomon targets.
-        assert!(exists("sh"));
+        // Both ship with the OS. `cmd` resolves only via PATHEXT — System32 is
+        // always on PATH but the file is `cmd.exe` — so this doubles as the
+        // regression test for that lookup.
+        assert!(exists(if cfg!(windows) { "cmd" } else { "sh" }));
         assert!(!exists("octomon-definitely-not-a-real-binary"));
     }
 
     #[test]
-    fn traceroute_is_the_only_non_optional_tool() {
+    fn the_traceroute_program_is_the_only_non_optional_tool() {
         let required = required();
         let hard: Vec<&str> = required
             .iter()
             .filter(|t| !t.optional)
             .map(|t| t.name)
             .collect();
-        assert_eq!(hard, vec!["traceroute"]);
+        // Compared against the one definition rather than a literal, which
+        // would only happen to be right on two of the three platforms.
+        assert_eq!(hard, vec![crate::platform::traceroute::PROGRAM]);
         // Every tool names something concrete that breaks without it.
         assert!(required.iter().all(|t| !t.provides.is_empty()));
         assert!(required.iter().all(|t| !t.package.is_empty()));

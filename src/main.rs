@@ -321,7 +321,13 @@ fn reset_panel(s: &mut AppState) {
 /// Turn an ICMP socket failure into something the user can act on. The raw
 /// error ("Permission denied") says nothing about the fix.
 fn icmp_help(err: &str) -> String {
-    if cfg!(target_os = "linux") {
+    if cfg!(windows) {
+        format!(
+            "ICMP unavailable ({err}). Latency, path monitoring and traceroute targets are \
+             disabled. This is usually a firewall or endpoint-security product blocking ICMP \
+             for non-administrators — an elevated terminal will confirm it."
+        )
+    } else if cfg!(target_os = "linux") {
         format!(
             "ICMP unavailable ({err}). Latency, path monitoring and traceroute targets need \
              unprivileged ping sockets. Enable them for everyone with:\n\

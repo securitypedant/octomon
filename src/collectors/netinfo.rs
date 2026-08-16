@@ -116,7 +116,7 @@ fn build(iface: &netdev::Interface) -> NetInfo {
 
     let medium = classify(iface);
     NetInfo {
-        iface: iface.name.clone(),
+        iface: counter_name(iface),
         iface_label: iface.friendly_name.clone().unwrap_or_default(),
         ipv4,
         ipv6,
@@ -130,12 +130,33 @@ fn build(iface: &netdev::Interface) -> NetInfo {
         // Vendor is filled in by the caller (it needs a process scan).
         tunnel: (medium == LinkMedium::Tunnel).then(String::new),
         tunnel_iface: if medium == LinkMedium::Tunnel {
-            iface.name.clone()
+            counter_name(iface)
         } else {
             String::new()
         },
         tunnel_is_split: false,
         wifi: None, // filled in by the caller for Wi-Fi links
+    }
+}
+
+/// The interface name that `sysinfo`'s counters are keyed on.
+///
+/// On Windows `netdev` reports the adapter GUID — `{3F2504E0-4F89-...}` — while
+/// `sysinfo` keys its per-interface counters on the alias ("Wi-Fi"). Using the
+/// GUID means the throughput collector never finds the default interface and
+/// silently falls back to summing every adapter, so the friendly name is what
+/// has to be carried around. Elsewhere the two are the same string.
+fn counter_name(iface: &netdev::Interface) -> String {
+    #[cfg(windows)]
+    {
+        iface
+            .friendly_name
+            .clone()
+            .unwrap_or_else(|| iface.name.clone())
+    }
+    #[cfg(not(windows))]
+    {
+        iface.name.clone()
     }
 }
 
@@ -160,9 +181,11 @@ fn egress_iface_name() -> Option<String> {
         return None;
     };
     netdev::get_interfaces()
-        .into_iter()
+        .iter()
+        // Must match how `build` names interfaces, or the split-tunnel
+        // comparison against `info.iface` can never be equal on Windows.
         .find(|i| i.ipv4.iter().any(|n| n.addr() == local))
-        .map(|i| i.name)
+        .map(counter_name)
 }
 
 /// Classify the medium carrying the default route.

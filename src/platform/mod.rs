@@ -5,6 +5,7 @@
 use crate::app::WifiInfo;
 
 pub mod tools;
+pub mod traceroute;
 
 /// One counter source at a point in time, attributed to a process.
 ///

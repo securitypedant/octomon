@@ -1,8 +1,9 @@
 //! Configuration.
 //!
 //! Loaded from `$XDG_CONFIG_HOME/octomon/config.toml` (default
-//! `~/.config/octomon/config.toml`) on both macOS and Linux. On first run a
-//! default file is written there so it can be edited.
+//! `~/.config/octomon/config.toml`) on both macOS and Linux, and from
+//! `%APPDATA%\octomon\config.toml` on Windows. On first run a default file is
+//! written there so it can be edited.
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -119,14 +120,33 @@ impl Config {
         Duration::from_millis(self.dns_timeout_ms.max(100))
     }
 
-    /// The config file path: `$XDG_CONFIG_HOME/octomon/config.toml`, or
-    /// `~/.config/octomon/config.toml` (used on macOS as well as Linux).
+    /// The config file path.
     pub fn path() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .or_else(|| directories::BaseDirs::new().map(|b| b.home_dir().join(".config")))?;
-        Some(base.join("octomon").join("config.toml"))
+        Some(Self::dir()?.join("config.toml"))
+    }
+
+    /// octomon's config directory.
+    ///
+    /// Unix keeps the XDG layout octomon has always used — on macOS as well as
+    /// Linux. `~/Library/Application Support` would be more Apple-native, and
+    /// would silently orphan every config already on disk, so it is
+    /// deliberately not done. Windows has no such history and gets `%APPDATA%`.
+    fn dir() -> Option<PathBuf> {
+        #[cfg(unix)]
+        {
+            let base = std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .or_else(|| directories::BaseDirs::new().map(|b| b.home_dir().join(".config")))?;
+            Some(base.join("octomon"))
+        }
+        #[cfg(not(unix))]
+        {
+            // BaseDirs::config_dir() is %APPDATA% (Roaming). ProjectDirs would
+            // add a redundant qualifier/organisation path plus a `config`
+            // segment, where this mirrors the unix shape one-for-one.
+            directories::BaseDirs::new().map(|b| b.config_dir().join("octomon"))
+        }
     }
 
     /// Load config, writing a default file on first run. Any read/parse problem
@@ -174,5 +194,24 @@ impl Config {
         let header = "# octomon configuration — edit and restart octomon.\n\
                       # Deleting this file regenerates it with defaults.\n\n";
         std::fs::write(path, format!("{header}{body}"))
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_unix_layout_has_not_moved() {
+        // Existing installs must keep finding their config; see `dir`.
+        let p = Config::path().expect("a home directory");
+        assert!(p.ends_with("octomon/config.toml"), "got {}", p.display());
+    }
+
+    #[test]
+    fn the_config_file_sits_in_the_config_directory() {
+        let dir = Config::dir().expect("a home directory");
+        assert!(Config::path().unwrap().starts_with(&dir));
     }
 }

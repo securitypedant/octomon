@@ -1,5 +1,6 @@
 //! Persistent speed-test history, appended as JSON Lines to the OS data dir
-//! (`$XDG_DATA_HOME/octomon/speedtests.jsonl`, default `~/.local/share/...`).
+//! (`$XDG_DATA_HOME/octomon/speedtests.jsonl`, default `~/.local/share/...`;
+//! `%LOCALAPPDATA%\octomon\speedtests.jsonl` on Windows).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -33,12 +34,24 @@ impl SpeedRecord {
 }
 
 /// Directory for octomon's own data files.
+///
+/// Unix keeps the XDG layout existing installs already use; moving it would
+/// orphan people's speed-test history. Windows uses `%LOCALAPPDATA%` rather than
+/// `%APPDATA%`: a growing JSONL and per-session CSVs are machine-local state,
+/// not something worth dragging across a roaming profile.
 pub fn data_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| directories::BaseDirs::new().map(|b| b.home_dir().join(".local/share")))?;
-    Some(base.join("octomon"))
+    #[cfg(unix)]
+    {
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| directories::BaseDirs::new().map(|b| b.home_dir().join(".local/share")))?;
+        Some(base.join("octomon"))
+    }
+    #[cfg(not(unix))]
+    {
+        directories::BaseDirs::new().map(|b| b.data_local_dir().join("octomon"))
+    }
 }
 
 /// Path for a new session log, named for the moment recording started.
@@ -48,11 +61,7 @@ pub fn session_log_path() -> Option<PathBuf> {
 }
 
 fn path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| directories::BaseDirs::new().map(|b| b.home_dir().join(".local/share")))?;
-    Some(base.join("octomon").join("speedtests.jsonl"))
+    Some(data_dir()?.join("speedtests.jsonl"))
 }
 
 /// Append a record (best-effort; ignored on error).
@@ -91,4 +100,28 @@ pub fn load_recent(n: usize) -> (Vec<SpeedRecord>, usize) {
         recs.drain(0..recs.len() - n);
     }
     (recs, total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_unix_layout_has_not_moved() {
+        // Existing installs must keep finding their history. A "more native"
+        // ~/Library/Application Support on macOS would silently orphan it.
+        let dir = data_dir().expect("a home directory");
+        assert!(dir.ends_with("octomon"), "got {}", dir.display());
+        assert!(path().unwrap().ends_with("octomon/speedtests.jsonl"));
+    }
+
+    #[test]
+    fn every_data_file_sits_under_the_one_directory() {
+        // The history, the session logs and the directory itself were three
+        // separate path derivations before; they must not drift apart again.
+        let dir = data_dir().expect("a home directory");
+        assert!(path().unwrap().starts_with(&dir));
+        assert!(session_log_path().unwrap().starts_with(&dir));
+    }
 }
