@@ -29,14 +29,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         // when the network does, or when a VPN installs its own proxy.
         let (servers, scope): (Vec<IpAddr>, u32) = {
             let s = state.lock().unwrap();
-            (
-                s.netinfo
-                    .dns
-                    .iter()
-                    .filter_map(|d| d.parse::<IpAddr>().ok())
-                    .collect(),
-                s.netinfo.iface_index,
-            )
+            (canonical_servers(&s.netinfo.dns), s.netinfo.iface_index)
         };
         if servers.is_empty() {
             state.lock().unwrap().dns.clear();
@@ -83,14 +76,33 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
 
         // Forget resolvers that dropped out of the configuration.
         let mut s = state.lock().unwrap();
-        let live: Vec<IpAddr> = s
-            .netinfo
-            .dns
-            .iter()
-            .filter_map(|d| d.parse::<IpAddr>().ok())
-            .collect();
+        let live = canonical_servers(&s.netinfo.dns);
         s.dns.retain(|p| live.contains(&p.server));
     }
+}
+
+/// The interface's resolver list as probeable addresses: IPv4-mapped IPv6
+/// forms (`::ffff:127.0.2.2` — Windows DNS filters register both spellings)
+/// unmap to their embedded IPv4, and the resulting duplicates collapse, so
+/// two real resolvers don't render as four scary rows.
+fn canonical_servers(configured: &[String]) -> Vec<IpAddr> {
+    let mut seen = Vec::new();
+    for d in configured {
+        let Ok(addr) = d.parse::<IpAddr>() else {
+            continue;
+        };
+        let addr = match addr {
+            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => IpAddr::V4(v4),
+                None => IpAddr::V6(v6),
+            },
+            v4 => v4,
+        };
+        if !seen.contains(&addr) {
+            seen.push(addr);
+        }
+    }
+    seen
 }
 
 /// Send one A query and time the answer. `scope` is the interface index a
@@ -128,8 +140,19 @@ async fn query(
     parse_response(id, &buf[..read])
 }
 
+/// Compact reason for a probe failure. OS error strings are long and get
+/// clipped mid-word ("not valid in it"); the kind carries the meaning.
 fn short(e: &std::io::Error) -> String {
-    e.to_string().chars().take(40).collect()
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::ConnectionRefused => "refused".to_string(),
+        ErrorKind::ConnectionReset => "connection reset".to_string(),
+        ErrorKind::AddrNotAvailable => "address not usable".to_string(),
+        ErrorKind::NetworkUnreachable | ErrorKind::HostUnreachable => "unreachable".to_string(),
+        ErrorKind::PermissionDenied => "permission denied".to_string(),
+        ErrorKind::TimedOut => "timeout".to_string(),
+        _ => e.to_string().chars().take(28).collect(),
+    }
 }
 
 /// A resolver-probe name has to be a valid QNAME; fall back rather than send a
@@ -223,6 +246,48 @@ mod tests {
         assert_eq!(parse_response(0x1234, &servfail), Err("SERVFAIL".into()));
 
         assert!(parse_response(0x1234, &[0u8; 4]).is_err());
+    }
+
+    /// The Windows DNS-filter shape: `::ffff:127.0.2.2` alongside `127.0.2.2`.
+    /// The mapped form must unmap (a v6 socket can't reach it) and the
+    /// duplicates must collapse — two real resolvers, not four scary rows.
+    #[test]
+    fn mapped_v6_resolvers_unmap_and_deduplicate() {
+        let configured: Vec<String> = [
+            "::ffff:127.0.2.2",
+            "::ffff:127.0.2.3",
+            "127.0.2.2",
+            "127.0.2.3",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let servers = canonical_servers(&configured);
+        assert_eq!(servers.len(), 2);
+        assert!(servers.iter().all(|a| a.is_ipv4() && a.is_loopback()));
+
+        // Real v6 resolvers stay v6; order is preserved.
+        let mixed: Vec<String> = ["2606:4700:4700::1111", "1.1.1.1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let servers = canonical_servers(&mixed);
+        assert_eq!(servers.len(), 2);
+        assert!(servers[0].is_ipv6());
+    }
+
+    #[test]
+    fn failure_reasons_are_compact_words_not_clipped_prose() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            short(&Error::from(ErrorKind::ConnectionReset)),
+            "connection reset"
+        );
+        assert_eq!(
+            short(&Error::from(ErrorKind::AddrNotAvailable)),
+            "address not usable"
+        );
+        assert_eq!(short(&Error::from(ErrorKind::ConnectionRefused)), "refused");
     }
 
     #[test]

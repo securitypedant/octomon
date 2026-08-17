@@ -591,12 +591,20 @@ pub fn evaluate(s: &AppState) -> Triage {
         if n_fail == probes.len() && names_resolve {
             let mut evidence = evidence.clone();
             evidence.push("HTTP check fetched a hostname fine — resolution itself works".into());
+            // Loopback resolvers are a DNS filter/proxy on this machine
+            // (AdGuard-style 127.0.2.x is the classic signature): it answers
+            // the OS but not necessarily octomon's probes. Name the situation
+            // rather than reporting a generic failure.
+            let all_local = probes.iter().all(|p| p.server.is_loopback());
             findings.push(Finding {
                 cause: Cause::Dns,
                 severity: Severity::Info,
                 confidence: Confidence::Weak,
-                summary: "resolver probes blocked on this network — names still resolve"
-                    .to_string(),
+                summary: if all_local {
+                    "a local DNS proxy handles resolution — probes not answerable".to_string()
+                } else {
+                    "resolver probes blocked on this network — names still resolve".to_string()
+                },
                 evidence,
                 subject: String::new(),
             });
@@ -1675,6 +1683,23 @@ mod tests {
         assert_eq!(f.severity, Severity::Down);
         // The anchors-fine contrast is the whole point.
         assert_eq!(f.confidence, Confidence::Strong);
+    }
+
+    /// The Windows DNS-filter lesson: loopback resolvers (127.0.2.x) that
+    /// answer the OS but not octomon's probes get named as what they are.
+    #[test]
+    fn loopback_resolvers_are_named_a_local_proxy() {
+        let mut s = healthy_state();
+        let mut p = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(127, 0, 2, 2)));
+        p.sent = 10;
+        p.ok = 0;
+        p.status = "connection reset".into();
+        s.dns = vec![p];
+        s.http.v4 = crate::app::FamilyProbe::Ok(30.0);
+        let t = evaluate(&s);
+        let f = t.findings.iter().find(|f| f.cause == Cause::Dns).unwrap();
+        assert_eq!(f.severity, Severity::Info);
+        assert!(f.summary.contains("local DNS proxy"), "{}", f.summary);
     }
 
     /// The hotspot lesson: a carrier network handed out a link-local resolver
