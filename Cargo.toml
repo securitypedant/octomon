@@ -17,6 +17,7 @@ rust-version = "1.88"
 include = [
     "src/**/*.rs",
     "README.md",
+    "PRIVILEGES.md",
     "LICENSE-MIT",
     "LICENSE-APACHE",
     "SECURITY.md",
