@@ -9,6 +9,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use ratatui::symbols::Marker;
 use serde::{Deserialize, Serialize};
 
 /// A single ICMP target.
@@ -59,6 +60,14 @@ pub struct Config {
     /// Name looked up when probing resolvers. A widely cached name measures what
     /// applications actually experience; something obscure measures recursion.
     pub dns_probe_name: String,
+    /// Glyphs used to plot chart lines: "braille", "halfblock" or "dot".
+    ///
+    /// Braille packs 2x4 dots into one cell and is what the charts are drawn
+    /// around, but those glyphs are missing from the raster fonts a legacy
+    /// Windows console still defaults to, where every plotted point comes out
+    /// as an empty box. "halfblock" gives up half the vertical resolution for
+    /// glyphs that render essentially anywhere.
+    pub graph_marker: String,
 }
 
 impl Default for Config {
@@ -87,6 +96,7 @@ impl Default for Config {
             dns_interval_ms: 5000,
             dns_timeout_ms: 2000,
             dns_probe_name: "example.com".to_string(),
+            graph_marker: "braille".to_string(),
         }
     }
 }
@@ -118,6 +128,18 @@ impl Config {
     }
     pub fn dns_timeout(&self) -> Duration {
         Duration::from_millis(self.dns_timeout_ms.max(100))
+    }
+
+    /// Chart marker, falling back to braille for an unrecognised value rather
+    /// than refusing to start over a cosmetic setting.
+    pub fn marker(&self) -> Marker {
+        match self.graph_marker.trim().to_ascii_lowercase().as_str() {
+            "halfblock" | "half_block" | "half-block" => Marker::HalfBlock,
+            "dot" => Marker::Dot,
+            "block" => Marker::Block,
+            "bar" => Marker::Bar,
+            _ => Marker::Braille,
+        }
     }
 
     /// The config file path.
@@ -213,5 +235,21 @@ mod path_tests {
     fn the_config_file_sits_in_the_config_directory() {
         let dir = Config::dir().expect("a home directory");
         assert!(Config::path().unwrap().starts_with(&dir));
+    }
+
+    #[test]
+    fn the_graph_marker_falls_back_rather_than_failing() {
+        let with = |v: &str| Config {
+            graph_marker: v.to_string(),
+            ..Config::default()
+        };
+        assert_eq!(Config::default().marker(), Marker::Braille);
+        assert_eq!(with("halfblock").marker(), Marker::HalfBlock);
+        assert_eq!(with("HalfBlock").marker(), Marker::HalfBlock);
+        assert_eq!(with("half-block").marker(), Marker::HalfBlock);
+        assert_eq!(with(" dot ").marker(), Marker::Dot);
+        // A typo in a cosmetic setting must not stop octomon starting.
+        assert_eq!(with("brailel").marker(), Marker::Braille);
+        assert_eq!(with("").marker(), Marker::Braille);
     }
 }

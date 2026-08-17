@@ -232,6 +232,17 @@ The binary is unsigned, so SmartScreen will warn on first run until the release
 builds reputation. Windows Terminal is recommended over the legacy console —
 the box-drawing characters and glyphs render correctly there without fiddling.
 
+If the charts come out as rows of empty boxes, the console is using a font with
+no braille glyphs — the raster fonts legacy `conhost` still defaults to have
+none, and note that an elevated window keeps its own font setting separately
+from an ordinary one. Either switch the font to Consolas or Cascadia Mono, or
+plot with block glyphs instead by setting this in
+`%APPDATA%\octomon\config.toml`:
+
+```toml
+graph_marker = "halfblock"
+```
+
 Read [Windows: privileges](#windows-privileges) if you want the per-process
 bandwidth panel.
 

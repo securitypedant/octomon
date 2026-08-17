@@ -947,6 +947,9 @@ pub struct AppState {
     pub window_secs: u64,
     /// Samples per second (1000 / ping interval); converts window to samples.
     pub samples_per_sec: f64,
+    /// Glyphs the charts plot with. Carried here because a legacy Windows
+    /// console has no braille glyphs and draws every point as an empty box.
+    pub graph_marker: ratatui::symbols::Marker,
     /// Column cursor over the target table (0=target,1=last,2=avg,3=p95,4=max,5=loss).
     pub q_col: usize,
     /// Active target sort: (column, descending). None = insertion order.
@@ -1021,6 +1024,7 @@ impl AppState {
             graph_target: 0,
             window_secs: 60,
             samples_per_sec: 1.0,
+            graph_marker: ratatui::symbols::Marker::Braille,
             q_col: 0,
             q_sort: None,
             traceroute: None,

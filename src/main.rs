@@ -103,6 +103,7 @@ async fn main() -> Result<()> {
         let mut s = state.lock().unwrap();
         s.speedtest_enabled = !cli.no_speedtest;
         s.samples_per_sec = 1000.0 / cfg.ping_interval_ms.max(1) as f64;
+        s.graph_marker = cfg.marker();
         s.speedtest_provider_names = provider_names;
         s.speedtest_provider_idx = sel;
         let (history, total) = store::load_recent(500);
