@@ -197,7 +197,11 @@ mod tests {
             WebStatus::Web
         );
         // And any bucket recovers the moment a response arrives.
-        for from in [WebStatus::NoService, WebStatus::Filtered, WebStatus::Unknown] {
+        for from in [
+            WebStatus::NoService,
+            WebStatus::Filtered,
+            WebStatus::Unknown,
+        ] {
             assert_eq!(transition(from, Outcome::Response, false), WebStatus::Web);
         }
     }
@@ -205,10 +209,7 @@ mod tests {
     #[test]
     fn probe_urls_prefer_the_hostname_and_bracket_v6() {
         let v4: IpAddr = Ipv4Addr::new(1, 1, 1, 1).into();
-        assert_eq!(
-            probe_url(Some("bbc.co.uk"), v4),
-            "https://bbc.co.uk/"
-        );
+        assert_eq!(probe_url(Some("bbc.co.uk"), v4), "https://bbc.co.uk/");
         assert_eq!(probe_url(None, v4), "https://1.1.1.1/");
         let v6: IpAddr = "2606:4700::1111".parse().unwrap();
         assert_eq!(probe_url(None, v6), "https://[2606:4700::1111]/");

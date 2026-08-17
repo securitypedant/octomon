@@ -173,13 +173,20 @@ pub struct Finding {
 /// except caveat-class causes always sort after network causes.
 fn rank(findings: &mut [Finding]) {
     findings.sort_by(|a, b| {
-        (a.cause.is_caveat(), b.severity, b.confidence, a.cause, &a.subject).cmp(&(
-            b.cause.is_caveat(),
-            a.severity,
-            a.confidence,
-            b.cause,
-            &b.subject,
-        ))
+        (
+            a.cause.is_caveat(),
+            b.severity,
+            b.confidence,
+            a.cause,
+            &a.subject,
+        )
+            .cmp(&(
+                b.cause.is_caveat(),
+                a.severity,
+                a.confidence,
+                b.cause,
+                &b.subject,
+            ))
     });
 }
 
@@ -310,7 +317,11 @@ fn gateway_target(s: &AppState) -> Option<&TargetStat> {
     s.targets
         .iter()
         .find(|t| t.discovered && t.addr.to_string() == s.netinfo.gateway_ip)
-        .or_else(|| s.targets.iter().find(|t| t.discovered && t.label == "gateway"))
+        .or_else(|| {
+            s.targets
+                .iter()
+                .find(|t| t.discovered && t.label == "gateway")
+        })
 }
 
 /// Why no verdict can be given yet, or `None` once there is enough to judge.
@@ -329,10 +340,7 @@ pub fn insufficient_reason(s: &AppState) -> Option<String> {
         };
     }
     let warmed = s.started.elapsed().as_secs() >= th::WARMUP_SECS;
-    let sampled = s
-        .targets
-        .iter()
-        .any(|t| t.window.len() >= th::MIN_SAMPLES);
+    let sampled = s.targets.iter().any(|t| t.window.len() >= th::MIN_SAMPLES);
     if !warmed || !sampled {
         return Some("measuring…".to_string());
     }
@@ -510,8 +518,7 @@ pub fn evaluate(s: &AppState) -> Triage {
     let probes: Vec<&crate::app::DnsProbe> = s.dns.iter().filter(|p| p.sent >= 3).collect();
     if !probes.is_empty() {
         let failing = |p: &crate::app::DnsProbe| p.fail_pct() >= 50.0;
-        let slow =
-            |p: &crate::app::DnsProbe| p.mean_ms().is_some_and(|m| m > th::DNS_BAD_MS);
+        let slow = |p: &crate::app::DnsProbe| p.mean_ms().is_some_and(|m| m > th::DNS_BAD_MS);
         let n_fail = probes.iter().filter(|p| failing(p)).count();
         let n_slow = probes.iter().filter(|p| !failing(p) && slow(p)).count();
         // The anchors-fine contrast is the whole point: ping works, names don't.
@@ -593,7 +600,10 @@ pub fn evaluate(s: &AppState) -> Triage {
                 cause: Cause::Dns,
                 severity: Severity::Info,
                 confidence: Confidence::Weak,
-                summary: format!("{n_fail} of {} DNS resolvers failing — others fine", probes.len()),
+                summary: format!(
+                    "{n_fail} of {} DNS resolvers failing — others fine",
+                    probes.len()
+                ),
                 evidence,
                 subject: String::new(),
             });
@@ -606,7 +616,11 @@ pub fn evaluate(s: &AppState) -> Triage {
         let all_down = bad
             .iter()
             .all(|t| t.recent_loss_pct(th::RECENT) >= th::LOSS_DOWN_PCT);
-        let severity = if all_down { Severity::Down } else { Severity::Degraded };
+        let severity = if all_down {
+            Severity::Down
+        } else {
+            Severity::Degraded
+        };
         let mut evidence: Vec<String> = vec![format!(
             "gateway fine ({}, {:.0}% loss) but {} of {} anchors failing",
             fmt_ms(gw.and_then(|g| g.last_rtt_ms)),
@@ -693,12 +707,10 @@ pub fn evaluate(s: &AppState) -> Triage {
     {
         use crate::app::FamilyProbe as FP;
         let http = &s.http;
-        let captive = [&http.v4, &http.v6]
-            .into_iter()
-            .find_map(|f| match f {
-                FP::Captive(loc) => Some(loc.clone()),
-                _ => None,
-            });
+        let captive = [&http.v4, &http.v6].into_iter().find_map(|f| match f {
+            FP::Captive(loc) => Some(loc.clone()),
+            _ => None,
+        });
         if let Some(location) = captive {
             let mut evidence = vec![format!(
                 "{} connectivity check answered with a sign-in page",
@@ -728,10 +740,7 @@ pub fn evaluate(s: &AppState) -> Triage {
                 ],
                 subject: String::new(),
             });
-        } else if matches!(http.v4, FP::Fail(_))
-            && !matches!(http.v6, FP::Ok(_))
-            && fine >= 2
-        {
+        } else if matches!(http.v4, FP::Fail(_)) && !matches!(http.v6, FP::Ok(_)) && fine >= 2 {
             let reason = match &http.v4 {
                 FP::Fail(r) => r.clone(),
                 _ => String::new(),
@@ -835,10 +844,7 @@ pub fn evaluate(s: &AppState) -> Triage {
             severity: Severity::Info,
             confidence: Confidence::Likely,
             summary: format!("machine under load (cpu {:.0}%)", v.cpu_pct),
-            evidence: vec![format!(
-                "cpu {:.0}%, hottest core {hottest:.0}%",
-                v.cpu_pct
-            )],
+            evidence: vec![format!("cpu {:.0}%, hottest core {hottest:.0}%", v.cpu_pct)],
             subject: "cpu".to_string(),
         });
     }
@@ -1285,7 +1291,6 @@ impl VerdictState {
         self.triage = triage;
         transitions
     }
-
 }
 
 /// The triage ladder + findings as plain text — doctor mode's `== VERDICT ==`
@@ -1343,7 +1348,10 @@ pub fn exit_code(triage: &Triage, insufficient: bool) -> i32 {
 enum BaselineIo {
     None,
     /// The network changed: load (or create) its baseline.
-    Load { key: String, label: String },
+    Load {
+        key: String,
+        label: String,
+    },
     /// A healthy minute was folded in: persist.
     Save {
         key: String,
@@ -1411,10 +1419,9 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
                 }
             }
             BaselineIo::Save { key, baseline } => {
-                let _ = tokio::task::spawn_blocking(move || {
-                    crate::baseline::save_one(&key, &baseline)
-                })
-                .await;
+                let _ =
+                    tokio::task::spawn_blocking(move || crate::baseline::save_one(&key, &baseline))
+                        .await;
             }
         }
     }
@@ -1662,7 +1669,12 @@ mod tests {
 
         let t = evaluate(&s);
         let f = t.findings.iter().find(|f| f.cause == Cause::Dns).unwrap();
-        assert_eq!(f.severity, Severity::Info, "not a Down claim: {}", f.summary);
+        assert_eq!(
+            f.severity,
+            Severity::Info,
+            "not a Down claim: {}",
+            f.summary
+        );
         assert!(f.summary.contains("names still resolve"));
         assert!(f.evidence.iter().any(|e| e.contains("HTTP check")));
     }
@@ -1679,7 +1691,11 @@ mod tests {
             t
         });
         let t = evaluate(&s);
-        let f = t.findings.iter().find(|f| f.cause == Cause::WebTarget).unwrap();
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::WebTarget)
+            .unwrap();
         assert_eq!(f.subject, "bbc.co.uk");
         assert!(f.summary.contains("ping still fine"));
 
@@ -1775,7 +1791,12 @@ mod tests {
         s.http.v6 = FamilyProbe::NotApplicable;
         let t = evaluate(&s);
         let f = &t.findings[0];
-        assert_eq!(f.cause, Cause::CaptivePortal, "sign-in page first: {:?}", causes(&t));
+        assert_eq!(
+            f.cause,
+            Cause::CaptivePortal,
+            "sign-in page first: {:?}",
+            causes(&t)
+        );
         assert_eq!(f.severity, Severity::Down);
         assert!(f.evidence.iter().any(|e| e.contains("portal.cafe")));
     }
@@ -1897,7 +1918,10 @@ mod tests {
         let mut healthy_run = 59;
         let mut last_speed = Some(0);
         let io = baseline_step(&mut s, &mut healthy_run, &mut last_speed);
-        assert!(matches!(io, BaselineIo::Save { .. }), "60th healthy tick folds");
+        assert!(
+            matches!(io, BaselineIo::Save { .. }),
+            "60th healthy tick folds"
+        );
         assert_eq!(s.baseline.as_ref().unwrap().samples, 1);
 
         // Now a finding is active: the fold that was one tick away is denied
@@ -1968,7 +1992,10 @@ mod tests {
             );
         }
         let transitions = vs.ingest(without.clone(), None, now);
-        assert!(matches!(vs.current, Verdict::Healthy), "8th quiet tick clears");
+        assert!(
+            matches!(vs.current, Verdict::Healthy),
+            "8th quiet tick clears"
+        );
         let cleared = transitions.iter().find(|t| !t.raised).unwrap();
         assert!(cleared.after.is_some(), "clears carry the active duration");
     }
@@ -2039,7 +2066,10 @@ mod tests {
         let out = render_text(&evaluate(&s), None);
         assert!(out.starts_with("== ANALYSIS =="));
         assert!(out.contains("✓ gateway"));
-        assert!(out.contains("? ISP path"), "unmeasured stays a question mark");
+        assert!(
+            out.contains("? ISP path"),
+            "unmeasured stays a question mark"
+        );
         assert!(out.contains("no findings"));
 
         for t in &mut s.targets {
@@ -2053,7 +2083,10 @@ mod tests {
         assert!(!out.contains("— strong"));
         assert!(out.contains("% loss, last"), "evidence lines included");
 
-        let out = render_text(&Triage::default(), Some("ICMP unavailable — cannot measure"));
+        let out = render_text(
+            &Triage::default(),
+            Some("ICMP unavailable — cannot measure"),
+        );
         assert!(out.contains("ICMP unavailable"));
     }
 

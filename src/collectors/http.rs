@@ -130,11 +130,7 @@ pub fn classify(
 /// not just the automatic link-local (fe80::) or a ULA-only setup.
 pub fn has_global_v6(addrs: &[String]) -> bool {
     addrs.iter().any(|a| {
-        let Some(ip) = a
-            .split('/')
-            .next()
-            .and_then(|s| s.parse::<Ipv6Addr>().ok())
-        else {
+        let Some(ip) = a.split('/').next().and_then(|s| s.parse::<Ipv6Addr>().ok()) else {
             return false;
         };
         let seg = ip.segments();

@@ -6,8 +6,8 @@ use ratatui::prelude::*;
 use ratatui::style::Modifier;
 use ratatui::symbols::Marker;
 use ratatui::widgets::{
-    Axis, Block, Cell, Chart, Clear, Dataset, Gauge, GraphType, LineGauge, Padding, Paragraph,
-    Row, Sparkline, SparklineBar, Table, Wrap,
+    Axis, Block, Cell, Chart, Clear, Dataset, Gauge, GraphType, LineGauge, Padding, Paragraph, Row,
+    Sparkline, SparklineBar, Table, Wrap,
 };
 
 use crate::app::{
@@ -92,7 +92,10 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             // fully visible the offset stays pinned at zero.
             let max_first = all.len().saturating_sub(visible.max(1));
             let first = s.locations_sel.min(max_first);
-            let ms = |v: Option<f64>| v.map(|x| format!("~{x:.0}ms")).unwrap_or_else(|| "—".into());
+            let ms = |v: Option<f64>| {
+                v.map(|x| format!("~{x:.0}ms"))
+                    .unwrap_or_else(|| "—".into())
+            };
             for (key, b) in all.iter().skip(first).take(visible.max(1)) {
                 let current = s.baseline_key.as_deref() == Some(key.as_str());
                 let mut name_row = vec![Span::styled(
@@ -163,7 +166,12 @@ fn explainer_overlay(f: &mut Frame, area: Rect) {
             Span::styled(t.to_string(), Style::new().fg(Color::Gray)),
         ])
     };
-    let dim = |t: &str| Line::from(Span::styled(format!("   {t}"), Style::new().fg(Color::DarkGray)));
+    let dim = |t: &str| {
+        Line::from(Span::styled(
+            format!("   {t}"),
+            Style::new().fg(Color::DarkGray),
+        ))
+    };
 
     let lines = vec![
         head("this tool helps you diagnose internet connectivity issues:"),
@@ -524,9 +532,8 @@ fn footer(f: &mut Frame, s: &AppState, area: Rect) {
     };
     match rec {
         Some(r) => {
-            let cols =
-                Layout::horizontal([Constraint::Min(0), Constraint::Length(r.len() as u16)])
-                    .split(area);
+            let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(r.len() as u16)])
+                .split(area);
             f.render_widget(Paragraph::new(line), cols[0]);
             f.render_widget(
                 Paragraph::new(Span::styled(r, Style::new().fg(Color::Red)))
@@ -843,7 +850,10 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     }
     if let Some(t) = s.targets.get(s.graph_target) {
         let st = t.stats(n);
-        title.push_str(&format!(" · {}: jit {:.1} · sd {:.1}", t.label, t.jitter_ms, st.stddev));
+        title.push_str(&format!(
+            " · {}: jit {:.1} · sd {:.1}",
+            t.label, t.jitter_ms, st.stddev
+        ));
         if let Some(bloat) = t.bufferbloat_ms(n) {
             let (grade, _) = bufferbloat_grade(bloat);
             title.push_str(&format!(" · bloat +{bloat:.0}ms {grade}"));
@@ -921,7 +931,9 @@ fn web_graph(f: &mut Frame, s: &AppState, area: Rect) {
             "TCP filtered — ping answers, web dropped".to_string(),
             Style::new().fg(Color::Yellow),
         ),
-        WebStatus::Unknown => Span::styled("checking…".to_string(), Style::new().fg(Color::DarkGray)),
+        WebStatus::Unknown => {
+            Span::styled("checking…".to_string(), Style::new().fg(Color::DarkGray))
+        }
     };
     f.render_widget(Paragraph::new(Line::from(vec![head, detail])), rows[0]);
 
@@ -929,7 +941,11 @@ fn web_graph(f: &mut Frame, s: &AppState, area: Rect) {
     if !data.is_empty() {
         f.render_widget(
             Sparkline::default()
-                .data(data.iter().map(|v| SparklineBar::from(*v)).collect::<Vec<_>>())
+                .data(
+                    data.iter()
+                        .map(|v| SparklineBar::from(*v))
+                        .collect::<Vec<_>>(),
+                )
                 .style(Style::new().fg(SERIES_COLOR)),
             rows[1],
         );
@@ -2343,7 +2359,10 @@ fn http_line(s: &AppState) -> Option<Line<'static>> {
     let span = |f: &FP, name: &str| match f {
         FP::NotRun => Span::styled(format!("{name} …"), Style::new().fg(Color::DarkGray)),
         FP::NotApplicable => Span::styled(format!("{name} n/a"), Style::new().fg(Color::DarkGray)),
-        FP::Ok(ms) => Span::styled(format!("{name} ok {ms:.0}ms"), Style::new().fg(Color::Green)),
+        FP::Ok(ms) => Span::styled(
+            format!("{name} ok {ms:.0}ms"),
+            Style::new().fg(Color::Green),
+        ),
         FP::Captive(_) => Span::styled(
             "CAPTIVE PORTAL".to_string(),
             Style::new().fg(Color::Red).bold(),
@@ -2960,10 +2979,8 @@ mod tests {
         s.verdict.current = Verdict::Healthy;
         assert!(draw(&s, 120, 24).contains("connection healthy"));
 
-        s.verdict.current = Verdict::Problems(vec![
-            finding(Severity::Down),
-            finding(Severity::Degraded),
-        ]);
+        s.verdict.current =
+            Verdict::Problems(vec![finding(Severity::Down), finding(Severity::Degraded)]);
         let out = draw(&s, 120, 24);
         assert!(out.contains("gateway unresponsive"));
         // Confidence wording stays in the [y] overlay, off the headline.
@@ -2989,9 +3006,10 @@ mod tests {
 
     #[test]
     fn triage_overlay_shows_the_whole_ladder_with_its_data() {
-        let mut s = AppState::new(vec![
-            crate::app::TargetStat::new("Cloudflare".into(), "1.1.1.1".parse().unwrap()),
-        ]);
+        let mut s = AppState::new(vec![crate::app::TargetStat::new(
+            "Cloudflare".into(),
+            "1.1.1.1".parse().unwrap(),
+        )]);
         for _ in 0..20 {
             s.targets[0].record_reply(12.0);
         }
@@ -3005,11 +3023,21 @@ mod tests {
         let out = draw(&s, 100, 30);
         // Every rung, healthy ones included — the exonerating evidence is the
         // difference between a verdict and an assertion.
-        for label in ["machine", "gateway", "DNS", "ISP path", "internet", "destinations"] {
+        for label in [
+            "machine",
+            "gateway",
+            "DNS",
+            "ISP path",
+            "internet",
+            "destinations",
+        ] {
             assert!(out.contains(label), "ladder is missing {label:?}");
         }
         assert!(out.contains("cpu 8%"), "healthy rungs carry their data");
-        assert!(out.contains("[m] to watch"), "unknown rungs say how to fill them");
+        assert!(
+            out.contains("[m] to watch"),
+            "unknown rungs say how to fill them"
+        );
         assert!(out.contains("no findings"));
         assert!(out.contains("press y or Esc to close"));
     }
@@ -3077,7 +3105,10 @@ mod tests {
         let out = draw(&s, 120, 30);
         assert!(out.contains("locations (2)"));
         assert!(out.contains("Cafe"));
-        assert!(out.contains("(CoffeeNet)"), "auto label shown next to the name");
+        assert!(
+            out.contains("(CoffeeNet)"),
+            "auto label shown next to the name"
+        );
         assert!(out.contains("gateway ~4ms"));
         assert!(out.contains("speed 310↓/28↑"));
         assert!(out.contains("40 healthy min"));
@@ -3118,7 +3149,10 @@ mod tests {
         assert!(out.contains("▲ gateway unresponsive"));
         assert!(out.contains("VPN down"));
         assert!(out.contains("analysis"), "category label says analysis");
-        assert!(!out.contains("verdict"), "the word verdict is out of the UX");
+        assert!(
+            !out.contains("verdict"),
+            "the word verdict is out of the UX"
+        );
         assert!(out.contains("network"));
         // Newest (VPN down) renders above the older analysis event.
         assert!(out.find("VPN down").unwrap() < out.find("▲ gateway unresponsive").unwrap());
@@ -3129,10 +3163,8 @@ mod tests {
     #[test]
     fn web_strip_names_hops_as_non_destinations() {
         let mut s = AppState::new(vec![]);
-        let mut hop = crate::app::TargetStat::new(
-            "hop 2→1.1.1.1".into(),
-            "192.184.208.23".parse().unwrap(),
-        );
+        let mut hop =
+            crate::app::TargetStat::new("hop 2→1.1.1.1".into(), "192.184.208.23".parse().unwrap());
         hop.discovered = true;
         for _ in 0..10 {
             hop.record_reply(4.0);
@@ -3153,7 +3185,10 @@ mod tests {
         s.verdict.current = Verdict::Problems(vec![finding(Severity::Down)]);
         let out = draw(&s, 100, 30);
         assert!(out.contains("gateway unresponsive"));
-        assert!(!out.contains("likely"), "confidence words stay out of the UX");
+        assert!(
+            !out.contains("likely"),
+            "confidence words stay out of the UX"
+        );
         assert!(out.contains("gateway 192.168.1.1: 100% loss"));
     }
 

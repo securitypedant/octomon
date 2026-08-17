@@ -662,15 +662,13 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 }
                 // Scroll the timeline; clamped so it can't run past the oldest.
                 KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Events => {
-                    s.events_scroll =
-                        (s.events_scroll + 1).min(s.events.len().saturating_sub(1));
+                    s.events_scroll = (s.events_scroll + 1).min(s.events.len().saturating_sub(1));
                 }
                 KeyCode::Down | KeyCode::Char('j') if s.overlay == Overlay::Events => {
                     s.events_scroll = s.events_scroll.saturating_sub(1);
                 }
                 KeyCode::PageUp if s.overlay == Overlay::Events => {
-                    s.events_scroll =
-                        (s.events_scroll + 10).min(s.events.len().saturating_sub(1));
+                    s.events_scroll = (s.events_scroll + 10).min(s.events.len().saturating_sub(1));
                 }
                 KeyCode::PageDown if s.overlay == Overlay::Events => {
                     s.events_scroll = s.events_scroll.saturating_sub(10);
@@ -921,11 +919,11 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         .collect();
                 // Most-established first, named before unnamed on ties.
                 all.sort_by(|a, b| {
-                    b.1.samples
-                        .cmp(&a.1.samples)
-                        .then_with(|| a.1.display_name().to_lowercase().cmp(
-                            &b.1.display_name().to_lowercase(),
-                        ))
+                    b.1.samples.cmp(&a.1.samples).then_with(|| {
+                        a.1.display_name()
+                            .to_lowercase()
+                            .cmp(&b.1.display_name().to_lowercase())
+                    })
                 });
                 state.lock().unwrap().locations = Some(all);
             });
@@ -1212,7 +1210,10 @@ fn doctor_report(s: &AppState, full: bool) -> (String, i32) {
     // taken (and how established its baseline is) is part of the diagnosis.
     if let Some(b) = s.baseline.as_ref() {
         let _ = writeln!(out, "\n== NORMAL AT \"{}\" ==", b.display_name());
-        let ms = |v: Option<f64>| v.map(|x| format!("~{x:.0}ms")).unwrap_or_else(|| "—".into());
+        let ms = |v: Option<f64>| {
+            v.map(|x| format!("~{x:.0}ms"))
+                .unwrap_or_else(|| "—".into())
+        };
         let _ = writeln!(
             out,
             "  gateway {} · internet {} · DNS {}{}{}",
@@ -1244,8 +1245,22 @@ fn doctor_report(s: &AppState, full: bool) -> (String, i32) {
 
     if !s.events.is_empty() {
         let _ = writeln!(out, "\n== EVENTS (last {}) ==", s.events.len().min(20));
-        for e in s.events.iter().rev().take(20).collect::<Vec<_>>().iter().rev() {
-            let _ = writeln!(out, "  {}  {:<9} {}", e.when(), e.category.label(), e.message);
+        for e in s
+            .events
+            .iter()
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .iter()
+            .rev()
+        {
+            let _ = writeln!(
+                out,
+                "  {}  {:<9} {}",
+                e.when(),
+                e.category.label(),
+                e.message
+            );
         }
     }
 
@@ -1392,7 +1407,9 @@ fn redact_report(text: String, s: &AppState) -> String {
     // LAN-side resolvers (a Pi-hole, the router) are private addresses too;
     // public resolvers are not ours to hide.
     for d in &s.netinfo.dns {
-        if d.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.is_private()) {
+        if d.parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_private())
+        {
             push(d, "<dns>");
         }
     }
@@ -1610,7 +1627,10 @@ mod tests {
         for _ in 0..20 {
             s.targets[0].record_reply(12.0);
         }
-        let mut public = TargetStat::new("public IP".into(), IpAddr::V4(Ipv4Addr::new(203, 0, 113, 77)));
+        let mut public = TargetStat::new(
+            "public IP".into(),
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 77)),
+        );
         public.discovered = true;
         s.targets.push(public);
         s.netinfo.iface = "en0".into();

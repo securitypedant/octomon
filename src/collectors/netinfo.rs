@@ -109,10 +109,9 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
                 // A tunnel coming up or down changes the identity too; name the
                 // VPN rather than reporting a bare interface swap.
                 let message = match (had_tunnel, s.netinfo.tunnel.is_some()) {
-                    (false, true) => format!(
-                        "VPN up — {}",
-                        s.netinfo.tunnel_label().unwrap_or_default()
-                    ),
+                    (false, true) => {
+                        format!("VPN up — {}", s.netinfo.tunnel_label().unwrap_or_default())
+                    }
                     (true, false) => "VPN down".to_string(),
                     // The SSID isn't known yet (the Wi-Fi probe is slow); the
                     // gateway is the most identifying fact available now, and

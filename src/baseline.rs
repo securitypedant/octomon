@@ -143,7 +143,10 @@ pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
 
     let (raw, label) = if n.medium == LinkMedium::WiFi && !ssid.is_empty() {
         (
-            format!("{ssid}|{}|wifi", if mac_known { &n.gateway_mac } else { "" }),
+            format!(
+                "{ssid}|{}|wifi",
+                if mac_known { &n.gateway_mac } else { "" }
+            ),
             ssid.to_string(),
         )
     } else if mac_known {
