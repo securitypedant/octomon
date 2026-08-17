@@ -48,10 +48,17 @@ pub mod thresholds {
     pub const RECENT: usize = 20;
     /// Below this many outcomes a probe has no opinion, only noise.
     pub const MIN_SAMPLES: usize = 5;
-    /// RTT counts as inflated above `max(factor × idle floor, this floor)` —
-    /// the absolute floor keeps a 1 ms → 4 ms gateway from reading as a fault.
-    pub const RTT_INFLATED_FLOOR_MS: f64 = 30.0;
+    /// RTT counts as inflated above `max(factor × idle floor, this floor)`.
+    /// The absolute floor carries most of the weight: Wi-Fi gateways with a
+    /// 2 ms idle floor routinely drift into the 30s on a *good* network
+    /// (power save, airtime scheduling), so anything below ~60 ms of mean is
+    /// weather, not a finding.
+    pub const RTT_INFLATED_FLOOR_MS: f64 = 60.0;
     pub const RTT_INFLATED_FACTOR: f64 = 3.0;
+    /// A "bad" loss reading needs at least this many lost packets in the
+    /// recent window — 1 of 20 is exactly LOSS_BAD_PCT, and one dropped ping
+    /// is not an outage.
+    pub const LOSS_MIN_LOST: usize = 2;
     /// A finding raises when present in ≥ RAISE_HITS of the last RAISE_WINDOW
     /// ticks, and clears after CLEAR_TICKS consecutive quiet ticks.
     pub const RAISE_HITS: usize = 4;
@@ -288,7 +295,14 @@ fn probe_health(t: &TargetStat) -> Health {
         return Health::NoData;
     }
     let loss = t.recent_loss_pct(th::RECENT);
-    if loss >= th::LOSS_BAD_PCT {
+    let lost = t
+        .window
+        .iter()
+        .rev()
+        .take(th::RECENT)
+        .filter(|ok| !**ok)
+        .count();
+    if loss >= th::LOSS_BAD_PCT && lost >= th::LOSS_MIN_LOST {
         return Health::Bad;
     }
     if loss >= th::LOSS_WARN_PCT || inflated(t) {
@@ -379,7 +393,16 @@ pub fn evaluate(s: &AppState) -> Triage {
     // --- gateway / LAN ---
     if let Some(g) = gw {
         let loss = g.recent_loss_pct(th::RECENT);
-        let raise = gw_health == Health::Bad || (gw_health != Health::NoData && inflated(g));
+        // An established baseline gets a veto over the *inflation* claim: on a
+        // network whose learned normal already sits near the current reading,
+        // absolute thresholds are the wrong judge and would flap all day.
+        // Loss-based raises are never vetoed — packets don't have a "normal".
+        let baseline_says_normal = baseline
+            .and_then(|b| b.gateway_ms)
+            .zip(g.stats(th::RECENT).mean)
+            .is_some_and(|(normal, cur)| !crate::baseline::well_above(cur, normal));
+        let raise = gw_health == Health::Bad
+            || (gw_health != Health::NoData && inflated(g) && !baseline_says_normal);
         if raise {
             let severity = if loss >= th::LOSS_DOWN_PCT {
                 Severity::Down
@@ -568,12 +591,20 @@ pub fn evaluate(s: &AppState) -> Triage {
         if n_fail == probes.len() && names_resolve {
             let mut evidence = evidence.clone();
             evidence.push("HTTP check fetched a hostname fine — resolution itself works".into());
+            // Loopback resolvers are a DNS filter/proxy on this machine
+            // (AdGuard-style 127.0.2.x is the classic signature): it answers
+            // the OS but not necessarily octomon's probes. Name the situation
+            // rather than reporting a generic failure.
+            let all_local = probes.iter().all(|p| p.server.is_loopback());
             findings.push(Finding {
                 cause: Cause::Dns,
                 severity: Severity::Info,
                 confidence: Confidence::Weak,
-                summary: "resolver probes blocked on this network — names still resolve"
-                    .to_string(),
+                summary: if all_local {
+                    "a local DNS proxy handles resolution — probes not answerable".to_string()
+                } else {
+                    "resolver probes blocked on this network — names still resolve".to_string()
+                },
                 evidence,
                 subject: String::new(),
             });
@@ -1654,6 +1685,23 @@ mod tests {
         assert_eq!(f.confidence, Confidence::Strong);
     }
 
+    /// The Windows DNS-filter lesson: loopback resolvers (127.0.2.x) that
+    /// answer the OS but not octomon's probes get named as what they are.
+    #[test]
+    fn loopback_resolvers_are_named_a_local_proxy() {
+        let mut s = healthy_state();
+        let mut p = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(127, 0, 2, 2)));
+        p.sent = 10;
+        p.ok = 0;
+        p.status = "connection reset".into();
+        s.dns = vec![p];
+        s.http.v4 = crate::app::FamilyProbe::Ok(30.0);
+        let t = evaluate(&s);
+        let f = t.findings.iter().find(|f| f.cause == Cause::Dns).unwrap();
+        assert_eq!(f.severity, Severity::Info);
+        assert!(f.summary.contains("local DNS proxy"), "{}", f.summary);
+    }
+
     /// The hotspot lesson: a carrier network handed out a link-local resolver
     /// octomon couldn't probe, while resolution worked fine. Working HTTP
     /// (which resolved a hostname) must cap the DNS claim at an Info note.
@@ -1720,6 +1768,71 @@ mod tests {
         let c = causes(&evaluate(&s));
         assert!(c.contains(&Cause::CaptivePortal));
         assert!(!c.contains(&Cause::WebTarget));
+    }
+
+    /// The Unifi lesson, part 1: one dropped ping in a 20-sample window is 5%
+    /// — exactly the "bad" threshold — and produced "Google degraded" blips
+    /// all afternoon on a healthy network. One packet is not an outage.
+    #[test]
+    fn one_lost_packet_is_not_a_finding() {
+        let mut s = healthy_state();
+        let google = s.targets.iter_mut().find(|t| t.label == "Google").unwrap();
+        google.record_loss();
+        assert!(
+            evaluate(&s).findings.is_empty(),
+            "single packet blip must stay quiet"
+        );
+        // Two lost packets is a pattern.
+        let google = s.targets.iter_mut().find(|t| t.label == "Google").unwrap();
+        google.record_loss();
+        assert!(!evaluate(&s).findings.is_empty());
+    }
+
+    /// The Unifi lesson, part 2: a Wi-Fi gateway with a 2ms idle floor drifts
+    /// into the 30s constantly on a *good* network — that is weather, and it
+    /// flapped "latency inflated" every minute or two.
+    #[test]
+    fn wifi_weather_in_the_thirties_is_not_inflation() {
+        let mut s = healthy_state();
+        let gw = s.targets.iter_mut().find(|t| t.discovered).unwrap();
+        gw.reset();
+        for _ in 0..5 {
+            gw.record_reply(2.0);
+        }
+        for _ in 0..20 {
+            gw.record_reply(34.0);
+        }
+        assert!(
+            !causes(&evaluate(&s)).contains(&Cause::GatewayLan),
+            "34ms mean on a 2ms floor is below the inflation floor"
+        );
+    }
+
+    /// The Unifi lesson, part 3: where an established baseline says the
+    /// current reading is normal for this network, the absolute inflation
+    /// rule loses the argument. Loss keeps its vote regardless.
+    #[test]
+    fn the_baseline_can_veto_an_inflation_claim() {
+        let mut s = healthy_state();
+        let gw = s.targets.iter_mut().find(|t| t.discovered).unwrap();
+        gw.reset();
+        for _ in 0..5 {
+            gw.record_reply(5.0);
+        }
+        for _ in 0..20 {
+            gw.record_reply(70.0); // above the absolute floor: would raise
+        }
+        assert!(causes(&evaluate(&s)).contains(&Cause::GatewayLan));
+
+        // Same readings, but this network's learned normal is ~65ms (a slow
+        // powerline backhaul, say): not a finding, just how it is here.
+        s.baseline = Some(crate::baseline::Baseline {
+            label: "SlowNet".into(),
+            samples: 10,
+            gateway_ms: Some(65.0),
+            ..Default::default()
+        });
+        assert!(!causes(&evaluate(&s)).contains(&Cause::GatewayLan));
     }
 
     /// The mandatory wrongness test: simultaneous causes must BOTH be reported,
@@ -1856,7 +1969,7 @@ mod tests {
     #[test]
     fn baseline_turns_absolute_numbers_into_vs_normal() {
         let mut s = healthy_state();
-        // Gateway idle floor 5ms, now sitting at 45ms — inflated in absolute
+        // Gateway idle floor 5ms, now sitting at 70ms — inflated in absolute
         // terms AND way above this network's learned normal.
         let gw = s.targets.iter_mut().find(|t| t.discovered).unwrap();
         gw.reset();
@@ -1864,7 +1977,7 @@ mod tests {
             gw.record_reply(5.0);
         }
         for _ in 0..20 {
-            gw.record_reply(45.0);
+            gw.record_reply(70.0);
         }
         s.baseline = Some(crate::baseline::Baseline {
             label: "HomeNet".into(),
