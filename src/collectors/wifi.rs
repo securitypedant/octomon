@@ -15,6 +15,11 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>) {
     // expensive probe on non-Wi-Fi links.
     tokio::time::sleep(Duration::from_secs(1)).await;
 
+    // Tracked here rather than in state: a network change clears the state's
+    // wifi details, and it's exactly across such changes that "which SSID did
+    // we land on" is worth an event.
+    let mut last_ssid: Option<String> = None;
+
     let mut ticker = tokio::time::interval(Duration::from_secs(60));
     loop {
         // Re-probe on the timer or when the user presses 'r'.
@@ -29,7 +34,21 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>) {
         }
 
         if let Some(w) = crate::platform::wifi_details().await {
-            state.lock().unwrap().netinfo.wifi = Some(w);
+            let mut s = state.lock().unwrap();
+            let known = !w.ssid.is_empty() && !w.ssid.contains("redacted");
+            if known {
+                if let Some(prev) = last_ssid.as_deref()
+                    && prev != w.ssid
+                {
+                    s.push_event(
+                        crate::verdict::Severity::Info,
+                        crate::app::EventCategory::Wifi,
+                        format!("Wi-Fi network → {}", w.ssid),
+                    );
+                }
+                last_ssid = Some(w.ssid.clone());
+            }
+            s.netinfo.wifi = Some(w);
         }
     }
 }

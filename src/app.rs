@@ -65,6 +65,46 @@ pub struct RttStats {
 /// position (ping tasks look up by id, making insertion/deletion safe).
 static NEXT_TARGET_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Whether a target serves HTTP, learned by probing. Absence of a web server
+/// is a fact, not a fault: only a target that has *demonstrated* a web service
+/// is ever judged on it.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum WebStatus {
+    /// Not yet classified.
+    #[default]
+    Unknown,
+    /// Answered HTTP at least once — probed on a slow cadence from then on.
+    Web,
+    /// Connection actively refused: reachable, but nothing listens. Quiet "—".
+    NoService,
+    /// TCP times out while ICMP answers: something drops web traffic silently.
+    Filtered,
+}
+
+impl WebStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            WebStatus::Unknown => "unknown",
+            WebStatus::Web => "web",
+            WebStatus::NoService => "no-service",
+            WebStatus::Filtered => "filtered",
+        }
+    }
+}
+
+/// Per-target HTTP(S) reachability and time-to-first-byte. A latency
+/// instrument, not a security check: any HTTP status counts as "up".
+#[derive(Clone, Default)]
+pub struct WebProbe {
+    pub status: WebStatus,
+    /// TTFB of the most recent successful probe.
+    pub last_ttfb_ms: Option<f64>,
+    pub hist: History,
+    /// Consecutive failed probes while `status == Web` — the "it answered
+    /// before and stopped" signal the verdict watches.
+    pub fails: u32,
+}
+
 #[derive(Clone)]
 pub struct TargetStat {
     /// Stable identity, independent of index in the targets vec.
@@ -73,6 +113,12 @@ pub struct TargetStat {
     pub discovered: bool,
     pub label: String,
     pub addr: IpAddr,
+    /// The name this target was added as, when it was a name. Kept because a
+    /// CDN answers differently per network (re-resolved on change), and HTTPS
+    /// needs the hostname for SNI and certificates.
+    pub hostname: Option<String>,
+    /// HTTP(S) capability and timing, learned by the web prober.
+    pub web: WebProbe,
     pub last_rtt_ms: Option<f64>,
     /// RFC 3550 interarrival jitter (smoothed).
     pub jitter_ms: f64,
@@ -92,6 +138,8 @@ impl TargetStat {
             discovered: false,
             label,
             addr,
+            hostname: None,
+            web: WebProbe::default(),
             last_rtt_ms: None,
             jitter_ms: 0.0,
             min_ever_ms: None,
@@ -133,7 +181,9 @@ impl TargetStat {
         self.window.push_back(ok);
     }
 
-    /// Clear all accumulated stats (keeps identity, label, address).
+    /// Clear all accumulated stats (keeps identity, label, address, and the
+    /// learned web *capability* — whether a server exists doesn't reset, but
+    /// its timings do).
     pub fn reset(&mut self) {
         self.last_rtt_ms = None;
         self.jitter_ms = 0.0;
@@ -142,6 +192,16 @@ impl TargetStat {
         self.recv = 0;
         self.window.clear();
         self.history.data.clear();
+        self.web.hist.data.clear();
+        self.web.last_ttfb_ms = None;
+        self.web.fails = 0;
+    }
+
+    /// True for auto-discovered mid-path hops ("hop 3→1.1.1.1") — routers, not
+    /// destinations: the web prober skips them and the UI says so instead of
+    /// "checking…" forever.
+    pub fn is_path_hop(&self) -> bool {
+        self.discovered && self.label.starts_with("hop ")
     }
 
     /// Packet loss over the sliding window, as a percentage.
@@ -151,6 +211,24 @@ impl TargetStat {
         }
         let lost = self.window.iter().filter(|ok| !**ok).count();
         lost as f64 / self.window.len() as f64 * 100.0
+    }
+
+    /// Loss over only the most recent `n` outcomes. The full window takes
+    /// [`WINDOW`] seconds to reflect an outage, far too slow for *detection*;
+    /// display keeps using [`Self::loss_pct`].
+    pub fn recent_loss_pct(&self, n: usize) -> f64 {
+        let take = n.min(self.window.len());
+        if take == 0 {
+            return 0.0;
+        }
+        let lost = self
+            .window
+            .iter()
+            .rev()
+            .take(take)
+            .filter(|ok| !**ok)
+            .count();
+        lost as f64 / take as f64 * 100.0
     }
 
     /// Distribution over the most recent `n` successful samples.
@@ -501,6 +579,9 @@ impl LinkMedium {
 #[derive(Clone, Default)]
 pub struct NetInfo {
     pub iface: String,
+    /// OS interface index — the scope id a link-local (fe80::) address needs
+    /// to be routable, which is exactly how carrier hotspots hand out DNS.
+    pub iface_index: u32,
     pub ipv4: Vec<String>,
     pub ipv6: Vec<String>,
     pub mac: String,
@@ -598,6 +679,39 @@ impl DnsProbe {
         }
         (self.sent - self.ok) as f64 / self.sent as f64 * 100.0
     }
+}
+
+/// One address family's HTTP reachability probe result.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub enum FamilyProbe {
+    #[default]
+    NotRun,
+    /// This family isn't configured here (e.g. no global IPv6 address) — a
+    /// v4-only LAN must never read as "v6 broken".
+    NotApplicable,
+    /// Expected answer received; round trip in ms.
+    Ok(f64),
+    /// Something intercepted the request — a portal sign-in page, usually.
+    /// Carries the redirect target when there was one.
+    Captive(Option<String>),
+    /// Connect/timeout/protocol failure, with a short reason.
+    Fail(String),
+}
+
+/// HTTP-layer reachability: the internet as a *browser* experiences it, which
+/// ICMP alone cannot see (captive portals, proxies, broken IPv6).
+#[derive(Clone, Default)]
+pub struct HttpState {
+    /// Provider name the primary probe used (e.g. "Apple").
+    pub provider: String,
+    pub v4: FamilyProbe,
+    pub v6: FamilyProbe,
+    /// Set when the second-opinion endpoint had to arbitrate.
+    pub note: Option<String>,
+    /// Round-trip history per family (successful probes only), for the web
+    /// graph in the Connection Quality panel.
+    pub v4_hist: History,
+    pub v6_hist: History,
 }
 
 /// Live Wi-Fi signal, sampled frequently (CoreWLAN on macOS) for graphing.
@@ -901,6 +1015,56 @@ mod tests {
     }
 
     #[test]
+    fn recent_loss_reacts_faster_than_the_display_window() {
+        let mut t = TargetStat::new("t".into(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        for _ in 0..80 {
+            t.record_reply(10.0);
+        }
+        for _ in 0..20 {
+            t.record_loss();
+        }
+        // The display window dilutes the outage; detection must not.
+        assert_eq!(t.loss_pct(), 20.0);
+        assert_eq!(t.recent_loss_pct(20), 100.0);
+        assert_eq!(t.recent_loss_pct(0), 0.0, "empty ask, no division by zero");
+    }
+
+    #[test]
+    fn the_timeline_is_capped_but_the_total_keeps_counting() {
+        let mut s = AppState::new(vec![]);
+        for i in 0..(EVENTS_CAP + 10) {
+            s.push_event(
+                crate::verdict::Severity::Info,
+                EventCategory::Network,
+                format!("event {i}"),
+            );
+        }
+        assert_eq!(s.events.len(), EVENTS_CAP);
+        assert_eq!(s.events_total, (EVENTS_CAP + 10) as u64);
+        // Oldest evicted, newest kept.
+        assert_eq!(s.events.front().unwrap().message, "event 10");
+        assert_eq!(
+            s.events.back().unwrap().message,
+            format!("event {}", EVENTS_CAP + 9)
+        );
+    }
+
+    #[test]
+    fn notice_event_is_both_transient_and_durable() {
+        let mut s = AppState::new(vec![]);
+        s.notice_event(
+            crate::verdict::Severity::Info,
+            EventCategory::Network,
+            "network changed → en7".into(),
+        );
+        assert_eq!(s.notice.as_deref(), Some("network changed → en7"));
+        assert_eq!(s.events.len(), 1);
+        // The notice dies with the next key press; the event survives it.
+        s.notice = None;
+        assert_eq!(s.events.back().unwrap().message, "network changed → en7");
+    }
+
+    #[test]
     fn loss_pct_counts_window() {
         let mut t = TargetStat::new("t".into(), IpAddr::V4(Ipv4Addr::LOCALHOST));
         t.record_reply(10.0);
@@ -926,7 +1090,80 @@ pub enum InputMode {
     Normal,
     /// Typing a new ICMP target (IP or DNS name).
     AddTarget,
+    /// Typing a name for the current network ("Home", "Office").
+    NameNetwork,
 }
+
+/// Which full-screen overlay is up, if any. One at a time; the order here is
+/// also the precedence at startup (setup problems before anything else).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum Overlay {
+    #[default]
+    None,
+    /// Startup problems worth interrupting for (missing tools, no ICMP).
+    Startup,
+    Help,
+    /// The verdict's triage ladder: why the one-liner says what it says.
+    Triage,
+    /// The session timeline: what changed and when.
+    Events,
+    /// First-run welcome: what octomon answers and that it learns baselines.
+    Explainer,
+    /// Every stored network location and its learned baseline.
+    Locations,
+}
+
+/// Category of a timeline event, for the overlay and the CSV export.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EventCategory {
+    /// An analysis finding raised or cleared — the flagship source: these give
+    /// "loss spike started / ended after 3m" for free.
+    Analysis,
+    Network,
+    Wifi,
+    Speedtest,
+    Path,
+    Logging,
+}
+
+impl EventCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            EventCategory::Analysis => "analysis",
+            EventCategory::Network => "network",
+            EventCategory::Wifi => "wifi",
+            EventCategory::Speedtest => "speedtest",
+            EventCategory::Path => "path",
+            EventCategory::Logging => "logging",
+        }
+    }
+}
+
+/// One entry in the session timeline. People open a diagnostic tool *after*
+/// the glitch; averages hide a ten-second dropout, a transition log answers it.
+#[derive(Clone)]
+pub struct EventItem {
+    /// Unix timestamp (seconds), like [`crate::store::SpeedRecord::at`].
+    pub at: i64,
+    pub severity: crate::verdict::Severity,
+    pub category: EventCategory,
+    pub message: String,
+}
+
+impl EventItem {
+    /// Local wall-clock time for display, e.g. "21:14:03".
+    pub fn when(&self) -> String {
+        use chrono::{Local, TimeZone};
+        Local
+            .timestamp_opt(self.at, 0)
+            .single()
+            .map(|dt| dt.format("%H:%M:%S").to_string())
+            .unwrap_or_else(|| "—".to_string())
+    }
+}
+
+/// Bounded timeline length; older events fall off the front.
+pub const EVENTS_CAP: usize = 500;
 
 /// An in-progress session recording.
 #[derive(Clone)]
@@ -945,6 +1182,8 @@ pub struct AppState {
     pub netinfo: NetInfo,
     /// Per-resolver DNS responsiveness, in the order the interface reports them.
     pub dns: Vec<DnsProbe>,
+    /// HTTP-layer reachability (captive portal / broken-v6 detection).
+    pub http: HttpState,
     pub signal: SignalState,
     pub vitals: Vitals,
     /// Error/drop counters for the default interface.
@@ -1009,13 +1248,32 @@ pub struct AppState {
     pub notice: Option<String>,
     /// Auto-refresh paused: the periodic redraw is suppressed.
     pub paused: bool,
-    /// Help overlay visible.
-    pub show_help: bool,
+    /// Which full-screen overlay is up, if any.
+    pub overlay: Overlay,
+    /// Synthesized diagnosis: the footer one-liner and the triage ladder.
+    pub verdict: crate::verdict::VerdictState,
+    /// This network's learned baseline (present once the network is
+    /// fingerprinted; freshly created when the network is new).
+    pub baseline: Option<crate::baseline::Baseline>,
+    /// Fingerprint key of the current network, for persisting the baseline.
+    pub baseline_key: Option<String>,
+    /// Show the first-run explainer once the startup notice is dismissed.
+    pub explainer_pending: bool,
+    /// Stored locations for the [L] overlay: (fingerprint key, baseline),
+    /// loaded from disk when the overlay opens. `None` = still loading.
+    pub locations: Option<Vec<(String, crate::baseline::Baseline)>>,
+    /// Scroll offset into the locations list.
+    pub locations_sel: usize,
+    /// Session timeline of state transitions (oldest → newest), capped.
+    pub events: VecDeque<EventItem>,
+    /// Events ever pushed — exceeds `events.len()` once the cap evicts, and
+    /// serves as the CSV logger's high-water mark.
+    pub events_total: u64,
+    /// How far back the events overlay is scrolled (0 = newest).
+    pub events_scroll: usize,
     /// Set when the ICMP socket could not be opened, with guidance on the fix.
     /// Everything latency-related is dead without it.
     pub icmp_error: Option<String>,
-    /// Startup problems worth interrupting for, shown until dismissed.
-    pub show_startup_notice: bool,
     /// What is degraded by running unprivileged, when anything is.
     pub privilege_notice: Option<String>,
     /// External tools absent from this machine: (name, what it provides, how to
@@ -1038,6 +1296,7 @@ impl AppState {
             speedtest: SpeedTest::default(),
             netinfo: NetInfo::default(),
             dns: Vec::new(),
+            http: HttpState::default(),
             signal: SignalState::default(),
             vitals: Vitals::default(),
             link_errors: LinkErrors::default(),
@@ -1070,9 +1329,17 @@ impl AppState {
             input_buffer: String::new(),
             notice: None,
             paused: false,
-            show_help: false,
+            overlay: Overlay::None,
+            verdict: crate::verdict::VerdictState::default(),
+            baseline: None,
+            baseline_key: None,
+            explainer_pending: false,
+            locations: None,
+            locations_sel: 0,
+            events: VecDeque::new(),
+            events_total: 0,
+            events_scroll: 0,
             icmp_error: None,
-            show_startup_notice: false,
             privilege_notice: None,
             missing_tools: Vec::new(),
             logging_requested: false,
@@ -1080,6 +1347,55 @@ impl AppState {
             should_quit: false,
             started: Instant::now(),
         }
+    }
+
+    /// Clear every latency statistic: targets, monitored hops, the one-shot
+    /// traceroute. Used by Shift+R, and automatically when the link comes back
+    /// or the machine moves networks — stats from before either event describe
+    /// a path that no longer exists, and stale loss would stay red for minutes.
+    pub fn reset_quality_stats(&mut self) {
+        for t in &mut self.targets {
+            t.reset();
+        }
+        if let Some(m) = self.hop_monitor.as_mut() {
+            for h in &mut m.hops {
+                if let Some(stat) = h.stat.as_mut() {
+                    stat.reset();
+                }
+            }
+        }
+        self.traceroute = None;
+    }
+
+    /// Append to the session timeline, evicting the oldest past the cap.
+    pub fn push_event(
+        &mut self,
+        severity: crate::verdict::Severity,
+        category: EventCategory,
+        message: String,
+    ) {
+        if self.events.len() == EVENTS_CAP {
+            self.events.pop_front();
+        }
+        self.events.push_back(EventItem {
+            at: chrono::Utc::now().timestamp(),
+            severity,
+            category,
+            message,
+        });
+        self.events_total += 1;
+    }
+
+    /// Show a transient footer notice *and* keep it in the timeline — the
+    /// durable sibling of `notice`, which any key press clears.
+    pub fn notice_event(
+        &mut self,
+        severity: crate::verdict::Severity,
+        category: EventCategory,
+        message: String,
+    ) {
+        self.notice = Some(message.clone());
+        self.push_event(severity, category, message);
     }
 
     /// Whether the focused panel currently offers a second cursor pane, so 'n'

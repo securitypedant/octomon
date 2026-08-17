@@ -60,6 +60,16 @@ pub struct Config {
     /// Name looked up when probing resolvers. A widely cached name measures what
     /// applications actually experience; something obscure measures recursion.
     pub dns_probe_name: String,
+    /// HTTP connectivity-check endpoint: "auto" uses this OS's own (Apple /
+    /// Microsoft / Ubuntu — the machine already polls it, so octomon adds no
+    /// new party learning it is online); or name one of "apple", "microsoft",
+    /// "ubuntu", "cloudflare", "google". A failing answer is verified against a
+    /// second, independent provider before any finding is raised.
+    pub http_probe_provider: String,
+    /// How often the HTTP reachability probe runs, in milliseconds.
+    pub http_probe_interval_ms: u64,
+    /// Whether the first-run explainer has been shown (set automatically).
+    pub explainer_seen: bool,
     /// Glyphs used to plot chart lines: "braille", "halfblock" or "dot".
     ///
     /// Braille packs 2x4 dots into one cell and is what the charts are drawn
@@ -96,6 +106,9 @@ impl Default for Config {
             dns_interval_ms: 5000,
             dns_timeout_ms: 2000,
             dns_probe_name: "example.com".to_string(),
+            http_probe_provider: "auto".to_string(),
+            http_probe_interval_ms: 12_000,
+            explainer_seen: false,
             graph_marker: "braille".to_string(),
         }
     }
@@ -128,6 +141,9 @@ impl Config {
     }
     pub fn dns_timeout(&self) -> Duration {
         Duration::from_millis(self.dns_timeout_ms.max(100))
+    }
+    pub fn http_probe_interval(&self) -> Duration {
+        Duration::from_millis(self.http_probe_interval_ms.max(2000))
     }
 
     /// Chart marker, falling back to braille for an unrecognised value rather
@@ -199,12 +215,22 @@ impl Config {
     /// Update just the selected provider in the on-disk config (best-effort),
     /// preserving other settings.
     pub fn persist_provider(name: &str) {
+        Self::update_on_disk(|cfg| cfg.speedtest_provider = name.to_string());
+    }
+
+    /// Record that the first-run explainer has been shown (best-effort).
+    pub fn persist_explainer_seen() {
+        Self::update_on_disk(|cfg| cfg.explainer_seen = true);
+    }
+
+    /// Read-modify-write one field of the on-disk config, preserving the rest.
+    fn update_on_disk(mutate: impl FnOnce(&mut Config)) {
         let Some(path) = Self::path() else { return };
         let mut cfg = std::fs::read_to_string(&path)
             .ok()
             .and_then(|t| toml::from_str::<Config>(&t).ok())
             .unwrap_or_default();
-        cfg.speedtest_provider = name.to_string();
+        mutate(&mut cfg);
         let _ = cfg.write_to(&path);
     }
 

@@ -6,13 +6,14 @@ use ratatui::prelude::*;
 use ratatui::style::Modifier;
 use ratatui::symbols::Marker;
 use ratatui::widgets::{
-    Axis, Block, Cell, Chart, Clear, Dataset, Gauge, GraphType, LineGauge, Paragraph, Row,
-    Sparkline, SparklineBar, Table, Wrap,
+    Axis, Block, Cell, Chart, Clear, Dataset, Gauge, GraphType, LineGauge, Padding, Paragraph,
+    Row, Sparkline, SparklineBar, Table, Wrap,
 };
 
 use crate::app::{
-    AppState, InputMode, LinkMedium, Panel, ProcStatus, QualityView, SpeedStatus, SubPane,
+    AppState, InputMode, LinkMedium, Overlay, Panel, ProcStatus, QualityView, SpeedStatus, SubPane,
 };
+use crate::verdict::{RungStatus, Severity, Verdict, thresholds as th};
 
 /// Draw the whole dashboard.
 pub fn render(f: &mut Frame, s: &AppState) {
@@ -49,11 +50,228 @@ pub fn render(f: &mut Frame, s: &AppState) {
 
     // Setup problems come first: with ICMP unavailable most of the dashboard is
     // dead, and a one-line footer notice is far too easy to miss.
-    if s.show_startup_notice {
-        startup_notice(f, s, f.area());
-    } else if s.show_help {
-        help_overlay(f, s, f.area());
+    match s.overlay {
+        Overlay::Startup => startup_notice(f, s, f.area()),
+        Overlay::Help => help_overlay(f, s, f.area()),
+        Overlay::Triage => triage_overlay(f, s, f.area()),
+        Overlay::Events => events_overlay(f, s, f.area()),
+        Overlay::Explainer => explainer_overlay(f, f.area()),
+        Overlay::Locations => locations_overlay(f, s, f.area()),
+        Overlay::None => {}
     }
+}
+
+/// Every stored network location with its learned baseline: what "normal"
+/// means at each place this machine has been.
+fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
+    let w = 84u16.min(area.width);
+    let h = (area.height * 4 / 5).max(8.min(area.height));
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    // Three lines per location (name, stats, spacer).
+    let visible = (rect.height.saturating_sub(2) as usize) / 3;
+
+    let mut lines: Vec<Line> = Vec::new();
+    match &s.locations {
+        None => lines.push(Line::from(Span::styled(
+            "loading…",
+            Style::new().fg(Color::DarkGray),
+        ))),
+        Some(all) if all.is_empty() => {
+            lines.push(Line::from(Span::styled(
+                "no locations learned yet — baselines build up during healthy minutes",
+                Style::new().fg(Color::DarkGray),
+            )));
+        }
+        Some(all) => {
+            // Scroll only when there is somewhere to scroll to: with the list
+            // fully visible the offset stays pinned at zero.
+            let max_first = all.len().saturating_sub(visible.max(1));
+            let first = s.locations_sel.min(max_first);
+            let ms = |v: Option<f64>| v.map(|x| format!("~{x:.0}ms")).unwrap_or_else(|| "—".into());
+            for (key, b) in all.iter().skip(first).take(visible.max(1)) {
+                let current = s.baseline_key.as_deref() == Some(key.as_str());
+                let mut name_row = vec![Span::styled(
+                    b.display_name().to_string(),
+                    Style::new().fg(Color::White).bold(),
+                )];
+                if b.name.is_some() && b.name.as_deref() != Some(&b.label) {
+                    name_row.push(Span::styled(
+                        format!("  ({})", b.label),
+                        Style::new().fg(Color::DarkGray),
+                    ));
+                }
+                if current {
+                    name_row.push(Span::styled(
+                        "  ● current",
+                        Style::new().fg(Color::Cyan).bold(),
+                    ));
+                }
+                lines.push(Line::from(name_row));
+                let speed = match (b.down_mbps, b.up_mbps) {
+                    (Some(d), Some(u)) => format!(" · speed {d:.0}↓/{u:.0}↑"),
+                    _ => String::new(),
+                };
+                let rssi = b
+                    .rssi_dbm
+                    .map(|r| format!(" · rssi ~{r:.0}dBm"))
+                    .unwrap_or_default();
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  gateway {} · internet {} · DNS {}{rssi}{speed} · {} healthy min",
+                        ms(b.gateway_ms),
+                        ms(b.anchor_ms),
+                        ms(b.dns_ms),
+                        b.samples
+                    ),
+                    Style::new().fg(Color::Gray),
+                )));
+                lines.push(Line::from(""));
+            }
+        }
+    }
+
+    let total = s.locations.as_ref().map(Vec::len).unwrap_or(0);
+    f.render_widget(Clear, rect);
+    let outer = Block::bordered()
+        .padding(Padding::new(1, 1, 0, 0))
+        .title(Span::styled(
+            format!(" octomon · locations ({total}) "),
+            Style::new().bold(),
+        ))
+        .title_bottom(Span::styled(
+            " ↑↓ scroll · [N] names the current network · press L or Esc to close ",
+            Style::new().fg(Color::DarkGray),
+        ))
+        .border_style(Style::new().fg(Color::Cyan));
+    let inner = outer.inner(rect);
+    f.render_widget(outer, rect);
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// First-run welcome: what the tool answers, and that it learns each network's
+/// normal. Shown once, then persisted away.
+fn explainer_overlay(f: &mut Frame, area: Rect) {
+    let head = |t: &str| Line::from(Span::styled(format!(" {t}"), Style::new().bold()));
+    let bullet = |t: &str| {
+        Line::from(vec![
+            Span::styled(" ● ", Style::new().fg(Color::Cyan)),
+            Span::styled(t.to_string(), Style::new().fg(Color::Gray)),
+        ])
+    };
+    let dim = |t: &str| Line::from(Span::styled(format!("   {t}"), Style::new().fg(Color::DarkGray)));
+
+    let lines = vec![
+        head("this tool helps you diagnose internet connectivity issues:"),
+        Line::from(Span::styled(
+            " \"Is it my machine, my local network, my ISP — or the internet?\"",
+            Style::new().fg(Color::Cyan).bold(),
+        )),
+        Line::from(""),
+        bullet("a live analysis at the bottom left of the screen"),
+        dim("press [y] anytime to see details"),
+        bullet("[e] shows a timeline of what changed and when"),
+        bullet("octomon learns what normal looks like on each network you use"),
+        dim("(gateway latency, DNS, signal — saved and judged per location,"),
+        dim("Name this network with [N], e.g. \"Home\"."),
+        bullet("everything stays on this machine"),
+        Line::from(""),
+        Line::from(Span::styled(
+            " give it a minute or two to learn before trusting comparisons",
+            Style::new().fg(Color::DarkGray).italic(),
+        )),
+    ];
+
+    // Breathing room inside the border: 1 column each side, 1 row above and
+    // below.
+    let pad = Padding::new(1, 1, 1, 1);
+    let w = (78u16 + 2).min(area.width);
+    let h = (lines.len() as u16 + 2 + 2).min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, rect);
+    let outer = Block::bordered()
+        .padding(pad)
+        .title(Span::styled(" octomon · welcome ", Style::new().bold()))
+        .title_bottom(Span::styled(
+            " press any key to start ",
+            Style::new().fg(Color::DarkGray),
+        ))
+        .border_style(Style::new().fg(Color::Cyan));
+    let inner = outer.inner(rect);
+    f.render_widget(outer, rect);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// The session timeline, newest first: what changed and when. This is the
+/// retroactive answer to "what happened during that call ten minutes ago?"
+fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
+    // Big but not modal-window-pretending-to-be-a-screen: 80% each way.
+    let w = (area.width * 4 / 5).max(40.min(area.width));
+    let h = (area.height * 4 / 5).max(6.min(area.height));
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    let visible = rect.height.saturating_sub(2) as usize;
+
+    let mut lines: Vec<Line> = Vec::new();
+    if s.events.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " no events yet — network changes and analysis findings land here",
+            Style::new().fg(Color::DarkGray),
+        )));
+    }
+    for e in s.events.iter().rev().skip(s.events_scroll).take(visible) {
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {}  ", e.when()), Style::new().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:<9} ", e.category.label()),
+                Style::new().fg(Color::Cyan),
+            ),
+            Span::styled(
+                e.message.clone(),
+                Style::new().fg(severity_color(e.severity)),
+            ),
+        ]));
+    }
+
+    let older = s
+        .events
+        .len()
+        .saturating_sub(s.events_scroll)
+        .saturating_sub(visible);
+    let title = format!(
+        " octomon · events ({} this session{}) ",
+        s.events_total,
+        if older > 0 {
+            format!(", ↓{older} older")
+        } else {
+            String::new()
+        }
+    );
+    f.render_widget(Clear, rect);
+    let outer = Block::bordered()
+        .padding(Padding::new(1, 1, 0, 0))
+        .title(Span::styled(title, Style::new().bold()))
+        .title_bottom(Span::styled(
+            " ↑↓ scroll · press e or Esc to close ",
+            Style::new().fg(Color::DarkGray),
+        ))
+        .border_style(Style::new().fg(Color::Cyan));
+    let inner = outer.inner(rect);
+    f.render_widget(outer, rect);
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Modal shown once at startup when something will visibly not work. Dismissed
@@ -110,10 +328,11 @@ fn startup_notice(f: &mut Frame, s: &AppState, area: Rect) {
         return;
     }
 
-    let w = 76u16.min(area.width);
+    let w = 78u16.min(area.width);
     // Long guidance wraps, so counting logical lines under-measures and clips
     // the bottom of the modal — which is where the least-obvious advice sits.
-    let text_w = w.saturating_sub(2).max(1) as usize;
+    // Width available to text: border + 1-column padding each side.
+    let text_w = w.saturating_sub(4).max(1) as usize;
     let wrapped: usize = lines
         .iter()
         .map(|l| l.width().max(1).div_ceil(text_w))
@@ -127,6 +346,7 @@ fn startup_notice(f: &mut Frame, s: &AppState, area: Rect) {
     };
     f.render_widget(Clear, rect);
     let outer = Block::bordered()
+        .padding(Padding::new(1, 1, 0, 0))
         .title(Span::styled(" octomon · setup ", Style::new().bold()))
         .title_bottom(Span::styled(
             " press any key to continue ",
@@ -243,7 +463,14 @@ fn context_line(s: &AppState) -> Line<'static> {
                 txt("ull "),
             ]
         }
-        Panel::NetInfo => vec![key("[r]"), txt("efresh ")],
+        Panel::NetInfo => vec![
+            key("[r]"),
+            txt("efresh "),
+            key("[N]"),
+            txt("ame "),
+            key("[L]"),
+            txt("ocations "),
+        ],
         Panel::Vitals => vec![],
     };
     spans.push(key("[?]"));
@@ -252,31 +479,209 @@ fn context_line(s: &AppState) -> Line<'static> {
 }
 
 fn footer(f: &mut Frame, s: &AppState, area: Rect) {
-    let line = if s.input_mode == InputMode::AddTarget {
+    let input_line = |prompt: &str, buffer: &str, hint: &str| {
         Line::from(vec![
-            Span::styled(
-                " add target (IP or DNS): ",
-                Style::new().fg(Color::Yellow).bold(),
-            ),
-            Span::styled(s.input_buffer.clone(), Style::new().fg(Color::White)),
+            Span::styled(format!(" {prompt}"), Style::new().fg(Color::Yellow).bold()),
+            Span::styled(buffer.to_string(), Style::new().fg(Color::White)),
             Span::styled("▏", Style::new().fg(Color::Yellow)),
-            Span::styled(
-                "   [Enter] add  [Esc] cancel",
-                Style::new().fg(Color::DarkGray),
-            ),
+            Span::styled(format!("   {hint}"), Style::new().fg(Color::DarkGray)),
         ])
+    };
+    let line = if s.input_mode == InputMode::AddTarget {
+        input_line(
+            "add target (IP or DNS): ",
+            &s.input_buffer,
+            "[Enter] add  [Esc] cancel",
+        )
+    } else if s.input_mode == InputMode::NameNetwork {
+        input_line(
+            "name this network (Home, Office…): ",
+            &s.input_buffer,
+            "[Enter] save  [Esc] cancel",
+        )
     } else if let Some(n) = &s.notice {
         Line::from(Span::styled(
             format!(" {n}"),
             Style::new().fg(Color::Yellow),
         ))
     } else {
-        Line::from(Span::styled(
-            " [Tab] focus  [f] full  [p] pause  [r] refresh  [w] window  [s] speedtest  [l] log  [?] help  [q] quit",
+        verdict_line(s)
+    };
+
+    // While recording, the destination sits bottom-right so the analysis line
+    // keeps the left. Suppressed during text entry, which needs the width.
+    let rec = if s.input_mode == InputMode::Normal {
+        s.log.as_ref().map(|log| {
+            let name = log
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            format!("● rec → {name} ({} rows) ", log.rows)
+        })
+    } else {
+        None
+    };
+    match rec {
+        Some(r) => {
+            let cols =
+                Layout::horizontal([Constraint::Min(0), Constraint::Length(r.len() as u16)])
+                    .split(area);
+            f.render_widget(Paragraph::new(line), cols[0]);
+            f.render_widget(
+                Paragraph::new(Span::styled(r, Style::new().fg(Color::Red)))
+                    .alignment(Alignment::Right),
+                cols[1],
+            );
+        }
+        None => f.render_widget(Paragraph::new(line), area),
+    }
+}
+
+/// The always-visible one-liner: the verdict engine's headline. Full detail —
+/// every rung and finding — is one keypress away on [y], so this stays terse.
+fn verdict_line(s: &AppState) -> Line<'static> {
+    let hint = Span::styled("  [y] analysis", Style::new().fg(Color::DarkGray));
+    match &s.verdict.current {
+        Verdict::Insufficient(reason) => Line::from(vec![
+            Span::styled(format!(" ● {reason}"), Style::new().fg(Color::DarkGray)),
+            hint,
+        ]),
+        Verdict::Healthy => Line::from(vec![
+            Span::styled(" ● connection healthy", Style::new().fg(Color::Green)),
+            hint,
+        ]),
+        Verdict::Problems(findings) => {
+            let top = &findings[0];
+            // Info-class findings are notes, not problems: the line stays green
+            // rather than crying wolf over a busy CPU or a weak-but-working radio.
+            if top.severity == Severity::Info {
+                let n = findings.len();
+                return Line::from(vec![
+                    Span::styled(" ● connection healthy", Style::new().fg(Color::Green)),
+                    Span::styled(
+                        format!(
+                            " · {n} note{}: {}",
+                            if n == 1 { "" } else { "s" },
+                            top.summary
+                        ),
+                        Style::new().fg(Color::Gray),
+                    ),
+                    hint,
+                ]);
+            }
+            // Confidence wording lives in the [y] analysis overlay; the
+            // headline keeps just the claim.
+            let color = severity_color(top.severity);
+            let mut spans = vec![Span::styled(
+                format!(" ▲ {}", top.summary),
+                Style::new().fg(color).bold(),
+            )];
+            if findings.len() > 1 {
+                spans.push(Span::styled(
+                    format!("  (+{} more)", findings.len() - 1),
+                    Style::new().fg(Color::Yellow),
+                ));
+            }
+            spans.push(hint);
+            Line::from(spans)
+        }
+    }
+}
+
+fn severity_color(sev: Severity) -> Color {
+    match sev {
+        Severity::Down => Color::Red,
+        Severity::Degraded => Color::Yellow,
+        Severity::Info => Color::Gray,
+    }
+}
+
+/// The triage ladder: every subsystem's status with its data — healthy rungs
+/// included, so the verdict is auditable rather than oracular — then the active
+/// findings with their evidence.
+fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    for r in &s.verdict.triage.rungs {
+        let (glyph, color) = match r.status {
+            RungStatus::Ok => ("✓", Color::Green),
+            RungStatus::Warn => ("~", Color::Yellow),
+            RungStatus::Bad => ("✗", Color::Red),
+            RungStatus::Unknown => ("?", Color::DarkGray),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {glyph} "), Style::new().fg(color).bold()),
+            Span::styled(
+                format!("{:<13}", r.area.label()),
+                Style::new().fg(Color::White),
+            ),
+            Span::styled(r.detail.clone(), Style::new().fg(Color::Gray)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    match &s.verdict.current {
+        Verdict::Insufficient(reason) => {
+            lines.push(Line::from(Span::styled(
+                format!(" {reason}"),
+                Style::new().fg(Color::DarkGray),
+            )));
+        }
+        Verdict::Healthy => {
+            lines.push(Line::from(Span::styled(
+                " no findings — connection looks healthy",
+                Style::new().fg(Color::Green),
+            )));
+        }
+        Verdict::Problems(findings) => {
+            lines.push(Line::from(Span::styled(
+                " Findings",
+                Style::new().fg(Color::White).bold(),
+            )));
+            for finding in findings {
+                // Confidence stays internal (it drives the ranking); the
+                // evidence lines below make the case in words instead.
+                lines.push(Line::from(Span::styled(
+                    format!(" ▲ {}", finding.summary),
+                    Style::new().fg(severity_color(finding.severity)).bold(),
+                )));
+                for e in &finding.evidence {
+                    lines.push(Line::from(Span::styled(
+                        format!("     {e}"),
+                        Style::new().fg(Color::DarkGray),
+                    )));
+                }
+            }
+        }
+    }
+
+    let w = 78u16.min(area.width);
+    // Border + 1-column padding each side.
+    let text_w = w.saturating_sub(4).max(1) as usize;
+    let wrapped: usize = lines
+        .iter()
+        .map(|l| l.width().max(1).div_ceil(text_w))
+        .sum();
+    let h = (wrapped as u16 + 2).min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, rect);
+    let outer = Block::bordered()
+        .padding(Padding::new(1, 1, 0, 0))
+        .title(Span::styled(" octomon · analysis ", Style::new().bold()))
+        .title_bottom(Span::styled(
+            " press y or Esc to close, e for past events ",
             Style::new().fg(Color::DarkGray),
         ))
-    };
-    f.render_widget(Paragraph::new(line), area);
+        .border_style(Style::new().fg(Color::Cyan));
+    let inner = outer.inner(rect);
+    f.render_widget(outer, rect);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn block(title: &str, focused: bool) -> Block<'static> {
@@ -295,6 +700,17 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     // is — and the title needs the scroll counts, which depend on the layout.
     let inner = block("", false).inner(area);
 
+    // The web (HTTP) strip: hidden while a path view owns the bottom of a
+    // split panel, but full-screen has room for both; in split view it also
+    // needs a tall enough panel to not squeeze the latency chart.
+    let show_web = has_web_data(s)
+        && (s.fullscreen || (s.quality_view == QualityView::Graph && inner.height >= 13));
+    let web_h: u16 = match (show_web, s.fullscreen) {
+        (false, _) => 0,
+        (true, true) => 6,
+        (true, false) => 4,
+    };
+
     let parts = if s.quality_view == QualityView::Graph {
         // Full-screen: the target list takes only what it needs and the chart
         // fills the rest, since three overlaid series need the vertical room.
@@ -307,19 +723,18 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         } else {
             (Constraint::Min(3), Constraint::Length(6))
         };
-        Layout::vertical([Constraint::Length(1), list, graph]).split(inner)
+        Layout::vertical([list, graph, Constraint::Length(web_h)]).split(inner)
     } else {
         let table_h = (s.targets.len() as u16 + 2).min(9);
         Layout::vertical([
-            Constraint::Length(1),
             Constraint::Length(table_h),
             Constraint::Min(0),
+            Constraint::Length(web_h),
         ])
         .split(inner)
     };
 
     let n = s.window_samples();
-    quality_summary(f, s, n, parts[0]);
 
     let focused = s.focus == Panel::Quality && s.sub_pane == SubPane::Primary;
     // Sortable header: highlight the column cursor, mark the active sort ▲/▼.
@@ -353,7 +768,7 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let order = s.quality_order();
     // Scroll so the cursor stays visible: with a path monitor open below, the
     // target list gets few rows and the selection would otherwise fall off it.
-    let rows_avail = (parts[1].height.saturating_sub(1)) as usize;
+    let rows_avail = (parts[0].height.saturating_sub(1)) as usize;
     let cursor = order.iter().position(|&i| i == s.selected).unwrap_or(0);
     let first = if rows_avail == 0 {
         0
@@ -407,7 +822,8 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         Constraint::Length(6),
     ];
     // Scroll counts live in the title: overlaying them on the header row
-    // clobbered whichever column happened to sit under them.
+    // clobbered whichever column happened to sit under them. They come before
+    // the stats so a narrow panel clips the stats, never the scroll cue.
     let mut title = "Connection Quality".to_string();
     if hidden_above > 0 || hidden_below > 0 {
         title.push_str(" · ");
@@ -419,13 +835,104 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         }
         title.push_str("more");
     }
+    // The stats that used to have their own row ride in the title now, buying
+    // the panel body an extra line of graph space.
+    title.push_str(&format!(" ({}", s.window_label()));
+    if s.window_is_capped() {
+        title.push_str(&format!(" capped at {}", s.window_samples()));
+    }
+    if let Some(t) = s.targets.get(s.graph_target) {
+        let st = t.stats(n);
+        title.push_str(&format!(" · {}: jit {:.1} · sd {:.1}", t.label, t.jitter_ms, st.stddev));
+        if let Some(bloat) = t.bufferbloat_ms(n) {
+            let (grade, _) = bufferbloat_grade(bloat);
+            title.push_str(&format!(" · bloat +{bloat:.0}ms {grade}"));
+        }
+    }
+    title.push(')');
     f.render_widget(block(&title, s.focus == Panel::Quality), area);
-    f.render_widget(Table::new(rows, widths).header(header), parts[1]);
+    f.render_widget(Table::new(rows, widths).header(header), parts[0]);
 
     match s.quality_view {
-        QualityView::Graph => latency_graph(f, s, n, parts[2]),
-        QualityView::Traceroute => traceroute_view(f, s, parts[2]),
-        QualityView::HopMonitor => hop_monitor_view(f, s, n, parts[2]),
+        QualityView::Graph => latency_graph(f, s, n, parts[1]),
+        QualityView::Traceroute => traceroute_view(f, s, parts[1]),
+        QualityView::HopMonitor => hop_monitor_view(f, s, n, parts[1]),
+    }
+    if show_web {
+        web_graph(f, s, parts[2]);
+    }
+}
+
+/// Whether the web strip has a target to describe.
+fn has_web_data(s: &AppState) -> bool {
+    s.targets.get(s.graph_target).is_some()
+}
+
+/// The web (HTTP) strip under the latency graph: the *graphed target's* web
+/// service, not the general internet (that check lives in the Network panel).
+/// A target that never served HTTP says so quietly — absence of a web server
+/// is a fact, not a fault.
+fn web_graph(f: &mut Frame, s: &AppState, area: Rect) {
+    if area.height < 2 {
+        return;
+    }
+    let Some(t) = s.targets.get(s.graph_target) else {
+        return;
+    };
+    use crate::app::WebStatus;
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
+
+    let head = Span::styled(
+        format!(" web · {}  ", t.label),
+        Style::new().fg(Color::DarkGray),
+    );
+    // Mid-path hops are never probed — routers aren't web destinations, and
+    // "checking…" would be a promise that never resolves.
+    if t.is_path_hop() {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                head,
+                Span::styled(
+                    "mid-path router — not a web destination".to_string(),
+                    Style::new().fg(Color::DarkGray),
+                ),
+            ])),
+            rows[0],
+        );
+        return;
+    }
+    let detail = match t.web.status {
+        WebStatus::Web if t.web.fails > 0 => Span::styled(
+            format!("not answering ({} probes) — ping still fine", t.web.fails),
+            Style::new().fg(Color::Red).bold(),
+        ),
+        WebStatus::Web => Span::styled(
+            t.web
+                .last_ttfb_ms
+                .map(|ms| format!("ttfb {ms:.0}ms"))
+                .unwrap_or_else(|| "…".into()),
+            Style::new().fg(Color::Green),
+        ),
+        WebStatus::NoService => Span::styled(
+            "no web service (connection refused)".to_string(),
+            Style::new().fg(Color::DarkGray),
+        ),
+        WebStatus::Filtered => Span::styled(
+            "TCP filtered — ping answers, web dropped".to_string(),
+            Style::new().fg(Color::Yellow),
+        ),
+        WebStatus::Unknown => Span::styled("checking…".to_string(), Style::new().fg(Color::DarkGray)),
+    };
+    f.render_widget(Paragraph::new(Line::from(vec![head, detail])), rows[0]);
+
+    let data = t.web.hist.tail_u64(rows[1].width as usize);
+    if !data.is_empty() {
+        f.render_widget(
+            Sparkline::default()
+                .data(data.iter().map(|v| SparklineBar::from(*v)).collect::<Vec<_>>())
+                .style(Style::new().fg(SERIES_COLOR)),
+            rows[1],
+        );
     }
 }
 
@@ -777,8 +1284,8 @@ fn hop_chart(f: &mut Frame, m: &crate::app::HopMonitor, n: usize, area: Rect, ma
 /// tens of milliseconds are unremarkable.
 fn loss_color(pct: f64) -> Color {
     match pct {
-        p if p >= 5.0 => Color::Red,
-        p if p >= 1.0 => Color::Yellow,
+        p if p >= th::LOSS_BAD_PCT => Color::Red,
+        p if p >= th::LOSS_WARN_PCT => Color::Yellow,
         p if p > 0.0 => Color::Rgb(200, 200, 120),
         _ => Color::Green,
     }
@@ -940,58 +1447,18 @@ fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
     f.render_widget(chart, area);
 }
 
-/// One-line summary above the table: stats window, and jitter / stddev /
-/// bufferbloat for the graphed target.
-fn quality_summary(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
-    let mut spans = vec![
-        Span::styled(
-            format!("window {} ", s.window_label()),
-            Style::new().fg(Color::Gray),
-        ),
-        Span::styled("[w]", Style::new().fg(Color::Cyan)),
-        Span::raw("  "),
-    ];
-    // Say when the buffer, not the chosen window, is setting the reach. The
-    // figures are still honest — they just cover less than the label implies,
-    // and silently overstating them is worse than one extra clause.
-    if s.window_is_capped() {
-        spans.push(Span::styled(
-            format!("(capped at {} samples)  ", s.window_samples()),
-            Style::new().fg(Color::Yellow),
-        ));
-    }
-    if let Some(t) = s.targets.get(s.graph_target) {
-        let st = t.stats(n);
-        spans.push(Span::styled(
-            format!("{}: ", t.label),
-            Style::new().fg(Color::DarkGray),
-        ));
-        spans.push(Span::styled(
-            format!("jitter {:.1} · stddev {:.1}  ", t.jitter_ms, st.stddev),
-            Style::new().fg(Color::Gray),
-        ));
-        if let Some(bloat) = t.bufferbloat_ms(n) {
-            let (grade, color) = bufferbloat_grade(bloat);
-            spans.push(Span::styled(
-                "bufferbloat ",
-                Style::new().fg(Color::DarkGray),
-            ));
-            spans.push(Span::styled(
-                format!("+{bloat:.0}ms ({grade})"),
-                Style::new().fg(color).bold(),
-            ));
-        }
-    }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
-}
+// (The one-line stats summary that used to sit above the target table now
+// rides in the panel title, buying a line of graph space.)
 
 /// Grade latency inflation under load, à la the Waveform/Cloudflare scale.
+/// Steps live in the verdict rulebook so grading here and findings there agree.
 fn bufferbloat_grade(bloat_ms: f64) -> (&'static str, Color) {
+    let [excellent, good, moderate, poor] = th::BLOAT_STEPS_MS;
     match bloat_ms {
-        b if b < 5.0 => ("excellent", Color::Green),
-        b if b < 30.0 => ("good", Color::Green),
-        b if b < 60.0 => ("moderate", Color::Yellow),
-        b if b < 200.0 => ("poor", Color::Red),
+        b if b < excellent => ("excellent", Color::Green),
+        b if b < good => ("good", Color::Green),
+        b if b < moderate => ("moderate", Color::Yellow),
+        b if b < poor => ("poor", Color::Red),
         _ => ("bad", Color::Red),
     }
 }
@@ -1359,19 +1826,20 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
 fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     let row = |k: &str, d: &str| {
         Line::from(vec![
-            Span::styled(format!(" {k:<11}"), Style::new().fg(Color::Cyan)),
+            Span::styled(format!("{k:<11}"), Style::new().fg(Color::Cyan)),
             Span::styled(d.to_string(), Style::new().fg(Color::Gray)),
         ])
     };
     let head = |t: &str| {
         Line::from(Span::styled(
-            format!(" {t}"),
+            t.to_string(),
             Style::new().fg(Color::White).bold(),
         ))
     };
 
     // Two columns, so the whole key set fits an 80x24 terminal without
     // scrolling. Descriptions are kept short enough for a half-width column.
+    // Leading indent comes from the block's padding, not the lines.
     let mut left = vec![
         head("Global"),
         row("Tab / ⇧Tab", "cycle panels"),
@@ -1383,6 +1851,8 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("r", "re-probe network info"),
         row("w", "stats window 1m/5m/15m"),
         row("l", "start / stop CSV recording"),
+        row("y", "connection analysis"),
+        row("e", "event timeline"),
         row("?", "toggle this help"),
         row("q / Ctrl+C", "quit"),
         Line::from(""),
@@ -1409,6 +1879,8 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         Line::from(""),
         head("Network"),
         row("r", "re-probe"),
+        row("N", "name this network"),
+        row("L", "saved network locations"),
         row("f", "full-screen for DNS graphs"),
     ];
 
@@ -1417,12 +1889,12 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     if !s.missing_tools.is_empty() {
         right.push(Line::from(""));
         right.push(Line::from(Span::styled(
-            " Missing tools",
+            "Missing tools",
             Style::new().fg(Color::Yellow).bold(),
         )));
         for (name, _provides, package) in &s.missing_tools {
             right.push(Line::from(vec![
-                Span::styled(format!(" {name:<11}"), Style::new().fg(Color::Yellow)),
+                Span::styled(format!("{name:<11}"), Style::new().fg(Color::Yellow)),
                 Span::styled(package.to_string(), Style::new().fg(Color::DarkGray)),
             ]));
         }
@@ -1450,6 +1922,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
 
     f.render_widget(Clear, rect);
     let outer = Block::bordered()
+        .padding(Padding::new(1, 1, 0, 0))
         .title(Span::styled(
             format!(" octomon v{} · Shortcuts ", env!("CARGO_PKG_VERSION")),
             Style::new().bold(),
@@ -1480,7 +1953,13 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
 
 fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let n = &s.netinfo;
-    let b = block("Network", s.focus == Panel::NetInfo);
+    // The location name rides in the title, like the Bandwidth panel's iface:
+    // "Network · Home". Until a baseline exists there is nothing to say.
+    let title = match &s.baseline {
+        Some(b) => format!("Network · {}", b.display_name()),
+        None => "Network".to_string(),
+    };
+    let b = block(&title, s.focus == Panel::NetInfo);
     let inner = b.inner(area);
     f.render_widget(b, area);
 
@@ -1597,6 +2076,9 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
     }
 
     lines.push(dns_line(s));
+    if let Some(l) = http_line(s) {
+        lines.push(l);
+    }
 
     if let Some(w) = &n.wifi {
         // Live signal/tx come from the CoreWLAN graph below; keep the slower
@@ -1850,12 +2332,42 @@ fn dns_line(s: &AppState) -> Line<'static> {
     Line::from(spans)
 }
 
+/// The internet-level HTTP check ("can I reach the internet the way a browser
+/// does"), one Network-panel line — a property of the network, unlike the
+/// per-target web strip in Connection Quality. Absent until a probe lands.
+fn http_line(s: &AppState) -> Option<Line<'static>> {
+    use crate::app::FamilyProbe as FP;
+    if matches!(s.http.v4, FP::NotRun) && matches!(s.http.v6, FP::NotRun) {
+        return None;
+    }
+    let span = |f: &FP, name: &str| match f {
+        FP::NotRun => Span::styled(format!("{name} …"), Style::new().fg(Color::DarkGray)),
+        FP::NotApplicable => Span::styled(format!("{name} n/a"), Style::new().fg(Color::DarkGray)),
+        FP::Ok(ms) => Span::styled(format!("{name} ok {ms:.0}ms"), Style::new().fg(Color::Green)),
+        FP::Captive(_) => Span::styled(
+            "CAPTIVE PORTAL".to_string(),
+            Style::new().fg(Color::Red).bold(),
+        ),
+        FP::Fail(r) => Span::styled(format!("{name} {r}"), Style::new().fg(Color::Red)),
+    };
+    Some(Line::from(vec![
+        Span::styled(format!("{:<9}", "http"), Style::new().fg(Color::DarkGray)),
+        span(&s.http.v4, "v4"),
+        Span::styled(" · ", Style::new().fg(Color::DarkGray)),
+        span(&s.http.v6, "v6"),
+        Span::styled(
+            format!("  ({})", s.http.provider),
+            Style::new().fg(Color::DarkGray),
+        ),
+    ]))
+}
+
 /// Resolver latency thresholds: a cached answer should be near the RTT to the
 /// resolver, so tens of ms is fine and hundreds is not.
 fn dns_color(ms: f64) -> Color {
     match ms {
-        v if v < 30.0 => Color::Green,
-        v if v < 120.0 => Color::Yellow,
+        v if v < th::DNS_WARN_MS => Color::Green,
+        v if v < th::DNS_BAD_MS => Color::Yellow,
         _ => Color::Red,
     }
 }
@@ -2353,8 +2865,8 @@ fn fmt_bytes(n: u64) -> String {
 /// measurement in isolation, so a trace can show what each moment looked like.
 fn rtt_color(ms: f64) -> Color {
     match ms {
-        v if v < 50.0 => Color::Green,
-        v if v < 150.0 => Color::Yellow,
+        v if v < th::RTT_WARN_MS => Color::Green,
+        v if v < th::RTT_BAD_MS => Color::Yellow,
         _ => Color::Red,
     }
 }
@@ -2367,16 +2879,15 @@ const P95_COLOR: Color = Color::Magenta;
 const JITTER_COLOR: Color = Color::LightBlue;
 
 fn latency_color(last: Option<f64>, loss: f64) -> Color {
-    if loss >= 5.0 || last.is_none() {
+    if loss >= th::LOSS_BAD_PCT || last.is_none() {
         return Color::Red;
     }
-    if loss >= 1.0 {
+    if loss >= th::LOSS_WARN_PCT {
         return Color::Yellow;
     }
     match last {
-        Some(ms) if ms < 50.0 => Color::Green,
-        Some(ms) if ms < 150.0 => Color::Yellow,
-        _ => Color::Red,
+        Some(ms) => rtt_color(ms),
+        None => Color::Red,
     }
 }
 
@@ -2391,9 +2902,9 @@ fn medium_color(m: LinkMedium) -> Color {
 }
 
 fn usage_color(pct: f32) -> Color {
-    if pct >= 85.0 {
+    if pct >= th::USAGE_BAD_PCT {
         Color::Red
-    } else if pct >= 60.0 {
+    } else if pct >= th::USAGE_WARN_PCT {
         Color::Yellow
     } else {
         Color::Green
@@ -2424,6 +2935,226 @@ mod tests {
         s.netinfo.iface = "en0".to_string();
         s.netinfo.medium = medium;
         s
+    }
+
+    fn finding(severity: Severity) -> crate::verdict::Finding {
+        crate::verdict::Finding {
+            cause: crate::verdict::Cause::GatewayLan,
+            severity,
+            confidence: crate::verdict::Confidence::Likely,
+            summary: "gateway unresponsive (100% loss)".into(),
+            evidence: vec!["gateway 192.168.1.1: 100% loss".into()],
+            subject: String::new(),
+        }
+    }
+
+    #[test]
+    fn footer_carries_the_verdict_headline() {
+        // Fresh state: measuring, never "healthy" from ignorance.
+        let s = AppState::new(vec![]);
+        let out = draw(&s, 120, 24);
+        assert!(out.contains("measuring"));
+        assert!(out.contains("[y] analysis"));
+
+        let mut s = AppState::new(vec![]);
+        s.verdict.current = Verdict::Healthy;
+        assert!(draw(&s, 120, 24).contains("connection healthy"));
+
+        s.verdict.current = Verdict::Problems(vec![
+            finding(Severity::Down),
+            finding(Severity::Degraded),
+        ]);
+        let out = draw(&s, 120, 24);
+        assert!(out.contains("gateway unresponsive"));
+        // Confidence wording stays in the [y] overlay, off the headline.
+        assert!(!out.contains("— likely"));
+        assert!(out.contains("+1 more"), "co-causes must stay visible");
+
+        // Info-class findings are notes, not a red headline.
+        s.verdict.current = Verdict::Problems(vec![finding(Severity::Info)]);
+        let out = draw(&s, 120, 24);
+        assert!(out.contains("connection healthy"));
+        assert!(out.contains("1 note"));
+    }
+
+    #[test]
+    fn transient_notice_still_outranks_the_verdict_line() {
+        let mut s = AppState::new(vec![]);
+        s.verdict.current = Verdict::Healthy;
+        s.notice = Some("network changed → en7".into());
+        let out = draw(&s, 120, 24);
+        assert!(out.contains("network changed"));
+        assert!(!out.contains("connection healthy"));
+    }
+
+    #[test]
+    fn triage_overlay_shows_the_whole_ladder_with_its_data() {
+        let mut s = AppState::new(vec![
+            crate::app::TargetStat::new("Cloudflare".into(), "1.1.1.1".parse().unwrap()),
+        ]);
+        for _ in 0..20 {
+            s.targets[0].record_reply(12.0);
+        }
+        s.vitals.cores = vec![10.0; 4];
+        s.vitals.cpu_pct = 8.0;
+        s.overlay = Overlay::Triage;
+        let triage = crate::verdict::evaluate(&s);
+        s.verdict.triage = triage;
+        s.verdict.current = Verdict::Healthy;
+
+        let out = draw(&s, 100, 30);
+        // Every rung, healthy ones included — the exonerating evidence is the
+        // difference between a verdict and an assertion.
+        for label in ["machine", "gateway", "DNS", "ISP path", "internet", "destinations"] {
+            assert!(out.contains(label), "ladder is missing {label:?}");
+        }
+        assert!(out.contains("cpu 8%"), "healthy rungs carry their data");
+        assert!(out.contains("[m] to watch"), "unknown rungs say how to fill them");
+        assert!(out.contains("no findings"));
+        assert!(out.contains("press y or Esc to close"));
+    }
+
+    #[test]
+    fn explainer_overlay_reads_as_a_welcome() {
+        let mut s = AppState::new(vec![]);
+        s.overlay = Overlay::Explainer;
+        let out = draw(&s, 100, 30);
+        assert!(out.contains("diagnose internet connectivity"));
+        assert!(out.contains("my machine, my local network, my ISP"));
+        assert!(out.contains("learns what normal looks like"));
+        assert!(out.contains("press any key to start"));
+    }
+
+    #[test]
+    fn network_panel_title_carries_the_location_name() {
+        let mut s = state_with_medium(LinkMedium::WiFi);
+        // No baseline yet: plain title.
+        let out = draw(&s, 200, 60);
+        assert!(out.contains(" Network "));
+        assert!(!out.contains("Network · "));
+
+        s.baseline = Some(crate::baseline::Baseline {
+            label: "HomeNet".into(),
+            samples: 0,
+            ..Default::default()
+        });
+        assert!(draw(&s, 200, 60).contains("Network · HomeNet"));
+
+        // A user-chosen name wins over the auto label.
+        s.baseline.as_mut().unwrap().name = Some("Home".into());
+        assert!(draw(&s, 200, 60).contains("Network · Home"));
+    }
+
+    #[test]
+    fn locations_overlay_lists_stored_baselines() {
+        let mut s = AppState::new(vec![]);
+        s.overlay = Overlay::Locations;
+        assert!(draw(&s, 120, 30).contains("loading…"));
+
+        s.baseline_key = Some("k2".into());
+        s.locations = Some(vec![
+            (
+                "k1".into(),
+                crate::baseline::Baseline {
+                    label: "CoffeeNet".into(),
+                    name: Some("Cafe".into()),
+                    samples: 40,
+                    gateway_ms: Some(4.2),
+                    down_mbps: Some(310.0),
+                    up_mbps: Some(28.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "k2".into(),
+                crate::baseline::Baseline {
+                    label: "HomeNet".into(),
+                    samples: 2,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("locations (2)"));
+        assert!(out.contains("Cafe"));
+        assert!(out.contains("(CoffeeNet)"), "auto label shown next to the name");
+        assert!(out.contains("gateway ~4ms"));
+        assert!(out.contains("speed 310↓/28↑"));
+        assert!(out.contains("40 healthy min"));
+        assert!(out.contains("● current"), "the active network is marked");
+        assert!(out.contains("press L or Esc to close"));
+    }
+
+    #[test]
+    fn naming_prompt_takes_over_the_footer() {
+        let mut s = AppState::new(vec![]);
+        s.input_mode = InputMode::NameNetwork;
+        s.input_buffer = "Home".into();
+        let out = draw(&s, 120, 24);
+        assert!(out.contains("name this network"));
+        assert!(out.contains("Home"));
+        assert!(out.contains("[Enter] save"));
+    }
+
+    #[test]
+    fn events_overlay_lists_newest_first_with_times() {
+        let mut s = AppState::new(vec![]);
+        s.overlay = Overlay::Events;
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("no events yet"));
+
+        s.push_event(
+            Severity::Degraded,
+            crate::app::EventCategory::Analysis,
+            "▲ gateway unresponsive".into(),
+        );
+        s.push_event(
+            Severity::Info,
+            crate::app::EventCategory::Network,
+            "VPN down".into(),
+        );
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("events (2 this session)"));
+        assert!(out.contains("▲ gateway unresponsive"));
+        assert!(out.contains("VPN down"));
+        assert!(out.contains("analysis"), "category label says analysis");
+        assert!(!out.contains("verdict"), "the word verdict is out of the UX");
+        assert!(out.contains("network"));
+        // Newest (VPN down) renders above the older analysis event.
+        assert!(out.find("VPN down").unwrap() < out.find("▲ gateway unresponsive").unwrap());
+        assert!(out.contains("press e or Esc to close"));
+    }
+
+    /// A graphed mid-path hop must not promise a web check that never comes.
+    #[test]
+    fn web_strip_names_hops_as_non_destinations() {
+        let mut s = AppState::new(vec![]);
+        let mut hop = crate::app::TargetStat::new(
+            "hop 2→1.1.1.1".into(),
+            "192.184.208.23".parse().unwrap(),
+        );
+        hop.discovered = true;
+        for _ in 0..10 {
+            hop.record_reply(4.0);
+        }
+        s.targets.push(hop);
+        s.graph_target = 0;
+        s.fullscreen = true; // guarantees the web strip is drawn
+        let out = draw(&s, 120, 40);
+        assert!(out.contains("mid-path router — not a web destination"));
+        assert!(!out.contains("checking…"));
+    }
+
+    #[test]
+    fn triage_overlay_lists_findings_with_evidence() {
+        let mut s = AppState::new(vec![]);
+        s.overlay = Overlay::Triage;
+        s.verdict.triage = crate::verdict::evaluate(&s);
+        s.verdict.current = Verdict::Problems(vec![finding(Severity::Down)]);
+        let out = draw(&s, 100, 30);
+        assert!(out.contains("gateway unresponsive"));
+        assert!(!out.contains("likely"), "confidence words stay out of the UX");
+        assert!(out.contains("gateway 192.168.1.1: 100% loss"));
     }
 
     #[test]
@@ -2906,7 +3637,7 @@ mod tests {
     #[test]
     fn help_lists_every_key_and_fits_a_standard_terminal() {
         let mut s = AppState::new(vec![]);
-        s.show_help = true;
+        s.overlay = Overlay::Help;
         let out = draw(&s, 80, 24);
         for c in out.as_bytes().chunks(80) {
             println!("{}", String::from_utf8_lossy(c).trim_end());
@@ -2934,6 +3665,9 @@ mod tests {
             "t",
             "m",
             "v",
+            "y",
+            "e",
+            "N",
         ] {
             assert!(out.contains(key), "help is missing a binding for {key:?}");
         }
@@ -2966,7 +3700,7 @@ mod tests {
     #[test]
     fn help_falls_back_to_one_column_when_narrow() {
         let mut s = AppState::new(vec![]);
-        s.show_help = true;
+        s.overlay = Overlay::Help;
         let out = draw(&s, 50, 40);
         assert!(out.contains("Connection Quality"));
         assert!(out.contains("cycle panels"));
@@ -2975,7 +3709,7 @@ mod tests {
     #[test]
     fn help_shows_the_version_and_fits_its_content() {
         let mut s = AppState::new(vec![]);
-        s.show_help = true;
+        s.overlay = Overlay::Help;
         let out = draw(&s, 200, 60);
         assert!(out.contains(&format!("octomon v{}", env!("CARGO_PKG_VERSION"))));
         // The last section used to fall off the bottom of a fixed 22-row box.

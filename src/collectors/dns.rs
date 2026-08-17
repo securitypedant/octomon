@@ -27,13 +27,16 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
 
         // Follow whatever resolvers the current interface reports; these change
         // when the network does, or when a VPN installs its own proxy.
-        let servers: Vec<IpAddr> = {
+        let (servers, scope): (Vec<IpAddr>, u32) = {
             let s = state.lock().unwrap();
-            s.netinfo
-                .dns
-                .iter()
-                .filter_map(|d| d.parse::<IpAddr>().ok())
-                .collect()
+            (
+                s.netinfo
+                    .dns
+                    .iter()
+                    .filter_map(|d| d.parse::<IpAddr>().ok())
+                    .collect(),
+                s.netinfo.iface_index,
+            )
         };
         if servers.is_empty() {
             state.lock().unwrap().dns.clear();
@@ -43,7 +46,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         for server in servers {
             id = id.wrapping_add(1);
             let started = Instant::now();
-            let outcome = query(server, &name, id, cfg.dns_timeout()).await;
+            let outcome = query(server, scope, &name, id, cfg.dns_timeout()).await;
             let elapsed = started.elapsed().as_secs_f64() * 1000.0;
 
             let mut s = state.lock().unwrap();
@@ -90,16 +93,29 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
     }
 }
 
-/// Send one A query and time the answer.
-async fn query(server: IpAddr, name: &str, id: u16, timeout: Duration) -> Result<u16, String> {
+/// Send one A query and time the answer. `scope` is the interface index a
+/// link-local v6 resolver needs — carrier hotspots hand out `fe80::…` as the
+/// DNS server, and without the scope every packet fails with "no route to
+/// host" even though resolution works fine for the system.
+async fn query(
+    server: IpAddr,
+    scope: u32,
+    name: &str,
+    id: u16,
+    timeout: Duration,
+) -> Result<u16, String> {
     let bind: SocketAddr = match server {
         IpAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
         IpAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
     };
     let sock = UdpSocket::bind(bind).await.map_err(|e| short(&e))?;
-    sock.connect(SocketAddr::new(server, 53))
-        .await
-        .map_err(|e| short(&e))?;
+    let dest: SocketAddr = match server {
+        IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80 => {
+            std::net::SocketAddrV6::new(v6, 53, 0, scope).into()
+        }
+        other => SocketAddr::new(other, 53),
+    };
+    sock.connect(dest).await.map_err(|e| short(&e))?;
 
     let packet = build_query(id, name);
     sock.send(&packet).await.map_err(|e| short(&e))?;
@@ -228,7 +244,7 @@ mod tests {
         for server in ["1.1.1.1", "8.8.8.8"] {
             let ip: IpAddr = server.parse().unwrap();
             let started = Instant::now();
-            let r = query(ip, "example.com", 1, Duration::from_secs(2)).await;
+            let r = query(ip, 0, "example.com", 1, Duration::from_secs(2)).await;
             println!(
                 "{server}: {:?} in {:.1}ms",
                 r,

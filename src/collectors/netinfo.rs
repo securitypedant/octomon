@@ -16,11 +16,31 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
     // table, so the answer is cached per tunnel device rather than redone every
     // tick.
     let mut vendor_cache: Option<(String, String)> = None;
+    // Whether the default route has vanished entirely (Wi-Fi switched off,
+    // cable pulled) — a different situation from moving to another network.
+    let mut link_lost = false;
     loop {
         // Re-probe on the timer or when the user presses 'r'.
         tokio::select! {
             _ = ticker.tick() => {}
             _ = refresh.notified() => {}
+        }
+        if netdev::get_default_interface().is_err() {
+            let mut s = state.lock().unwrap();
+            if !link_lost && !s.netinfo.iface.is_empty() {
+                link_lost = true;
+                let medium = s.netinfo.medium;
+                s.notice_event(
+                    crate::verdict::Severity::Down,
+                    crate::app::EventCategory::Network,
+                    match medium {
+                        LinkMedium::WiFi => "link lost — Wi-Fi is off or disconnected".to_string(),
+                        m if m.is_wired() => "link lost — cable unplugged?".to_string(),
+                        _ => "link lost — no default route".to_string(),
+                    },
+                );
+            }
+            continue;
         }
         if let Ok(iface) = netdev::get_default_interface() {
             let mut info = build(&iface);
@@ -58,15 +78,70 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
             let was = s.netinfo.identity();
             let now = info.identity();
             let prev_wifi = s.netinfo.wifi.take();
-            let moved = !s.netinfo.iface.is_empty() && was != now;
+            let prev_dns = s.netinfo.dns.clone();
+            let had_tunnel = s.netinfo.tunnel.is_some();
+            let had_info = !s.netinfo.iface.is_empty();
+            let moved = had_info && was != now;
             s.netinfo = info;
             s.netinfo.wifi = if moved { None } else { prev_wifi };
+            let restored = std::mem::take(&mut link_lost);
+            if restored {
+                // The link is back (same network or not): stats accumulated
+                // while it was down describe the outage, not the path — left
+                // alone they'd keep the panel red for minutes.
+                s.reset_quality_stats();
+                let message = format!(
+                    "link restored → {} — connection stats reset",
+                    s.netinfo.iface
+                );
+                s.push_event(
+                    crate::verdict::Severity::Info,
+                    crate::app::EventCategory::Network,
+                    message,
+                );
+            }
             if moved {
                 // Everything derived from the old network — discovered hops, the
-                // path monitor, which interface throughput reads — is now stale.
+                // path monitor, which interface throughput reads — is now stale,
+                // and that includes every accumulated latency/loss figure.
                 s.net_change_seq += 1;
-                s.notice = Some(format!("network changed → {}", s.netinfo.iface));
+                s.reset_quality_stats();
+                // A tunnel coming up or down changes the identity too; name the
+                // VPN rather than reporting a bare interface swap.
+                let message = match (had_tunnel, s.netinfo.tunnel.is_some()) {
+                    (false, true) => format!(
+                        "VPN up — {}",
+                        s.netinfo.tunnel_label().unwrap_or_default()
+                    ),
+                    (true, false) => "VPN down".to_string(),
+                    // The SSID isn't known yet (the Wi-Fi probe is slow); the
+                    // gateway is the most identifying fact available now, and
+                    // the wifi collector names the network moments later.
+                    _ => format!(
+                        "network changed → {}{}",
+                        s.netinfo.iface,
+                        if s.netinfo.gateway_ip != "-" && !s.netinfo.gateway_ip.is_empty() {
+                            format!(" · gateway {}", s.netinfo.gateway_ip)
+                        } else {
+                            String::new()
+                        }
+                    ),
+                };
+                s.notice_event(
+                    crate::verdict::Severity::Info,
+                    crate::app::EventCategory::Network,
+                    message,
+                );
                 changed.notify_waiters();
+            } else if had_info && s.netinfo.dns != prev_dns {
+                // Same network, new resolvers (DHCP renewal, profile change) —
+                // invisible in any average, classic "it broke at 3pm" material.
+                let message = format!("DNS servers changed → {}", s.netinfo.dns.join(", "));
+                s.push_event(
+                    crate::verdict::Severity::Info,
+                    crate::app::EventCategory::Network,
+                    message,
+                );
             }
         }
     }
@@ -117,6 +192,7 @@ fn build(iface: &netdev::Interface) -> NetInfo {
     let medium = classify(iface);
     NetInfo {
         iface: counter_name(iface),
+        iface_index: iface.index,
         iface_label: iface.friendly_name.clone().unwrap_or_default(),
         ipv4,
         ipv6,

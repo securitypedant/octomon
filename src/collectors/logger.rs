@@ -21,6 +21,8 @@ const HEADER: &str = "timestamp,category,subject,metric,value,unit\n";
 pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
     let mut ticker = tokio::time::interval(cfg.sample_interval());
     let mut file: Option<tokio::fs::File> = None;
+    // Timeline high-water mark: only events newer than this go into the CSV.
+    let mut events_seen: u64 = 0;
 
     loop {
         ticker.tick().await;
@@ -33,17 +35,31 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
                     Ok((f, path)) => {
                         file = Some(f);
                         let mut s = state.lock().unwrap();
+                        // The recording covers from now on; history that predates
+                        // it belongs to the events overlay, not this file.
+                        events_seen = s.events_total;
                         s.log = Some(LogStatus {
                             path: path.clone(),
                             rows: 0,
                             started: std::time::Instant::now(),
                         });
-                        s.notice = Some(format!("recording → {}", path.display()));
+                        // No transient notice: the footer-right "● rec →" and
+                        // the header REC badge are the live feedback, and the
+                        // notice slot must stay free for the analysis line.
+                        s.push_event(
+                            crate::verdict::Severity::Info,
+                            crate::app::EventCategory::Logging,
+                            format!("recording → {}", path.display()),
+                        );
                     }
                     Err(e) => {
                         let mut s = state.lock().unwrap();
                         s.logging_requested = false;
-                        s.notice = Some(format!("could not start recording: {e}"));
+                        s.notice_event(
+                            crate::verdict::Severity::Info,
+                            crate::app::EventCategory::Logging,
+                            format!("could not start recording: {e}"),
+                        );
                     }
                 }
                 continue; // first row on the next tick
@@ -55,11 +71,15 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
                 }
                 let mut s = state.lock().unwrap();
                 if let Some(status) = s.log.take() {
-                    s.notice = Some(format!(
-                        "recording stopped — {} rows → {}",
-                        status.rows,
-                        status.path.display()
-                    ));
+                    s.push_event(
+                        crate::verdict::Severity::Info,
+                        crate::app::EventCategory::Logging,
+                        format!(
+                            "recording stopped — {} rows → {}",
+                            status.rows,
+                            status.path.display()
+                        ),
+                    );
                 }
                 continue;
             }
@@ -71,7 +91,8 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         let (body, rows) = {
             let s = state.lock().unwrap();
             let stamp = chrono::Local::now().to_rfc3339();
-            let body = format_rows(&s, &stamp);
+            let mut body = format_rows(&s, &stamp);
+            body.push_str(&format_events(&s, &stamp, &mut events_seen));
             let rows = body.lines().count() as u64;
             (body, rows)
         };
@@ -260,6 +281,25 @@ fn format_rows(s: &AppState, stamp: &str) -> String {
     out
 }
 
+/// Timeline events newer than the high-water mark, one row each. Events are
+/// text, not measurements, so the message rides in the value column (quoted)
+/// with the severity as the metric: `…,event,verdict,degraded,"▲ …",`.
+fn format_events(s: &AppState, stamp: &str, seen: &mut u64) -> String {
+    let mut out = String::new();
+    let new = (s.events_total.saturating_sub(*seen) as usize).min(s.events.len());
+    for e in s.events.iter().skip(s.events.len() - new) {
+        let _ = writeln!(
+            out,
+            "{stamp},event,{},{},{},",
+            e.category.label(),
+            e.severity.label(),
+            field(&e.message)
+        );
+    }
+    *seen = s.events_total;
+    out
+}
+
 /// Quote a CSV field when it contains anything that would break parsing.
 /// Target labels and process names are user- and system-supplied.
 fn field(v: &str) -> String {
@@ -307,6 +347,37 @@ mod tests {
         assert!(out.contains(",target,Cloudflare,rtt_ms,12.500,ms"));
         assert!(out.contains(",throughput,en0,down_bps,2048,B/s"));
         assert!(out.contains(",machine,,cpu_pct,"));
+    }
+
+    /// Events go to CSV exactly once, past a high-water mark, message quoted.
+    #[test]
+    fn events_drain_once_past_the_watermark() {
+        let mut s = AppState::new(vec![]);
+        s.push_event(
+            crate::verdict::Severity::Degraded,
+            crate::app::EventCategory::Analysis,
+            "▲ gateway, unresponsive".into(),
+        );
+
+        let mut seen = 0;
+        let out = format_events(&s, "T", &mut seen);
+        assert_eq!(
+            out,
+            "T,event,analysis,degraded,\"▲ gateway, unresponsive\",\n"
+        );
+        assert_eq!(seen, 1);
+
+        // Nothing new: nothing written, even though the event is still held.
+        assert!(format_events(&s, "T", &mut seen).is_empty());
+
+        s.push_event(
+            crate::verdict::Severity::Info,
+            crate::app::EventCategory::Network,
+            "VPN down".into(),
+        );
+        let out = format_events(&s, "T", &mut seen);
+        assert_eq!(out.lines().count(), 1);
+        assert!(out.contains("network,info,VPN down"));
     }
 
     /// A label containing a comma must not shift every later column.
