@@ -719,7 +719,7 @@ async fn add_target(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Confi
 fn print_snapshot(s: &AppState) {
     println!("== octomon --check ==");
     let n = s.window_samples();
-    println!("\n[Connection Quality]  (window {}s)", s.window_secs);
+    println!("\n[Connection Quality]  (window {})", s.window_label());
     let ms = |v: Option<f64>| v.map(|x| format!("{x:.1}")).unwrap_or_else(|| "—".into());
     for t in &s.targets {
         let st = t.stats(n);

@@ -945,12 +945,21 @@ fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
 fn quality_summary(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
     let mut spans = vec![
         Span::styled(
-            format!("window {}s ", s.window_secs),
+            format!("window {} ", s.window_label()),
             Style::new().fg(Color::Gray),
         ),
         Span::styled("[w]", Style::new().fg(Color::Cyan)),
         Span::raw("  "),
     ];
+    // Say when the buffer, not the chosen window, is setting the reach. The
+    // figures are still honest — they just cover less than the label implies,
+    // and silently overstating them is worse than one extra clause.
+    if s.window_is_capped() {
+        spans.push(Span::styled(
+            format!("(capped at {} samples)  ", s.window_samples()),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
     if let Some(t) = s.targets.get(s.graph_target) {
         let st = t.stats(n);
         spans.push(Span::styled(
@@ -1372,7 +1381,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("s", "run speed test"),
         row("p", "pause / resume refresh"),
         row("r", "re-probe network info"),
-        row("w", "stats window 30/60/300s"),
+        row("w", "stats window 1m/5m/15m"),
         row("l", "start / stop CSV recording"),
         row("?", "toggle this help"),
         row("q / Ctrl+C", "quit"),
