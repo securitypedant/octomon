@@ -5,7 +5,6 @@
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
-use surge_ping::Client;
 use tokio::process::Command;
 
 use crate::app::{AppState, TargetStat};
@@ -15,7 +14,7 @@ use crate::platform::traceroute as tr;
 
 const MAX_HOPS: usize = 4; // gateway (1) + next three
 
-pub async fn run(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) {
+pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Config) {
     // Configurable: the useful probe target depends on the network. Empty
     // disables discovery entirely, like `public_ip_url`.
     let probe = cfg.discovery_probe.trim().to_string();
@@ -62,7 +61,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) 
             }
         };
         if added {
-            ping::spawn_for(state.clone(), client.clone(), cfg.clone(), id, addr);
+            ping::spawn_for(state.clone(), clients.clone(), cfg.clone(), id, addr);
         }
     }
 }
@@ -70,7 +69,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) 
 /// Re-run discovery after the machine moved to a different network: the old
 /// gateway and hops belong to a network that is no longer reachable, so they are
 /// dropped before the path is walked again. Hand-added targets are left alone.
-pub async fn refresh(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) {
+pub async fn refresh(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Config) {
     {
         let mut s = state.lock().unwrap();
         s.targets.retain(|t| !t.discovered);
@@ -79,15 +78,15 @@ pub async fn refresh(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Conf
         s.selected = s.selected.min(last);
         s.graph_target = s.graph_target.min(last);
     }
-    run(state.clone(), client.clone(), cfg.clone()).await;
-    public_ip(state, client, cfg).await;
+    run(state.clone(), clients.clone(), cfg.clone()).await;
+    public_ip(state, clients, cfg).await;
 }
 
 /// Watch for the network changing under us and rebuild everything derived from
 /// it: the discovered targets, and the path monitor if one is running.
 pub async fn watch(
     state: Arc<Mutex<AppState>>,
-    client: Arc<Client>,
+    clients: ping::Clients,
     cfg: Config,
     changed: Arc<tokio::sync::Notify>,
 ) {
@@ -111,14 +110,14 @@ pub async fn watch(
         }
         seen = seq;
 
-        refresh(state.clone(), client.clone(), cfg.clone()).await;
+        refresh(state.clone(), clients.clone(), cfg.clone()).await;
 
         // A path monitored on the old network says nothing about the new one.
         if let Some((dest, label)) = monitoring {
             let label = label.split(" (").next().unwrap_or(&label).to_string();
             crate::collectors::hopmon::start(
                 state.clone(),
-                client.clone(),
+                clients.clone(),
                 cfg.clone(),
                 dest,
                 label,
@@ -130,7 +129,7 @@ pub async fn watch(
 /// Discover the machine's public IP from `cfg.public_ip_url` (a plain-text IP
 /// endpoint) and add it as a target. No-op if the URL is empty or the response
 /// isn't a valid IP.
-pub async fn public_ip(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config) {
+pub async fn public_ip(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Config) {
     if cfg.public_ip_url.trim().is_empty() {
         return;
     }
@@ -161,7 +160,7 @@ pub async fn public_ip(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Co
         }
     };
     if added {
-        ping::spawn_for(state, client, cfg, id, addr);
+        ping::spawn_for(state, clients, cfg, id, addr);
     }
 }
 

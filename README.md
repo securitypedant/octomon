@@ -12,9 +12,46 @@ network, the Wi-Fi, the ISP, or your own machine that's misbehaving.
 
 ## What it shows
 
-Four panels, all updating live. Everything below works unprivileged on macOS;
-Linux and Windows each hold one thing back, covered in
-[Privileges](#privileges).
+Four panels, all updating live — plus, as of v0.5.0, **an actual answer**. A
+**verdict line** at the bottom of the screen synthesizes everything octomon
+measures into one headline ("`▲ gateway unresponsive — likely (+1 more)`" or
+"`● connection healthy`"), and it never bluffs: press **`y`** ("why") for the
+**triage ladder** — every subsystem from your machine outward (machine → link →
+gateway → DNS → ISP path → internet → web → destinations) with its status *and
+the data behind it*, healthy rungs included. Simultaneous causes are all
+reported and ranked; a busy CPU is never allowed to hide a dead gateway, and a
+VPN is called out as a caveat on everything measured through it.
+
+Supporting that verdict:
+
+- **Per-network baselines** — octomon learns what *normal* looks like on each
+  network you use (gateway latency, DNS, signal, speed-test results), keyed by
+  a location fingerprint (SSID + gateway MAC), learned only from healthy
+  minutes so an incident never poisons the baseline it's judged against. Name
+  the current network with **`N`** ("Home", "Office") and the analysis reads
+  "gateway 41ms vs ~9ms normal at Home"; **`L`** lists every stored location
+  and its learned normals. Everything stays on your machine.
+- **Event timeline** (**`e`**) — the retroactive answer to "what happened
+  during that call ten minutes ago?": verdict findings raising and clearing
+  (with durations), network/SSID/DNS changes, VPN up/down, speed-test results,
+  all timestamped. Also drained into the CSV recording.
+- **HTTP reachability** — ICMP can be perfect while browsing is broken, so
+  octomon also probes a connectivity-check endpoint the way a browser would,
+  once per address family. Detects **captive portals** ("open the sign-in
+  page"), **web-blocked-while-ping-works** (proxy/firewall), and **broken IPv6
+  with working IPv4** — the classic "pages stall then load". Defaults to your
+  OS's own check endpoint (zero new parties learn you're online) and verifies
+  any failure against a second, independent provider before raising a finding.
+- **Doctor mode** — `octomon --doctor` observes headless for ~20 seconds
+  (tune with `--observe SECS`, add `--speedtest` for a full workup) and prints
+  the analysis, this network's learned normal, the raw measurements and recent
+  events; `--json` emits the same report for machines. **Redacted by default**
+  (SSID, IPs, MACs masked; ISP-side hop detail kept) so it's safe to paste
+  straight into a forum post or ISP ticket — `--full` prints everything. Exit
+  codes for scripting: `0` healthy, `1` problems found, `3` couldn't measure.
+
+The four panels — everything below works unprivileged on macOS; Linux and
+Windows each hold one thing back, covered in [Privileges](#privileges):
 
 - **Connection Quality** — ICMP latency to configurable targets with a full
   distribution (last / avg / p95 / max), **jitter**, **packet loss**, and a

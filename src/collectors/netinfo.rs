@@ -16,11 +16,57 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
     // table, so the answer is cached per tunnel device rather than redone every
     // tick.
     let mut vendor_cache: Option<(String, String)> = None;
+    // Whether the default route has vanished entirely (Wi-Fi switched off,
+    // cable pulled) — a different situation from moving to another network.
+    let mut link_lost = false;
+    // Physical interfaces seen last tick, for plug/unplug events. `None` until
+    // the first pass so startup doesn't announce every existing adapter.
+    let mut known_ifaces: Option<std::collections::HashMap<String, LinkMedium>> = None;
     loop {
         // Re-probe on the timer or when the user presses 'r'.
         tokio::select! {
             _ = ticker.tick() => {}
             _ = refresh.notified() => {}
+        }
+
+        // Announce physical interfaces appearing or disappearing even when the
+        // default route doesn't move. "Cable plugged in but the OS still
+        // routes via Wi-Fi" is otherwise invisible — and it's the classic way
+        // a USB dongle quietly fails to take over.
+        let current: std::collections::HashMap<String, LinkMedium> =
+            physical_interfaces().into_iter().collect();
+        if let Some(prev) = known_ifaces.as_ref() {
+            let default_name = state.lock().unwrap().netinfo.iface.clone();
+            let messages = iface_changes(prev, &current, &default_name);
+            if !messages.is_empty() {
+                let mut s = state.lock().unwrap();
+                for m in messages {
+                    s.push_event(
+                        crate::verdict::Severity::Info,
+                        crate::app::EventCategory::Network,
+                        m,
+                    );
+                }
+            }
+        }
+        known_ifaces = Some(current);
+
+        if netdev::get_default_interface().is_err() {
+            let mut s = state.lock().unwrap();
+            if !link_lost && !s.netinfo.iface.is_empty() {
+                link_lost = true;
+                let medium = s.netinfo.medium;
+                s.notice_event(
+                    crate::verdict::Severity::Down,
+                    crate::app::EventCategory::Network,
+                    match medium {
+                        LinkMedium::WiFi => "link lost — Wi-Fi is off or disconnected".to_string(),
+                        m if m.is_wired() => "link lost — cable unplugged?".to_string(),
+                        _ => "link lost — no default route".to_string(),
+                    },
+                );
+            }
+            continue;
         }
         if let Ok(iface) = netdev::get_default_interface() {
             let mut info = build(&iface);
@@ -58,15 +104,69 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
             let was = s.netinfo.identity();
             let now = info.identity();
             let prev_wifi = s.netinfo.wifi.take();
-            let moved = !s.netinfo.iface.is_empty() && was != now;
+            let prev_dns = s.netinfo.dns.clone();
+            let had_tunnel = s.netinfo.tunnel.is_some();
+            let had_info = !s.netinfo.iface.is_empty();
+            let moved = had_info && was != now;
             s.netinfo = info;
             s.netinfo.wifi = if moved { None } else { prev_wifi };
+            let restored = std::mem::take(&mut link_lost);
+            if restored {
+                // The link is back (same network or not): stats accumulated
+                // while it was down describe the outage, not the path — left
+                // alone they'd keep the panel red for minutes.
+                s.reset_quality_stats();
+                let message = format!(
+                    "link restored → {} — connection stats reset",
+                    s.netinfo.iface
+                );
+                s.push_event(
+                    crate::verdict::Severity::Info,
+                    crate::app::EventCategory::Network,
+                    message,
+                );
+            }
             if moved {
                 // Everything derived from the old network — discovered hops, the
-                // path monitor, which interface throughput reads — is now stale.
+                // path monitor, which interface throughput reads — is now stale,
+                // and that includes every accumulated latency/loss figure.
                 s.net_change_seq += 1;
-                s.notice = Some(format!("network changed → {}", s.netinfo.iface));
+                s.reset_quality_stats();
+                // A tunnel coming up or down changes the identity too; name the
+                // VPN rather than reporting a bare interface swap.
+                let message = match (had_tunnel, s.netinfo.tunnel.is_some()) {
+                    (false, true) => {
+                        format!("VPN up — {}", s.netinfo.tunnel_label().unwrap_or_default())
+                    }
+                    (true, false) => "VPN down".to_string(),
+                    // The SSID isn't known yet (the Wi-Fi probe is slow); the
+                    // gateway is the most identifying fact available now, and
+                    // the wifi collector names the network moments later.
+                    _ => format!(
+                        "network changed → {}{}",
+                        s.netinfo.iface,
+                        if s.netinfo.gateway_ip != "-" && !s.netinfo.gateway_ip.is_empty() {
+                            format!(" · gateway {}", s.netinfo.gateway_ip)
+                        } else {
+                            String::new()
+                        }
+                    ),
+                };
+                s.notice_event(
+                    crate::verdict::Severity::Info,
+                    crate::app::EventCategory::Network,
+                    message,
+                );
                 changed.notify_waiters();
+            } else if had_info && s.netinfo.dns != prev_dns {
+                // Same network, new resolvers (DHCP renewal, profile change) —
+                // invisible in any average, classic "it broke at 3pm" material.
+                let message = format!("DNS servers changed → {}", s.netinfo.dns.join(", "));
+                s.push_event(
+                    crate::verdict::Severity::Info,
+                    crate::app::EventCategory::Network,
+                    message,
+                );
             }
         }
     }
@@ -117,6 +217,7 @@ fn build(iface: &netdev::Interface) -> NetInfo {
     let medium = classify(iface);
     NetInfo {
         iface: counter_name(iface),
+        iface_index: iface.index,
         iface_label: iface.friendly_name.clone().unwrap_or_default(),
         ipv4,
         ipv6,
@@ -137,6 +238,56 @@ fn build(iface: &netdev::Interface) -> NetInfo {
         tunnel_is_split: false,
         wifi: None, // filled in by the caller for Wi-Fi links
     }
+}
+
+/// Physical interfaces worth announcing: up, addressed, and a medium a human
+/// plugs or toggles (virtual/tunnel devices have their own events).
+fn physical_interfaces() -> Vec<(String, LinkMedium)> {
+    netdev::get_interfaces()
+        .iter()
+        .filter(|i| !i.ipv4.is_empty() || !i.ipv6.is_empty())
+        .map(|i| (counter_name(i), classify(i)))
+        .filter(|(_, m)| {
+            matches!(
+                m,
+                LinkMedium::WiFi | LinkMedium::Ethernet | LinkMedium::Cellular
+            )
+        })
+        .collect()
+}
+
+/// Messages for the diff between two interface snapshots. Pure, so the wording
+/// rules are testable: an arriving interface that is NOT the default route
+/// says so — that is the whole warning.
+fn iface_changes(
+    prev: &std::collections::HashMap<String, LinkMedium>,
+    current: &std::collections::HashMap<String, LinkMedium>,
+    default_name: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, medium) in current {
+        if !prev.contains_key(name) {
+            let note = if name != default_name && !default_name.is_empty() {
+                format!(" — default route still {default_name}")
+            } else {
+                String::new()
+            };
+            out.push(format!(
+                "interface connected: {name} ({}){note}",
+                medium.label()
+            ));
+        }
+    }
+    for (name, medium) in prev {
+        if !current.contains_key(name) {
+            out.push(format!(
+                "interface disconnected: {name} ({})",
+                medium.label()
+            ));
+        }
+    }
+    out.sort();
+    out
 }
 
 /// The interface name that `sysinfo`'s counters are keyed on.
@@ -379,7 +530,41 @@ fn tunnel_vendor(iface_name: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Ipv4Addr, Ipv6Addr, is_tunnel_name, vendor_from_addrs};
+    use super::{Ipv4Addr, Ipv6Addr, iface_changes, is_tunnel_name, vendor_from_addrs};
+
+    /// The Ubuntu USB-dongle lesson: a wired interface coming up while Wi-Fi
+    /// keeps the default route must be announced — with the "default route
+    /// still Wi-Fi" warning, because that is the whole problem.
+    #[test]
+    fn hotplugged_interface_warns_when_the_route_does_not_follow() {
+        use crate::app::LinkMedium;
+        use std::collections::HashMap;
+        let wifi_only: HashMap<String, LinkMedium> =
+            [("wlp2s0".to_string(), LinkMedium::WiFi)].into();
+        let both: HashMap<String, LinkMedium> = [
+            ("wlp2s0".to_string(), LinkMedium::WiFi),
+            ("enx00e04c".to_string(), LinkMedium::Ethernet),
+        ]
+        .into();
+
+        // Plugged in, route still on Wi-Fi: say so.
+        let msgs = iface_changes(&wifi_only, &both, "wlp2s0");
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].contains("interface connected: enx00e04c"));
+        assert!(msgs[0].contains("default route still wlp2s0"));
+
+        // Plugged in and it IS the default: no warning clause.
+        let msgs = iface_changes(&wifi_only, &both, "enx00e04c");
+        assert!(!msgs[0].contains("default route still"));
+
+        // Unplugged: announced too.
+        let msgs = iface_changes(&both, &wifi_only, "wlp2s0");
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].contains("interface disconnected: enx00e04c"));
+
+        // No change, no chatter.
+        assert!(iface_changes(&both, &both, "wlp2s0").is_empty());
+    }
 
     /// Real values observed on a Mac running WARP with NordVPN also installed
     /// and its helpers resident: the interface must decide, not the process list.

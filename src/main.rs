@@ -5,12 +5,14 @@
 //! Input is read on a dedicated OS thread and delivered over a channel.
 
 mod app;
+mod baseline;
 mod collectors;
 mod config;
 mod platform;
 mod store;
 mod ui;
 mod util;
+mod verdict;
 
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -19,10 +21,9 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use surge_ping::Client;
 use tokio::sync::{Notify, mpsc};
 
-use app::{AppState, InputMode, Panel, QualityView, SpeedStatus, SubPane, TargetStat};
+use app::{AppState, InputMode, Overlay, Panel, QualityView, SpeedStatus, SubPane, TargetStat};
 use config::Config;
 
 /// Handles shared with the input loop for issuing side effects.
@@ -30,7 +31,7 @@ struct Ctx {
     state: Arc<Mutex<AppState>>,
     speedtest_trigger: Arc<Notify>,
     netinfo_refresh: Arc<Notify>,
-    ping_client: Option<Arc<Client>>,
+    ping_clients: collectors::ping::Clients,
     cfg: Config,
 }
 
@@ -41,6 +42,30 @@ struct Cli {
     /// Run collectors briefly, print a text snapshot, then exit (no TUI).
     #[arg(long)]
     check: bool,
+
+    /// One-shot diagnosis: observe for ~20s, print the verdict with its
+    /// evidence and a paste-able report, then exit. Exit codes: 0 healthy,
+    /// 1 problems found, 3 could not measure.
+    #[arg(long)]
+    doctor: bool,
+
+    /// With --doctor: also run a speed test (observation takes ~45s).
+    #[arg(long)]
+    speedtest: bool,
+
+    /// With --doctor: print real SSIDs / IPs / MACs instead of redacting them.
+    /// The default output is safe to paste into a forum or ISP ticket.
+    #[arg(long)]
+    full: bool,
+
+    /// With --doctor: how many seconds to observe before reporting
+    /// (default 20, or 45 with --speedtest). Longer = better loss statistics.
+    #[arg(long, value_name = "SECS")]
+    observe: Option<u64>,
+
+    /// With --doctor: emit the report as JSON instead of text.
+    #[arg(long)]
+    json: bool,
 
     /// Disable the on-demand speed test.
     #[arg(long)]
@@ -125,47 +150,57 @@ async fn main() -> Result<()> {
     let speedtest_trigger = Arc::new(Notify::new()); // 's'
     let netinfo_refresh = Arc::new(Notify::new()); // 'r'
 
-    // Shared ICMP client so targets can be added at runtime.
+    // Shared per-family ICMP clients so targets can be added at runtime and v6
+    // addresses (common on carrier hotspots) are probed with the right socket.
     // Unprivileged datagram ICMP needs the kernel to allow it. macOS always
     // does; on Linux it depends on net.ipv4.ping_group_range, which several
     // distributions ship closed. Failing here disables every latency feature,
     // so the reason has to reach the user rather than a log nobody reads.
-    let ping_client = match Client::new(&surge_ping::Config::default()) {
-        Ok(c) => Some(Arc::new(c)),
-        Err(e) => {
-            tracing::error!("failed to create ICMP client: {e}");
-            state.lock().unwrap().icmp_error = Some(icmp_help(&e.to_string()));
-            None
-        }
-    };
+    let (ping_clients, v4_err) = collectors::ping::Clients::open();
+    if let Some(e) = v4_err {
+        tracing::error!("failed to create ICMP client: {e}");
+        state.lock().unwrap().icmp_error = Some(icmp_help(&e));
+    }
     {
         // Interrupt only for things that will visibly not work. A clean setup
         // starts straight into the dashboard.
         let mut s = state.lock().unwrap();
-        s.show_startup_notice =
-            !cli.check && (s.icmp_error.is_some() || !s.missing_tools.is_empty());
+        let headless = cli.check || cli.doctor;
+        if !headless && (s.icmp_error.is_some() || !s.missing_tools.is_empty()) {
+            s.overlay = Overlay::Startup;
+        }
+        // First run: explain what the tool answers and that it learns each
+        // network's normal. Setup problems keep precedence; the explainer then
+        // follows the startup notice's dismissal.
+        if !headless && !cfg.explainer_seen {
+            if s.overlay == Overlay::Startup {
+                s.explainer_pending = true;
+            } else {
+                s.overlay = Overlay::Explainer;
+            }
+        }
     }
     // Raised by the netinfo collector when the machine moves to a different
     // network, so path-dependent state can be rebuilt.
     let network_changed = Arc::new(Notify::new());
 
-    if let Some(client) = ping_client.clone() {
-        collectors::ping::spawn_all(state.clone(), client.clone(), cfg.clone());
+    if ping_clients.available() {
+        collectors::ping::spawn_all(state.clone(), ping_clients.clone(), cfg.clone());
         // Auto-discover the gateway + next hops, and the public IP, as targets.
         if !cli.check {
             tokio::spawn(collectors::discovery::run(
                 state.clone(),
-                client.clone(),
+                ping_clients.clone(),
                 cfg.clone(),
             ));
             tokio::spawn(collectors::discovery::public_ip(
                 state.clone(),
-                client.clone(),
+                ping_clients.clone(),
                 cfg.clone(),
             ));
             tokio::spawn(collectors::discovery::watch(
                 state.clone(),
-                client,
+                ping_clients.clone(),
                 cfg.clone(),
                 network_changed.clone(),
             ));
@@ -173,6 +208,12 @@ async fn main() -> Result<()> {
     }
 
     // Spawn collectors, each on its own cadence.
+    tokio::spawn(verdict::run(state.clone(), cfg.clone()));
+    tokio::spawn(collectors::http::run(
+        state.clone(),
+        cfg.clone(),
+        network_changed.clone(),
+    ));
     tokio::spawn(collectors::throughput::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::vitals::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::dns::run(state.clone(), cfg.clone()));
@@ -188,6 +229,11 @@ async fn main() -> Result<()> {
     ));
     tokio::spawn(collectors::signal::run(state.clone()));
     tokio::spawn(collectors::procbw::run(state.clone()));
+    tokio::spawn(collectors::web::run(state.clone()));
+    tokio::spawn(collectors::resolve::run(
+        state.clone(),
+        network_changed.clone(),
+    ));
     if !cli.no_speedtest {
         tokio::spawn(collectors::speedtest::run(
             state.clone(),
@@ -209,6 +255,50 @@ async fn main() -> Result<()> {
         }
         print_snapshot(&state.lock().unwrap());
         return Ok(());
+    }
+
+    // One-shot doctor: observe with everything running — including discovery
+    // and a hop monitor, which --check deliberately skips — judge once, print
+    // a paste-able report, and exit with a code scripts can branch on.
+    if cli.doctor {
+        // Let discovery find the gateway first, then watch the path to the
+        // first anchor so an ISP-segment fault can be localised headless.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if let Some(t) = cfg.targets.first().filter(|_| ping_clients.available()) {
+            collectors::hopmon::start(
+                state.clone(),
+                ping_clients.clone(),
+                cfg.clone(),
+                t.addr,
+                t.label.clone(),
+            );
+        }
+        // 2s of discovery already elapsed; the rest is the observation window.
+        let speedtest_wanted = cli.speedtest && !cli.no_speedtest;
+        let observe = cli
+            .observe
+            .unwrap_or(if speedtest_wanted { 45 } else { 20 })
+            .clamp(5, 600)
+            .saturating_sub(2);
+        if speedtest_wanted {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            speedtest_trigger.notify_one();
+            tokio::time::sleep(Duration::from_secs(observe.saturating_sub(3).max(1))).await;
+        } else {
+            tokio::time::sleep(Duration::from_secs(observe)).await;
+        }
+        let (report, code) = {
+            let s = state.lock().unwrap();
+            if cli.json {
+                doctor_json(&s, cli.full)
+            } else {
+                doctor_report(&s, cli.full)
+            }
+        };
+        print!("{report}");
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+        std::process::exit(code);
     }
 
     // Read terminal input on a blocking OS thread → async channel.
@@ -234,7 +324,7 @@ async fn main() -> Result<()> {
         state,
         speedtest_trigger,
         netinfo_refresh,
-        ping_client,
+        ping_clients,
         cfg,
     };
     let result = run_ui(&mut terminal, &ctx, rx).await;
@@ -275,20 +365,7 @@ async fn run_ui(
 /// numbers beside it look wrong.
 fn reset_panel(s: &mut AppState) {
     match s.focus {
-        Panel::Quality => {
-            for t in &mut s.targets {
-                t.reset();
-            }
-            // The path monitor's hops carry their own statistics and charts.
-            if let Some(m) = s.hop_monitor.as_mut() {
-                for h in &mut m.hops {
-                    if let Some(stat) = h.stat.as_mut() {
-                        stat.reset();
-                    }
-                }
-            }
-            s.traceroute = None;
-        }
+        Panel::Quality => s.reset_quality_stats(),
         Panel::Bandwidth => {
             s.throughput.down_hist.data.clear();
             s.throughput.up_hist.data.clear();
@@ -374,6 +451,14 @@ enum Side {
     Traceroute(IpAddr, String),
     HopMonitor(IpAddr, String),
     SaveProvider(String),
+    /// Persist the user's name for the current network's baseline.
+    NameNetwork {
+        key: String,
+        label: String,
+        name: String,
+    },
+    /// Read every stored baseline off disk for the locations overlay.
+    LoadLocations,
 }
 
 /// Remove the selected target, pulling the dependent cursors back into range.
@@ -459,9 +544,26 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
         s.notice = None; // any key clears a transient notice
 
         // The setup modal is dismissed by any key, and swallows it so a stray
-        // press does not also trigger an action behind the modal.
-        if s.show_startup_notice && s.input_mode == InputMode::Normal {
-            s.show_startup_notice = false;
+        // press does not also trigger an action behind the modal. The first-run
+        // explainer, when pending, takes the slot the dismissal frees.
+        if s.overlay == Overlay::Startup && s.input_mode == InputMode::Normal {
+            s.overlay = if s.explainer_pending {
+                s.explainer_pending = false;
+                Overlay::Explainer
+            } else {
+                Overlay::None
+            };
+            if !matches!(key.code, KeyCode::Char('q')) && !(ctrl && key.code == KeyCode::Char('c'))
+            {
+                return;
+            }
+        }
+
+        // The explainer is also any-key-dismissed, and is shown exactly once:
+        // dismissal is persisted (off the key path) so it never reappears.
+        if s.overlay == Overlay::Explainer && s.input_mode == InputMode::Normal {
+            s.overlay = Overlay::None;
+            tokio::task::spawn_blocking(Config::persist_explainer_seen);
             if !matches!(key.code, KeyCode::Char('q')) && !(ctrl && key.code == KeyCode::Char('c'))
             {
                 return;
@@ -490,11 +592,99 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 _ => {}
             },
 
-            // --- help overlay: swallow most keys ---
-            InputMode::Normal if s.show_help => match key.code {
+            // --- modal text entry: naming the current network ---
+            InputMode::NameNetwork => match key.code {
+                KeyCode::Enter => {
+                    let name = s.input_buffer.trim().to_string();
+                    s.input_mode = InputMode::Normal;
+                    s.input_buffer.clear();
+                    if let (Some(key), Some(b)) = (s.baseline_key.clone(), s.baseline.as_mut()) {
+                        // Update the in-memory copy immediately for display;
+                        // the file write happens off the key path.
+                        b.name = if name.is_empty() {
+                            None
+                        } else {
+                            Some(name.clone())
+                        };
+                        let label = b.label.clone();
+                        side = Side::NameNetwork { key, label, name };
+                    }
+                }
+                KeyCode::Esc => {
+                    s.input_mode = InputMode::Normal;
+                    s.input_buffer.clear();
+                }
+                KeyCode::Backspace => {
+                    s.input_buffer.pop();
+                }
+                KeyCode::Char(c) if s.input_buffer.len() < 40 => s.input_buffer.push(c),
+                _ => {}
+            },
+
+            // --- help / triage / events overlays: swallow most keys. Each
+            // overlay's own key toggles it and switches from the others, so
+            // flipping between them never needs an Esc in between.
+            InputMode::Normal if s.overlay != Overlay::None => match key.code {
                 KeyCode::Char('q') => s.should_quit = true,
                 KeyCode::Char('c') if ctrl => s.should_quit = true,
-                KeyCode::Esc | KeyCode::Char('?') => s.show_help = false,
+                KeyCode::Esc => s.overlay = Overlay::None,
+                KeyCode::Char('?') => {
+                    s.overlay = if s.overlay == Overlay::Help {
+                        Overlay::None
+                    } else {
+                        Overlay::Help
+                    };
+                }
+                KeyCode::Char('y') => {
+                    s.overlay = if s.overlay == Overlay::Triage {
+                        Overlay::None
+                    } else {
+                        Overlay::Triage
+                    };
+                }
+                KeyCode::Char('e') => {
+                    s.overlay = if s.overlay == Overlay::Events {
+                        Overlay::None
+                    } else {
+                        s.events_scroll = 0;
+                        Overlay::Events
+                    };
+                }
+                KeyCode::Char('L') => {
+                    s.overlay = if s.overlay == Overlay::Locations {
+                        Overlay::None
+                    } else {
+                        s.locations = None;
+                        s.locations_sel = 0;
+                        side = Side::LoadLocations;
+                        Overlay::Locations
+                    };
+                }
+                // Scroll the timeline; clamped so it can't run past the oldest.
+                KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Events => {
+                    s.events_scroll = (s.events_scroll + 1).min(s.events.len().saturating_sub(1));
+                }
+                KeyCode::Down | KeyCode::Char('j') if s.overlay == Overlay::Events => {
+                    s.events_scroll = s.events_scroll.saturating_sub(1);
+                }
+                KeyCode::PageUp if s.overlay == Overlay::Events => {
+                    s.events_scroll = (s.events_scroll + 10).min(s.events.len().saturating_sub(1));
+                }
+                KeyCode::PageDown if s.overlay == Overlay::Events => {
+                    s.events_scroll = s.events_scroll.saturating_sub(10);
+                }
+                // Scroll the locations list.
+                KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Locations => {
+                    s.locations_sel = s.locations_sel.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') if s.overlay == Overlay::Locations => {
+                    let last = s
+                        .locations
+                        .as_ref()
+                        .map(|l| l.len().saturating_sub(1))
+                        .unwrap_or(0);
+                    s.locations_sel = (s.locations_sel + 1).min(last);
+                }
                 _ => {}
             },
 
@@ -511,7 +701,14 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         s.quality_view = QualityView::Graph;
                     }
                 }
-                KeyCode::Char('?') => s.show_help = true,
+                KeyCode::Char('?') => s.overlay = Overlay::Help,
+                // 'y' answers "why does the verdict say that": the triage ladder.
+                KeyCode::Char('y') => s.overlay = Overlay::Triage,
+                // 'e' opens the session timeline.
+                KeyCode::Char('e') => {
+                    s.events_scroll = 0;
+                    s.overlay = Overlay::Events;
+                }
                 KeyCode::Tab => s.focus = next_panel(s.focus),
                 KeyCode::BackTab => s.focus = prev_panel(s.focus),
                 KeyCode::Char('f') => s.fullscreen = !s.fullscreen,
@@ -526,6 +723,23 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 KeyCode::Char('l') => s.logging_requested = !s.logging_requested,
                 // Shift+R resets the focused panel's accumulated data.
                 KeyCode::Char('R') => reset_panel(&mut s),
+                // Shift+L lists every stored network location (Network panel).
+                KeyCode::Char('L') if s.focus == Panel::NetInfo => {
+                    s.locations = None;
+                    s.locations_sel = 0;
+                    s.overlay = Overlay::Locations;
+                    side = Side::LoadLocations;
+                }
+                // Shift+N names the current network's baseline ("Home"…).
+                // Pre-filled with the existing name so editing beats retyping.
+                KeyCode::Char('N') if s.baseline_key.is_some() => {
+                    s.input_buffer = s
+                        .baseline
+                        .as_ref()
+                        .and_then(|b| b.name.clone())
+                        .unwrap_or_default();
+                    s.input_mode = InputMode::NameNetwork;
+                }
                 // 'v' cycles the speed-test provider (Bandwidth panel) + persists.
                 KeyCode::Char('v') if s.focus == Panel::Bandwidth => {
                     let n = s.speedtest_provider_names.len();
@@ -634,6 +848,10 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         let (addr, label) = (t.addr, t.label.clone());
                         let already = s.hop_monitor.as_ref().is_some_and(|m| m.dest == addr);
                         s.quality_view = QualityView::HopMonitor;
+                        // The web strip follows the monitored target too — the
+                        // point of monitoring one is that it's the one you care
+                        // about right now.
+                        s.graph_target = s.selected;
                         if !already {
                             side = Side::HopMonitor(addr, label);
                         }
@@ -656,40 +874,79 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
         Side::None => {}
         Side::Speedtest => ctx.speedtest_trigger.notify_one(),
         Side::Refresh => ctx.netinfo_refresh.notify_one(),
-        Side::AddTarget(input) => match ctx.ping_client.clone() {
-            Some(client) => {
+        Side::AddTarget(input) => {
+            if ctx.ping_clients.available() {
                 tokio::spawn(add_target(
                     ctx.state.clone(),
-                    client,
+                    ctx.ping_clients.clone(),
                     ctx.cfg.clone(),
                     input,
                 ));
+            } else {
+                ctx.state.lock().unwrap().notice = Some("ICMP unavailable".to_string());
             }
-            None => ctx.state.lock().unwrap().notice = Some("ICMP unavailable".to_string()),
-        },
+        }
         Side::Traceroute(addr, label) => {
             collectors::traceroute::start(ctx.state.clone(), addr, label);
         }
-        Side::HopMonitor(addr, label) => match ctx.ping_client.clone() {
-            Some(client) => {
-                collectors::hopmon::start(ctx.state.clone(), client, ctx.cfg.clone(), addr, label)
+        Side::HopMonitor(addr, label) => {
+            if ctx.ping_clients.available() {
+                collectors::hopmon::start(
+                    ctx.state.clone(),
+                    ctx.ping_clients.clone(),
+                    ctx.cfg.clone(),
+                    addr,
+                    label,
+                );
+            } else {
+                ctx.state.lock().unwrap().notice = Some("ICMP unavailable".to_string());
             }
-            None => ctx.state.lock().unwrap().notice = Some("ICMP unavailable".to_string()),
-        },
+        }
         Side::SaveProvider(name) => {
             tokio::task::spawn_blocking(move || config::Config::persist_provider(&name));
+        }
+        Side::NameNetwork { key, label, name } => {
+            tokio::task::spawn_blocking(move || baseline::name_network(&key, &label, &name));
+        }
+        Side::LoadLocations => {
+            let state = ctx.state.clone();
+            tokio::spawn(async move {
+                let mut all: Vec<(String, baseline::Baseline)> =
+                    tokio::task::spawn_blocking(baseline::load)
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect();
+                // Most-established first, named before unnamed on ties.
+                all.sort_by(|a, b| {
+                    b.1.samples.cmp(&a.1.samples).then_with(|| {
+                        a.1.display_name()
+                            .to_lowercase()
+                            .cmp(&b.1.display_name().to_lowercase())
+                    })
+                });
+                state.lock().unwrap().locations = Some(all);
+            });
         }
     }
 }
 
 /// Resolve a user-entered IP or DNS name, append it as a target, and start
 /// pinging it. Reports failures via the transient `notice`.
-async fn add_target(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Config, input: String) {
-    let addr: IpAddr = match input.parse() {
-        Ok(ip) => ip,
+async fn add_target(
+    state: Arc<Mutex<AppState>>,
+    clients: collectors::ping::Clients,
+    cfg: Config,
+    input: String,
+) {
+    // Remember whether this was a *name*: names get re-resolved when the
+    // network changes (CDNs answer per location) and probed over HTTPS with
+    // proper SNI, neither of which a bare IP can offer.
+    let (addr, hostname): (IpAddr, Option<String>) = match input.parse() {
+        Ok(ip) => (ip, None),
         Err(_) => match tokio::net::lookup_host((input.as_str(), 0)).await {
             Ok(mut addrs) => match addrs.next() {
-                Some(sa) => sa.ip(),
+                Some(sa) => (sa.ip(), Some(input.clone())),
                 None => {
                     state.lock().unwrap().notice = Some(format!("no address for {input}"));
                     return;
@@ -705,19 +962,33 @@ async fn add_target(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Confi
     let id = {
         let mut s = state.lock().unwrap();
         let idx = s.targets.len();
-        let target = TargetStat::new(input.clone(), addr);
+        let mut target = TargetStat::new(input.clone(), addr);
+        target.hostname = hostname;
         let id = target.id;
         s.targets.push(target);
         s.selected = idx;
         s.graph_target = idx;
         id
     };
-    collectors::ping::spawn_for(state, client, cfg, id, addr);
+    collectors::ping::spawn_for(state, clients, cfg, id, addr);
 }
 
 /// Text dump of the current state for `--check` / debugging.
 fn print_snapshot(s: &AppState) {
-    println!("== octomon --check ==");
+    print!("{}", snapshot_text(s));
+}
+
+/// The measurement report as a string, so `--doctor` can embed and redact it.
+#[allow(unused_macros)]
+fn snapshot_text(s: &AppState) -> String {
+    let mut out = String::new();
+    // Shadow `println!` so the many formatting call sites below write into
+    // `out` unchanged instead of straight to stdout.
+    macro_rules! println {
+        () => { out.push('\n') };
+        ($($t:tt)*) => {{ use std::fmt::Write as _; let _ = writeln!(out, $($t)*); }};
+    }
+    println!("== MEASUREMENTS ==");
     let n = s.window_samples();
     println!("\n[Connection Quality]  (window {})", s.window_label());
     let ms = |v: Option<f64>| v.map(|x| format!("{x:.1}")).unwrap_or_else(|| "—".into());
@@ -909,6 +1180,253 @@ fn print_snapshot(s: &AppState) {
         e.error_pct(),
         e.rx_packets_per_sec + e.tx_packets_per_sec
     );
+    out
+}
+
+/// The `--doctor` report: verdict first, then this network's learned normal,
+/// the raw measurements, and the session's events — with identifying details
+/// (SSID, IPs, MACs) redacted unless `--full`, so the default output is safe
+/// to paste into a forum or an ISP ticket.
+fn doctor_report(s: &AppState, full: bool) -> (String, i32) {
+    use std::fmt::Write as _;
+    let triage = verdict::evaluate(s);
+    let insufficient = verdict::insufficient_reason(s);
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "octomon v{} · doctor · {} · {}",
+        env!("CARGO_PKG_VERSION"),
+        chrono::Local::now().format("%Y-%m-%d %H:%M"),
+        s.netinfo.medium.label(),
+    );
+    if let Some(err) = &s.icmp_error {
+        let _ = writeln!(out, "\n{err}");
+    }
+    let _ = writeln!(out);
+    out.push_str(&verdict::render_text(&triage, insufficient.as_deref()));
+
+    // The location always prints, named or not — knowing WHERE the report was
+    // taken (and how established its baseline is) is part of the diagnosis.
+    if let Some(b) = s.baseline.as_ref() {
+        let _ = writeln!(out, "\n== NORMAL AT \"{}\" ==", b.display_name());
+        let ms = |v: Option<f64>| {
+            v.map(|x| format!("~{x:.0}ms"))
+                .unwrap_or_else(|| "—".into())
+        };
+        let _ = writeln!(
+            out,
+            "  gateway {} · internet {} · DNS {}{}{}",
+            ms(b.gateway_ms),
+            ms(b.anchor_ms),
+            ms(b.dns_ms),
+            b.rssi_dbm
+                .map(|r| format!(" · rssi ~{r:.0} dBm"))
+                .unwrap_or_default(),
+            match (b.down_mbps, b.up_mbps) {
+                (Some(d), Some(u)) => format!(" · speed ~{d:.0}↓/{u:.0}↑ Mbps"),
+                _ => String::new(),
+            }
+        );
+        let _ = writeln!(
+            out,
+            "  ({} healthy minutes learned{})",
+            b.samples,
+            if b.established() {
+                ""
+            } else {
+                " — still learning, comparisons not yet trusted"
+            }
+        );
+    }
+
+    let _ = writeln!(out);
+    out.push_str(&snapshot_text(s));
+
+    if !s.events.is_empty() {
+        let _ = writeln!(out, "\n== EVENTS (last {}) ==", s.events.len().min(20));
+        for e in s
+            .events
+            .iter()
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .iter()
+            .rev()
+        {
+            let _ = writeln!(
+                out,
+                "  {}  {:<9} {}",
+                e.when(),
+                e.category.label(),
+                e.message
+            );
+        }
+    }
+
+    let code = verdict::exit_code(&triage, insufficient.is_some());
+    let out = if full { out } else { redact_report(out, s) };
+    (out, code)
+}
+
+/// The `--doctor --json` report: same content and redaction rules as the text
+/// report, shaped for machines. Redaction runs on the serialized string, so
+/// the two formats can never disagree about what is hidden.
+fn doctor_json(s: &AppState, full: bool) -> (String, i32) {
+    use serde_json::json;
+    let triage = verdict::evaluate(s);
+    let insufficient = verdict::insufficient_reason(s);
+    let code = verdict::exit_code(&triage, insufficient.is_some());
+    let n = s.window_samples();
+
+    let family = |f: &app::FamilyProbe| match f {
+        app::FamilyProbe::NotRun => json!({"status": "not-run"}),
+        app::FamilyProbe::NotApplicable => json!({"status": "not-applicable"}),
+        app::FamilyProbe::Ok(ms) => json!({"status": "ok", "rtt_ms": ms}),
+        app::FamilyProbe::Captive(loc) => json!({"status": "captive", "redirect": loc}),
+        app::FamilyProbe::Fail(r) => json!({"status": "fail", "reason": r}),
+    };
+
+    let doc = json!({
+        "octomon_version": env!("CARGO_PKG_VERSION"),
+        "at": chrono::Local::now().to_rfc3339(),
+        "medium": s.netinfo.medium.label(),
+        "exit_code": code,
+        "status": match (&insufficient, triage.findings.iter().any(|f| f.severity >= verdict::Severity::Degraded)) {
+            (Some(_), _) => "insufficient",
+            (None, true) => "problems",
+            (None, false) => "healthy",
+        },
+        "insufficient_reason": insufficient,
+        "analysis": {
+            "ladder": triage.rungs.iter().map(|r| json!({
+                "area": r.area.label(),
+                "status": r.status.label(),
+                "detail": r.detail,
+            })).collect::<Vec<_>>(),
+            "findings": triage.findings.iter().map(|f| json!({
+                "cause": f.cause.label(),
+                "severity": f.severity.label(),
+                "confidence": f.confidence.word(),
+                "summary": f.summary,
+                "evidence": f.evidence,
+            })).collect::<Vec<_>>(),
+        },
+        "location": s.baseline.as_ref().map(|b| json!({
+            "name": b.name,
+            "label": b.label,
+            "healthy_minutes": b.samples,
+            "established": b.established(),
+            "normal": {
+                "gateway_ms": b.gateway_ms,
+                "internet_ms": b.anchor_ms,
+                "dns_ms": b.dns_ms,
+                "rssi_dbm": b.rssi_dbm,
+                "down_mbps": b.down_mbps,
+                "up_mbps": b.up_mbps,
+            },
+        })),
+        "targets": s.targets.iter().map(|t| {
+            let st = t.stats(n);
+            json!({
+                "label": t.label,
+                "addr": t.addr.to_string(),
+                "hostname": t.hostname,
+                "discovered": t.discovered,
+                "last_ms": t.last_rtt_ms,
+                "mean_ms": st.mean,
+                "p95_ms": st.p95,
+                "jitter_ms": t.jitter_ms,
+                "loss_pct": t.loss_pct(),
+                "sent": t.sent,
+                "recv": t.recv,
+                "web_status": t.web.status.label(),
+                "web_ttfb_ms": t.web.last_ttfb_ms,
+            })
+        }).collect::<Vec<_>>(),
+        "dns": s.dns.iter().map(|p| json!({
+            "server": p.server.to_string(),
+            "last_ms": p.last_ms,
+            "mean_ms": p.mean_ms(),
+            "fail_pct": p.fail_pct(),
+        })).collect::<Vec<_>>(),
+        "http": {
+            "provider": s.http.provider,
+            "v4": family(&s.http.v4),
+            "v6": family(&s.http.v6),
+            "note": s.http.note,
+        },
+        "machine": {
+            "cpu_pct": s.vitals.cpu_pct,
+            "mem_pressure_pct": s.vitals.mem_pressure_pct,
+            "throttled": s.vitals.throttled,
+            "link_error_pct": s.link_errors.error_pct(),
+        },
+        "events": s.events.iter().rev().take(20).map(|e| json!({
+            "at": e.at,
+            "category": e.category.label(),
+            "severity": e.severity.label(),
+            "message": e.message,
+        })).collect::<Vec<_>>(),
+    });
+
+    let text = serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".to_string());
+    let text = if full { text } else { redact_report(text, s) };
+    (text + "\n", code)
+}
+
+/// Best-effort scrub of identifying values from a report. Deliberately
+/// list-based (this machine's actual SSID/IPs/MACs) rather than pattern-based:
+/// ISP-side hop addresses are the useful part of a ticket and must survive.
+fn redact_report(text: String, s: &AppState) -> String {
+    let mut subs: Vec<(String, &'static str)> = Vec::new();
+    let mut push = |v: &str, mask: &'static str| {
+        if !v.is_empty() && v != "-" {
+            subs.push((v.to_string(), mask));
+        }
+    };
+    if let Some(w) = &s.netinfo.wifi
+        && !w.ssid.contains("redacted")
+    {
+        push(&w.ssid, "<ssid>");
+    }
+    for t in s.targets.iter().filter(|t| t.discovered) {
+        if t.label.contains("public") {
+            push(&t.addr.to_string(), "<public-ip>");
+        }
+    }
+    for a in s.netinfo.ipv4.iter().chain(s.netinfo.ipv6.iter()) {
+        push(a, "<ip>");
+        if let Some(bare) = a.split('/').next() {
+            push(bare, "<ip>");
+        }
+    }
+    push(&s.netinfo.gateway_ip, "<gateway>");
+    push(&s.netinfo.mac, "<mac>");
+    push(&s.netinfo.gateway_mac, "<mac>");
+    // LAN-side resolvers (a Pi-hole, the router) are private addresses too;
+    // public resolvers are not ours to hide.
+    for d in &s.netinfo.dns {
+        if d.parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_private())
+        {
+            push(d, "<dns>");
+        }
+    }
+    // The auto label of an unnamed baseline is the SSID or the gateway IP; a
+    // user-chosen name ("Home") was picked to be shareable and stays. Pushed
+    // last so the more specific masks above win a same-string tie.
+    if let Some(b) = &s.baseline
+        && b.name.is_none()
+    {
+        push(&b.label, "<network>");
+    }
+
+    // Longest first (stable, so earlier = more specific on ties), so
+    // "192.168.1.100" is consumed before "192.168.1.1" can corrupt it.
+    subs.sort_by_key(|(v, _)| std::cmp::Reverse(v.len()));
+    subs.into_iter()
+        .fold(text, |acc, (v, mask)| acc.replace(&v, mask))
 }
 
 fn next_panel(p: Panel) -> Panel {
@@ -1096,6 +1614,82 @@ mod tests {
             s.has_sub_pane(),
             "an empty history is still a pane worth focusing"
         );
+    }
+
+    /// The default doctor report must be safe to paste into a public ticket:
+    /// the machine's own identifiers gone, ISP-side detail kept.
+    #[test]
+    fn doctor_report_redacts_by_default_and_not_with_full() {
+        let mut s = AppState::new(vec![TargetStat::new(
+            "Cloudflare".into(),
+            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+        )]);
+        for _ in 0..20 {
+            s.targets[0].record_reply(12.0);
+        }
+        let mut public = TargetStat::new(
+            "public IP".into(),
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 77)),
+        );
+        public.discovered = true;
+        s.targets.push(public);
+        s.netinfo.iface = "en0".into();
+        s.netinfo.medium = crate::app::LinkMedium::WiFi;
+        s.netinfo.ipv4 = vec!["192.168.1.100/24".into()];
+        s.netinfo.gateway_ip = "192.168.1.1".into();
+        s.netinfo.mac = "aa:bb:cc:11:22:33".into();
+        s.netinfo.gateway_mac = "de:ad:be:ef:00:01".into();
+        s.netinfo.wifi = Some(crate::app::WifiInfo {
+            ssid: "MySecretWifi".into(),
+            ..Default::default()
+        });
+        // A LAN resolver (Pi-hole) is private; Cloudflare's resolver is not.
+        s.netinfo.dns = vec!["192.168.1.4".into(), "1.1.1.1".into()];
+
+        let (out, _code) = doctor_report(&s, false);
+        for secret in [
+            "MySecretWifi",
+            "192.168.1.100",
+            "192.168.1.1",
+            "192.168.1.4",
+            "aa:bb:cc:11:22:33",
+            "de:ad:be:ef:00:01",
+            "203.0.113.77",
+        ] {
+            assert!(!out.contains(secret), "leaked {secret:?}");
+        }
+        assert!(out.contains("<ssid>"));
+        assert!(out.contains("<gateway>"));
+        assert!(out.contains("<public-ip>"));
+        assert!(out.contains("<dns>"));
+        // The anchor's address is not ours to hide — it's the useful part.
+        assert!(out.contains("1.1.1.1"));
+        assert!(out.contains("== ANALYSIS =="));
+
+        let (full, _code) = doctor_report(&s, true);
+        assert!(full.contains("MySecretWifi"));
+        assert!(full.contains("192.168.1.1"));
+    }
+
+    /// A user-chosen location name was picked to be shareable; the automatic
+    /// label (the SSID) was not.
+    #[test]
+    fn doctor_keeps_chosen_names_but_hides_auto_labels() {
+        let mut s = AppState::new(vec![]);
+        s.baseline = Some(crate::baseline::Baseline {
+            label: "MySecretWifi".into(),
+            name: Some("Home".into()),
+            samples: 10,
+            gateway_ms: Some(9.0),
+            ..Default::default()
+        });
+        let (out, _) = doctor_report(&s, false);
+        assert!(out.contains("NORMAL AT \"Home\""));
+
+        s.baseline.as_mut().unwrap().name = None;
+        let (out, _) = doctor_report(&s, false);
+        assert!(!out.contains("MySecretWifi"));
+        assert!(out.contains("<network>"));
     }
 
     #[test]

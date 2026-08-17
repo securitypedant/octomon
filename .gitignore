@@ -2,3 +2,5 @@
 **/*.rs.bk
 *.log
 .DS_Store
+# Local debug-binary copy for manual testing (`cp target/debug/octomon .`)
+/octomon

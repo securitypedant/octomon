@@ -144,16 +144,29 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>, cfg: crate::
                 s.speed_total += 1;
 
                 s.speedtest.status = SpeedStatus::Done;
-                s.speedtest.provider = r.provider;
+                s.speedtest.provider = r.provider.clone();
                 s.speedtest.down_mbps = Some(r.down_mbps);
                 s.speedtest.up_mbps = Some(r.up_mbps);
                 s.speedtest.idle_latency_ms = r.idle_ms;
                 s.speedtest.loaded_latency_ms = r.loaded_ms;
                 s.speedtest.phase = "done".to_string();
+                s.push_event(
+                    crate::verdict::Severity::Info,
+                    crate::app::EventCategory::Speedtest,
+                    format!(
+                        "speed test: {:.0}↓ / {:.0}↑ Mbps ({})",
+                        r.down_mbps, r.up_mbps, r.provider
+                    ),
+                );
             }
             Err(e) => {
                 s.speedtest.status = SpeedStatus::Failed(e.clone());
                 s.speedtest.phase = format!("failed: {e}");
+                s.push_event(
+                    crate::verdict::Severity::Info,
+                    crate::app::EventCategory::Speedtest,
+                    format!("speed test failed: {e}"),
+                );
             }
         }
     }

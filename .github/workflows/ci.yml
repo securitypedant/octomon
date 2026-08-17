@@ -51,17 +51,19 @@ jobs:
       - name: Test
         run: cargo test
 
-      # Windows has no unprivileged per-process source, no ICMP guarantee and no
-      # Wi-Fi radio on a CI runner, so a good chunk of the Windows code can only
-      # be judged by running it on real hardware. Publishing the binary means
-      # that can happen without a Windows toolchain on the tester's machine.
-      # Release builds come from cargo-dist, not from here.
+      # A CI runner has no real Wi-Fi radio, no ICMP guarantee and (on Windows)
+      # no unprivileged per-process source, so much of the platform-specific
+      # code can only be judged by running it on real hardware. Publishing every
+      # platform's binary means that can happen without a Rust toolchain on the
+      # tester's machine. Release builds come from cargo-dist, not from here.
       - name: Upload binary for manual testing
-        if: startsWith(matrix.os, 'windows')
         uses: actions/upload-artifact@v4
         with:
           name: octomon-${{ matrix.os }}
-          path: target/release/octomon.exe
+          # Whichever of the two exists on this runner (.exe on Windows).
+          path: |
+            target/release/octomon
+            target/release/octomon.exe
           retention-days: 14
           if-no-files-found: error
 

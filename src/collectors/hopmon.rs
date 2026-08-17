@@ -13,10 +13,11 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use surge_ping::{Client, PingIdentifier, PingSequence};
+use surge_ping::{PingIdentifier, PingSequence};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
+use super::ping;
 use crate::app::{AppState, HopMonitor, MonitoredHop, TargetStat};
 use crate::config::Config;
 use crate::platform::traceroute as tr;
@@ -36,7 +37,7 @@ fn ping_id(generation: u64, ttl: u8) -> u16 {
 /// Begin (or restart) continuous monitoring of the path to `dest`.
 pub fn start(
     state: Arc<Mutex<AppState>>,
-    client: Arc<Client>,
+    clients: ping::Clients,
     cfg: Config,
     dest: IpAddr,
     label: String,
@@ -57,7 +58,7 @@ pub fn start(
 
     tokio::spawn(async move {
         loop {
-            discover(&state, &client, &cfg, dest, generation).await;
+            discover(&state, &clients, &cfg, dest, generation).await;
             if superseded(&state, generation) {
                 return;
             }
@@ -92,7 +93,7 @@ fn superseded(state: &Arc<Mutex<AppState>>, generation: u64) -> bool {
 /// a probe for each newly resolved hop. Streams so hops appear as they arrive.
 async fn discover(
     state: &Arc<Mutex<AppState>>,
-    client: &Arc<Client>,
+    clients: &ping::Clients,
     cfg: &Config,
     dest: IpAddr,
     generation: u64,
@@ -113,7 +114,11 @@ async fn discover(
         {
             m.discovering = false;
         }
-        s.notice = Some(format!("{} unavailable", tr::PROGRAM));
+        s.notice_event(
+            crate::verdict::Severity::Info,
+            crate::app::EventCategory::Path,
+            format!("{} unavailable", tr::PROGRAM),
+        );
         return;
     };
 
@@ -140,7 +145,7 @@ async fn discover(
             if let Some(addr) = spawn {
                 spawn_probe(
                     state.clone(),
-                    client.clone(),
+                    clients.clone(),
                     cfg.clone(),
                     generation,
                     hop.ttl,
@@ -190,12 +195,17 @@ fn merge_hop(m: &mut HopMonitor, ttl: u8, addr: Option<IpAddr>) -> Option<IpAddr
 /// Keep one hop measured until its monitor run ends or its address changes.
 fn spawn_probe(
     state: Arc<Mutex<AppState>>,
-    client: Arc<Client>,
+    clients: ping::Clients,
     cfg: Config,
     generation: u64,
     ttl: u8,
     addr: IpAddr,
 ) {
+    // Hops on a v6 path need the v6 client and vice versa; a hop whose family
+    // has no client just stays unmeasured rather than reading as loss.
+    let Some(client) = clients.for_addr(addr) else {
+        return;
+    };
     tokio::spawn(async move {
         let mut pinger = client
             .pinger(addr, PingIdentifier(ping_id(generation, ttl)))
@@ -301,11 +311,12 @@ mod tests {
     #[ignore = "requires network access"]
     async fn live_path_monitor() {
         let state = Arc::new(Mutex::new(AppState::new(vec![])));
-        let client = Arc::new(Client::new(&surge_ping::Config::default()).unwrap());
+        let (clients, err) = ping::Clients::open();
+        assert!(err.is_none(), "ICMP unavailable: {err:?}");
         let dest: IpAddr = "1.1.1.1".parse().unwrap();
         start(
             state.clone(),
-            client,
+            clients,
             Config::default(),
             dest,
             "Cloudflare".into(),
