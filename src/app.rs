@@ -98,7 +98,7 @@ impl TargetStat {
             sent: 0,
             recv: 0,
             window: VecDeque::with_capacity(WINDOW),
-            history: History::new(1000),
+            history: History::new(HISTORY),
         }
     }
 
@@ -193,6 +193,10 @@ impl TargetStat {
 }
 
 const WINDOW: usize = 100;
+
+/// Latency samples kept per target. Bounds memory, and with it the longest
+/// window the statistics can actually cover — see [`AppState::window_samples`].
+const HISTORY: usize = 1000;
 
 /// Aggregate interface throughput (bytes/sec) plus history for charts.
 #[derive(Clone, Default)]
@@ -757,15 +761,43 @@ mod tests {
     }
 
     #[test]
-    fn window_cycles_30_60_300() {
+    fn the_window_ladder_only_ever_widens() {
         let mut s = AppState::new(vec![]);
         assert_eq!(s.window_secs, 60);
         s.cycle_window();
         assert_eq!(s.window_secs, 300);
         s.cycle_window();
-        assert_eq!(s.window_secs, 30);
+        assert_eq!(s.window_secs, 900);
+        // Wraps back to the start rather than stepping down mid-cycle.
         s.cycle_window();
         assert_eq!(s.window_secs, 60);
+    }
+
+    #[test]
+    fn the_window_cannot_claim_more_history_than_is_kept() {
+        let mut s = AppState::new(vec![]);
+        // One sample a second: the whole ladder fits inside the buffer.
+        s.samples_per_sec = 1.0;
+        s.window_secs = 900;
+        assert_eq!(s.window_samples(), 900);
+        assert!(!s.window_is_capped());
+
+        // Four a second is what --ping-interval 250 gives, and 900s of that is
+        // 3600 samples — far more than a target keeps.
+        s.samples_per_sec = 4.0;
+        assert_eq!(s.window_samples(), HISTORY);
+        assert!(s.window_is_capped(), "the UI has to be able to say so");
+    }
+
+    #[test]
+    fn the_window_label_reads_in_minutes() {
+        let mut s = AppState::new(vec![]);
+        s.window_secs = 60;
+        assert_eq!(s.window_label(), "1m");
+        s.window_secs = 900;
+        assert_eq!(s.window_label(), "15m");
+        s.window_secs = 45;
+        assert_eq!(s.window_label(), "45s");
     }
 
     #[test]
@@ -947,6 +979,9 @@ pub struct AppState {
     pub window_secs: u64,
     /// Samples per second (1000 / ping interval); converts window to samples.
     pub samples_per_sec: f64,
+    /// Glyphs the charts plot with. Carried here because a legacy Windows
+    /// console has no braille glyphs and draws every point as an empty box.
+    pub graph_marker: ratatui::symbols::Marker,
     /// Column cursor over the target table (0=target,1=last,2=avg,3=p95,4=max,5=loss).
     pub q_col: usize,
     /// Active target sort: (column, descending). None = insertion order.
@@ -1021,6 +1056,7 @@ impl AppState {
             graph_target: 0,
             window_secs: 60,
             samples_per_sec: 1.0,
+            graph_marker: ratatui::symbols::Marker::Braille,
             q_col: 0,
             q_sort: None,
             traceroute: None,
@@ -1073,17 +1109,49 @@ impl AppState {
         )
     }
 
-    /// Number of recent samples covered by the current window.
+    /// Number of recent samples the current window covers.
+    ///
+    /// Clamped to what a target actually keeps. Asking for more than the ring
+    /// holds silently returns fewer, which would leave the "window 5m" label
+    /// overstating the figures beneath it. A faster `--ping-interval` outruns
+    /// the buffer easily: 300s at 4 samples/sec wants 1200.
     pub fn window_samples(&self) -> usize {
+        self.window_samples_wanted().min(HISTORY)
+    }
+
+    /// Samples the window asks for, before the buffer limit applies.
+    fn window_samples_wanted(&self) -> usize {
         ((self.window_secs as f64 * self.samples_per_sec).round() as usize).max(1)
     }
 
-    /// Cycle the stats window: 30s → 60s → 300s → 30s.
+    /// True when the buffer, not the chosen window, decides how far back the
+    /// statistics reach — so the UI can say so instead of quietly misleading.
+    pub fn window_is_capped(&self) -> bool {
+        self.window_samples_wanted() > HISTORY
+    }
+
+    /// The window as a short label: "60s" becomes "1m".
+    pub fn window_label(&self) -> String {
+        if self.window_secs >= 60 && self.window_secs.is_multiple_of(60) {
+            format!("{}m", self.window_secs / 60)
+        } else {
+            format!("{}s", self.window_secs)
+        }
+    }
+
+    /// Cycle the stats window: 1m → 5m → 15m → 1m.
+    ///
+    /// Ascending, so repeated presses go one direction rather than widening
+    /// twice and then snapping narrower. Each stop is several times the last:
+    /// neighbouring windows that differ by 2x produce near-identical averages,
+    /// which wastes a stop. Nothing shorter than a minute, because p95 over a
+    /// few dozen samples is just "second worst" and jumps on any single spike;
+    /// `last` already covers the immediate picture.
     pub fn cycle_window(&mut self) {
         self.window_secs = match self.window_secs {
-            w if w < 60 => 60,
             w if w < 300 => 300,
-            _ => 30,
+            w if w < 900 => 900,
+            _ => 60,
         };
     }
 

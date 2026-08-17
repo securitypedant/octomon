@@ -103,6 +103,7 @@ async fn main() -> Result<()> {
         let mut s = state.lock().unwrap();
         s.speedtest_enabled = !cli.no_speedtest;
         s.samples_per_sec = 1000.0 / cfg.ping_interval_ms.max(1) as f64;
+        s.graph_marker = cfg.marker();
         s.speedtest_provider_names = provider_names;
         s.speedtest_provider_idx = sel;
         let (history, total) = store::load_recent(500);
@@ -718,7 +719,7 @@ async fn add_target(state: Arc<Mutex<AppState>>, client: Arc<Client>, cfg: Confi
 fn print_snapshot(s: &AppState) {
     println!("== octomon --check ==");
     let n = s.window_samples();
-    println!("\n[Connection Quality]  (window {}s)", s.window_secs);
+    println!("\n[Connection Quality]  (window {})", s.window_label());
     let ms = |v: Option<f64>| v.map(|x| format!("{x:.1}")).unwrap_or_else(|| "—".into());
     for t in &s.targets {
         let st = t.stats(n);

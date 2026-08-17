@@ -1,6 +1,6 @@
 [package]
 name = "octomon"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "Btop-style terminal network monitor: latency, bandwidth, and Wi-Fi signal"
 repository = "https://github.com/securitypedant/octomon"
@@ -17,6 +17,7 @@ rust-version = "1.88"
 include = [
     "src/**/*.rs",
     "README.md",
+    "PRIVILEGES.md",
     "LICENSE-MIT",
     "LICENSE-APACHE",
     "SECURITY.md",

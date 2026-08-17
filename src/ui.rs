@@ -488,11 +488,12 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
         (area, None)
     };
 
-    let b = block(&format!("Path · {}  ({status})", m.target), active);
+    let title = format!("Path · {}  ({status})", m.target);
+    let b = block(&title, active);
     let inner = b.inner(list_area);
-    f.render_widget(b, list_area);
 
     if inner.height == 0 || m.hops.is_empty() {
+        f.render_widget(b, list_area);
         f.render_widget(
             Paragraph::new(Span::styled(
                 "discovering path…",
@@ -514,16 +515,39 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
 
     let header = Row::new(["ttl", "address", "loss", "last", "avg", "p95", "jitter"])
         .style(Style::new().fg(Color::Gray).bold());
-    // When the path doesn't fit, give up the last row to say so — silently
-    // truncating hides exactly the far end of the path you were looking for.
+    // Scroll so the selected hop stays on screen. Rows are not one-to-one with
+    // hops — a run of silent ones collapses to a single row — so the cursor is
+    // located by hop index rather than by counting rows.
     let rows_avail = inner.height.saturating_sub(1) as usize;
     let all_rows = hop_rows(&m.hops);
-    let overflow = all_rows.len().saturating_sub(rows_avail);
-    let visible: Vec<&HopRow> = if overflow > 0 && rows_avail > 0 {
-        all_rows.iter().take(rows_avail - 1).collect()
+    let cursor = all_rows
+        .iter()
+        .position(|r| matches!(r, HopRow::Hop(i, _) if *i == m.selected))
+        .unwrap_or(0);
+    let first = if rows_avail == 0 {
+        0
     } else {
-        all_rows.iter().take(rows_avail).collect()
+        cursor.saturating_sub(rows_avail - 1)
     };
+    let visible: Vec<&HopRow> = all_rows.iter().skip(first).take(rows_avail).collect();
+    let hidden_above = first;
+    let hidden_below = all_rows.len().saturating_sub(first + visible.len());
+
+    // Counts belong in the title, the way the target list does it. A footer row
+    // costs one of the rows it is complaining about, and it used to tell the
+    // reader to press [f] for full screen even when they were already in it.
+    let mut title = title;
+    if hidden_above > 0 || hidden_below > 0 {
+        title.push_str(" · ");
+        if hidden_above > 0 {
+            title.push_str(&format!("↑{hidden_above} "));
+        }
+        if hidden_below > 0 {
+            title.push_str(&format!("↓{hidden_below} "));
+        }
+        title.push_str("more");
+    }
+    f.render_widget(block(&title, active), list_area);
 
     let rows = visible.iter().map(|row| match row {
         // Left blank here and drawn afterwards across the whole row, since the
@@ -649,29 +673,13 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
         }
     }
 
-    if overflow > 0 && rows_avail > 0 {
-        let y = inner.y + inner.height.saturating_sub(1);
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!("… +{overflow} more — press [f] for full screen"),
-                Style::new().fg(Color::Yellow),
-            ))),
-            Rect {
-                x: inner.x,
-                y,
-                width: inner.width,
-                height: 1,
-            },
-        );
-    }
-
     if let Some(chart_area) = chart_area {
-        hop_chart(f, m, n, chart_area);
+        hop_chart(f, m, n, chart_area, s.graph_marker);
     }
 }
 
 /// Latency history for the hop under the cursor, in its own panel.
-fn hop_chart(f: &mut Frame, m: &crate::app::HopMonitor, n: usize, area: Rect) {
+fn hop_chart(f: &mut Frame, m: &crate::app::HopMonitor, n: usize, area: Rect, marker: Marker) {
     let hop = m.hops.get(m.selected);
     let label = match hop {
         Some(h) => match h.addr {
@@ -726,17 +734,17 @@ fn hop_chart(f: &mut Frame, m: &crate::app::HopMonitor, n: usize, area: Rect) {
 
     let datasets = vec![
         Dataset::default()
-            .marker(Marker::Braille)
+            .marker(marker)
             .graph_type(GraphType::Line)
             .style(Style::new().fg(SERIES_COLOR))
             .data(&series),
         Dataset::default()
-            .marker(Marker::Braille)
+            .marker(marker)
             .graph_type(GraphType::Line)
             .style(Style::new().fg(P95_COLOR))
             .data(&p95_line),
         Dataset::default()
-            .marker(Marker::Braille)
+            .marker(marker)
             .graph_type(GraphType::Line)
             .style(Style::new().fg(JITTER_COLOR))
             .data(&jitter_line),
@@ -823,8 +831,17 @@ fn traceroute_view(f: &mut Frame, s: &AppState, area: Rect) {
             .map(hop_line)
             .collect();
         let remaining = tr.hops.len() - rows.saturating_sub(1);
+        // Unlike the path monitor this list has no cursor, so there is nothing
+        // to scroll with — in full screen the hint has nothing left to offer
+        // and saying "press [f] for full screen" to someone already there is
+        // just confusing.
+        let hint = if s.fullscreen {
+            ""
+        } else {
+            " — press [f] for full screen"
+        };
         v.push(Line::from(Span::styled(
-            format!("… +{remaining} more — press [f] for full screen"),
+            format!("… +{remaining} more{hint}"),
             Style::new().fg(Color::Yellow),
         )));
         v
@@ -885,17 +902,17 @@ fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
 
     let datasets = vec![
         Dataset::default()
-            .marker(Marker::Braille)
+            .marker(s.graph_marker)
             .graph_type(GraphType::Line)
             .style(Style::new().fg(SERIES_COLOR))
             .data(&series),
         Dataset::default()
-            .marker(Marker::Braille)
+            .marker(s.graph_marker)
             .graph_type(GraphType::Line)
             .style(Style::new().fg(P95_COLOR))
             .data(&p95_line),
         Dataset::default()
-            .marker(Marker::Braille)
+            .marker(s.graph_marker)
             .graph_type(GraphType::Line)
             .style(Style::new().fg(JITTER_COLOR))
             .data(&jitter_line),
@@ -928,12 +945,21 @@ fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
 fn quality_summary(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
     let mut spans = vec![
         Span::styled(
-            format!("window {}s ", s.window_secs),
+            format!("window {} ", s.window_label()),
             Style::new().fg(Color::Gray),
         ),
         Span::styled("[w]", Style::new().fg(Color::Cyan)),
         Span::raw("  "),
     ];
+    // Say when the buffer, not the chosen window, is setting the reach. The
+    // figures are still honest — they just cover less than the label implies,
+    // and silently overstating them is worse than one extra clause.
+    if s.window_is_capped() {
+        spans.push(Span::styled(
+            format!("(capped at {} samples)  ", s.window_samples()),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
     if let Some(t) = s.targets.get(s.graph_target) {
         let st = t.stats(n);
         spans.push(Span::styled(
@@ -1355,7 +1381,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("s", "run speed test"),
         row("p", "pause / resume refresh"),
         row("r", "re-probe network info"),
-        row("w", "stats window 30/60/300s"),
+        row("w", "stats window 1m/5m/15m"),
         row("l", "start / stop CSV recording"),
         row("?", "toggle this help"),
         row("q / Ctrl+C", "quit"),
@@ -1909,12 +1935,12 @@ fn link_util_graph(f: &mut Frame, s: &AppState, area: Rect) {
 
     let datasets = vec![
         Dataset::default()
-            .marker(Marker::Braille)
+            .marker(s.graph_marker)
             .graph_type(GraphType::Line)
             .style(Style::new().fg(Color::Green))
             .data(&dpts),
         Dataset::default()
-            .marker(Marker::Braille)
+            .marker(s.graph_marker)
             .graph_type(GraphType::Line)
             .style(Style::new().fg(Color::Magenta))
             .data(&upts),
@@ -1985,7 +2011,7 @@ fn signal_graph(f: &mut Frame, s: &AppState, area: Rect) {
 
     let mut datasets = vec![
         Dataset::default()
-            .marker(Marker::Braille)
+            .marker(s.graph_marker)
             .graph_type(GraphType::Line)
             .style(Style::new().fg(sig_color))
             .data(&sig_pts),
@@ -1993,7 +2019,7 @@ fn signal_graph(f: &mut Frame, s: &AppState, area: Rect) {
     if has_tx {
         datasets.push(
             Dataset::default()
-                .marker(Marker::Braille)
+                .marker(s.graph_marker)
                 .graph_type(GraphType::Line)
                 .style(Style::new().fg(Color::Cyan))
                 .data(&tx_pts),
@@ -2795,7 +2821,7 @@ mod tests {
     }
 
     #[test]
-    fn hop_list_says_when_it_has_more_than_fits() {
+    fn hop_list_scrolls_to_keep_the_selection_visible() {
         use crate::app::{HopMonitor, MonitoredHop, QualityView, TargetStat};
         use std::net::{IpAddr, Ipv4Addr};
 
@@ -2824,11 +2850,26 @@ mod tests {
             selected: 0,
         });
 
+        // Cursor at the top: the near end of the path is on screen, the far end
+        // is not, and the title says how much is below.
+        let out = draw(&s, 120, 24);
+        assert!(out.contains("10.0.0.1 "), "first hop visible");
+        assert!(!out.contains("10.0.0.25"), "last hop is past the fold");
+        assert!(out.contains("↓"), "title counts what is hidden below");
+        // The old footer told the reader to press [f] for full screen, which is
+        // unhelpful advice to someone already in full screen.
+        assert!(!out.contains("press [f] for full screen"));
+
+        // Moving the cursor to the far end scrolls the list to follow it.
+        // Without this the selection walks off the bottom and disappears.
+        s.hop_monitor.as_mut().unwrap().selected = 24;
         let out = draw(&s, 120, 24);
         assert!(
-            out.contains("press [f] for full screen"),
-            "a truncated path must say so"
+            out.contains("10.0.0.25"),
+            "the selected hop must be on screen"
         );
+        assert!(!out.contains("10.0.0.1 "), "the top has scrolled away");
+        assert!(out.contains("↑"), "title counts what is hidden above");
     }
 
     #[test]
