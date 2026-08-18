@@ -4,6 +4,11 @@
 
 use futures_util::StreamExt;
 
+/// The release version with the build stamp from `build.rs` when there is
+/// one: `0.5.2 · build 143 (b91da39+)` from a checkout, plain `0.5.2` from a
+/// crates.io build. What every "which octomon is this?" surface prints.
+pub const VERSION: &str = env!("OCTOMON_VERSION_FULL");
+
 /// GET `url` and return the body as text, failing if it exceeds `max_bytes`.
 pub async fn fetch_text_capped(
     client: &reqwest::Client,

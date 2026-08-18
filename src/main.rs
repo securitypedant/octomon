@@ -39,7 +39,7 @@ struct Ctx {
 
 /// Terminal dashboard for network performance.
 #[derive(Parser, Debug)]
-#[command(name = "octomon", version, about)]
+#[command(name = "octomon", version = util::VERSION, about)]
 struct Cli {
     /// Run collectors briefly, print a text snapshot, then exit (no TUI).
     #[arg(long)]
@@ -340,24 +340,33 @@ async fn run_ui(
     mut rx: mpsc::UnboundedReceiver<KeyEvent>,
 ) -> Result<()> {
     let mut ticker = tokio::time::interval(Duration::from_millis(200));
+    // While paused the screen is drawn from this copy, taken at the moment of
+    // pausing, so every measurement holds still — collectors keep writing to
+    // the live state underneath. What the user drives (cursors, overlays, a
+    // whois they asked for) is copied across before each draw.
+    let mut frozen: Option<Box<AppState>> = None;
     loop {
-        // Track whether this iteration was driven by a key press; while paused,
-        // only key-driven iterations redraw (the periodic refresh is suppressed).
-        let by_key = tokio::select! {
-            _ = ticker.tick() => false,
-            Some(key) = rx.recv() => {
-                handle_key(ctx, key);
-                true
-            }
-        };
+        tokio::select! {
+            _ = ticker.tick() => {}
+            Some(key) = rx.recv() => handle_key(ctx, key),
+        }
 
-        let s = ctx.state.lock().unwrap();
+        let mut s = ctx.state.lock().unwrap();
         if s.should_quit {
             break;
         }
-        if by_key || !s.paused {
+        if !s.paused {
+            frozen = None;
             terminal.draw(|f| ui::render(f, &s))?;
+            continue;
         }
+        if frozen.is_none() || s.refreeze {
+            s.refreeze = false;
+            frozen = Some(Box::new(s.clone()));
+        }
+        let fr = frozen.as_mut().unwrap();
+        fr.sync_interactive_from(&s);
+        terminal.draw(|f| ui::render(f, fr))?;
     }
     Ok(())
 }
@@ -366,6 +375,7 @@ async fn run_ui(
 /// stale figure behind: a graph that keeps its history after a reset makes the
 /// numbers beside it look wrong.
 fn reset_panel(s: &mut AppState) {
+    s.refreeze = true;
     match s.focus {
         Panel::Quality => s.reset_quality_stats(),
         Panel::Bandwidth => {
@@ -375,6 +385,9 @@ fn reset_panel(s: &mut AppState) {
             s.throughput.up_bps = 0.0;
             s.processes.clear();
             s.remotes.clear();
+            // The lists are rebuilt from the collector's session totals every
+            // tick; tell it to start the session over.
+            s.bw_reset = true;
             s.link_errors = crate::app::LinkErrors {
                 iface: s.link_errors.iface.clone(),
                 ..Default::default()
@@ -482,6 +495,7 @@ fn delete_selected_target(s: &mut AppState) {
         }
     }
     s.targets.remove(idx);
+    s.refreeze = true;
     let last = s.targets.len().saturating_sub(1);
     s.selected = s.selected.min(last);
     if s.graph_target >= idx {
@@ -533,9 +547,12 @@ fn move_cursor(s: &mut AppState, delta: isize) {
             let last = s.speed_history.len().saturating_sub(1) as isize;
             s.speed_sel = (s.speed_sel as isize + delta).clamp(0, last.max(0)) as usize;
         }
+        // The talkers cursors walk the rows as drawn, whatever the sort.
         Panel::Bandwidth if s.bw_view == BwView::Remotes => {
-            let last = s.remotes.len().saturating_sub(1) as isize;
-            s.remote_sel = (s.remote_sel as isize + delta).clamp(0, last.max(0)) as usize;
+            s.remote_sel = AppState::step_in_order(&s.remote_order(), s.remote_sel, delta);
+        }
+        Panel::Bandwidth => {
+            s.proc_sel = AppState::step_in_order(&s.process_order(), s.proc_sel, delta);
         }
         _ => {}
     }
@@ -799,18 +816,28 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.bw_col = s.bw_col.saturating_sub(1);
                 }
                 KeyCode::Right if s.focus == Panel::Bandwidth => {
-                    let last = if s.bw_view == BwView::Remotes { 5 } else { 4 };
-                    s.bw_col = (s.bw_col + 1).min(last);
+                    // Both tables have seven columns; see `AppState::bw_col`.
+                    s.bw_col = (s.bw_col + 1).min(6);
                 }
-                // 'b' flips the talkers table between processes and the remote
-                // addresses they talk to. The sort resets: the columns differ.
-                KeyCode::Char('b') if s.focus == Panel::Bandwidth => {
-                    s.bw_view = match s.bw_view {
-                        BwView::Processes => BwView::Remotes,
-                        BwView::Remotes => BwView::Processes,
+                // Bandwidth: one key walks every lower pane — processes, the
+                // remote addresses they talk to, and (full-screen) the speed
+                // history. Moving between the two talkers tables resets the
+                // sort: the columns differ.
+                KeyCode::Char('n') if s.focus == Panel::Bandwidth => {
+                    let (view, pane) = match (s.bw_view, s.sub_pane) {
+                        (BwView::Processes, SubPane::Primary) => {
+                            (BwView::Remotes, SubPane::Primary)
+                        }
+                        (BwView::Remotes, SubPane::Primary) if s.fullscreen => {
+                            (BwView::Remotes, SubPane::Secondary)
+                        }
+                        _ => (BwView::Processes, SubPane::Primary),
                     };
-                    s.bw_sort = None;
-                    s.bw_col = s.bw_col.min(4);
+                    if view != s.bw_view {
+                        s.bw_sort = None;
+                    }
+                    s.bw_view = view;
+                    s.sub_pane = pane;
                 }
                 KeyCode::Enter if s.focus == Panel::Bandwidth => {
                     let col = s.bw_col;
@@ -1020,6 +1047,7 @@ async fn add_target(
         target.hostname = hostname;
         let id = target.id;
         s.targets.push(target);
+        s.refreeze = true;
         s.selected = idx;
         s.graph_target = idx;
         id
@@ -1102,14 +1130,21 @@ fn snapshot_text(s: &AppState) -> String {
     );
     match s.proc_status {
         app::ProcStatus::Supported => {
-            println!("  top processes by bandwidth:");
+            println!("  top processes by bytes this session:");
             if s.processes.is_empty() {
-                println!("    (no active talkers)");
+                println!("    (no talkers yet)");
             }
-            for p in &s.processes {
+            for p in s.processes.iter().take(10) {
                 println!(
-                    "    {:<20} pid={:<6} ↓{:>10.0} ↑{:>10.0} B/s  total={:<10} retx={:.1}/s",
-                    p.name, p.pid, p.down_bps, p.up_bps, p.total_bytes, p.retx_per_sec
+                    "    {:<20} pid={:<6} ↓{:>12} ↑{:>12} B  {:>3.0}%  now ↓{:>10.0} ↑{:>10.0} B/s  retx={}",
+                    p.name,
+                    p.pid,
+                    p.down_bytes,
+                    p.up_bytes,
+                    p.share * 100.0,
+                    p.down_bps,
+                    p.up_bps,
+                    p.retx
                 );
             }
         }
@@ -1250,7 +1285,7 @@ fn doctor_report(s: &AppState, full: bool) -> (String, i32) {
     let _ = writeln!(
         out,
         "octomon v{} · doctor · {} · {}",
-        env!("CARGO_PKG_VERSION"),
+        util::VERSION,
         chrono::Local::now().format("%Y-%m-%d %H:%M"),
         s.netinfo.medium.label(),
     );
@@ -1343,6 +1378,7 @@ fn doctor_json(s: &AppState, full: bool) -> (String, i32) {
 
     let doc = json!({
         "octomon_version": env!("CARGO_PKG_VERSION"),
+        "octomon_build": env!("OCTOMON_BUILD"),
         "at": chrono::Local::now().to_rfc3339(),
         "medium": s.netinfo.medium.label(),
         "exit_code": code,

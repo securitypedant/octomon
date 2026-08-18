@@ -255,8 +255,9 @@ fn format_rows(s: &AppState, stamp: &str) -> String {
         );
     }
 
-    // Per-process talkers.
-    for p in &s.processes {
+    // Per-process talkers. The list is a session ranking, so processes that
+    // are idle right now are on it too; they have nothing to log this tick.
+    for p in s.processes.iter().filter(|p| p.down_bps + p.up_bps > 0.0) {
         row(
             "process",
             &p.name,

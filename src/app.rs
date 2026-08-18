@@ -342,43 +342,59 @@ pub enum ProcStatus {
     NeedsPrivilege,
 }
 
-/// Per-process network throughput (bytes/sec), derived from successive samples,
-/// plus a couple of connection-health signals.
-#[derive(Clone)]
+/// One process's network use, accumulated over the session (so the table
+/// answers "what has been using the link", not "who happened to move bytes in
+/// the last two seconds"), plus its rate this interval and a connection-health
+/// signal. A process that has gone quiet — or exited — keeps its row.
+#[derive(Clone, Default)]
 pub struct ProcBandwidth {
     pub name: String,
     pub pid: u32,
+    /// Bytes received this session.
+    pub down_bytes: u64,
+    /// Bytes sent this session.
+    pub up_bytes: u64,
+    /// `down_bytes + up_bytes`, kept for sorting and display.
+    pub total_bytes: u64,
+    /// This process's share of all attributed traffic this session, 0–1.
+    pub share: f64,
+    /// TCP retransmissions this session.
+    pub retx: u64,
+    /// Rates this interval; zero when idle.
     pub down_bps: f64,
     pub up_bps: f64,
-    /// Cumulative bytes (in+out) this process has transferred this session.
-    pub total_bytes: u64,
-    /// TCP retransmissions per second (connection-health signal).
+    /// TCP retransmissions per second this interval (connection-health signal).
     pub retx_per_sec: f64,
 }
 
 /// Bandwidth to one remote address, summed over every socket and process
-/// talking to it — the "which address is eating my link" view.
+/// talking to it and accumulated over the session — the "which address is
+/// eating my link" view.
 #[derive(Clone)]
 pub struct RemoteBandwidth {
     pub addr: IpAddr,
-    /// The port carrying most of the bytes this interval, when connections to
-    /// this address used more than one.
+    /// The port that has carried most of the bytes this session, when
+    /// connections to this address used more than one.
     pub port: u16,
-    /// Number of distinct ports seen this interval; more than one means `port`
+    /// Number of distinct ports seen this session; more than one means `port`
     /// is only the biggest.
     pub ports: usize,
-    /// The process moving most bytes to this address this interval.
+    /// The process that has moved most bytes to this address this session.
     pub process: String,
+    /// Bytes received from / sent to this address this session.
+    pub down_bytes: u64,
+    pub up_bytes: u64,
+    /// `down_bytes + up_bytes`.
+    pub total_bytes: u64,
+    /// This address's share of all attributed traffic this session, 0–1.
+    pub share: f64,
+    /// Rates this interval; zero when idle.
     pub down_bps: f64,
     pub up_bps: f64,
-    /// Cumulative bytes (in+out) to this address this session.
-    pub total_bytes: u64,
-    /// This address's share of all attributed traffic this interval, 0–1.
-    pub share: f64,
 }
 
 /// Which list the bandwidth panel's talkers table shows.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum BwView {
     #[default]
     Processes,
@@ -1234,6 +1250,7 @@ pub struct LogStatus {
 }
 
 /// Root shared state.
+#[derive(Clone)]
 pub struct AppState {
     pub targets: Vec<TargetStat>,
     pub throughput: Throughput,
@@ -1259,18 +1276,28 @@ pub struct AppState {
     pub speed_history: Vec<crate::store::SpeedRecord>,
     /// How many results are stored on disk, which can exceed what is loaded.
     pub speed_total: usize,
-    /// Top processes by current network throughput (highest first).
+    /// Top processes by bytes moved this session (highest first).
     pub processes: Vec<ProcBandwidth>,
-    /// Top remote addresses by bandwidth, from the same samples as `processes`.
+    /// Top remote addresses by bytes this session, from the same samples as
+    /// `processes`.
     pub remotes: Vec<RemoteBandwidth>,
+    /// Set by a panel reset; the collector clears its session aggregates on
+    /// its next tick and lowers it. The lists are only a projection of those
+    /// aggregates, so clearing the lists alone would bring the figures back.
+    pub bw_reset: bool,
     /// Whether the talkers table lists processes or remote addresses.
     pub bw_view: BwView,
-    /// Row cursor in the remotes list (it has addresses to act on; the process
-    /// list does not).
+    /// Row cursor in the remotes list, as an index into `remotes` (so W and a
+    /// act on the right address whatever the sort).
     pub remote_sel: usize,
+    /// Row cursor in the process list, an index into `processes`. Nothing acts
+    /// on a process; the cursor is what scrolls the list.
+    pub proc_sel: usize,
     /// Availability of per-process attribution on this platform.
     pub proc_status: ProcStatus,
-    /// Column cursor over the top-talkers header (0=proc,1=down,2=up,3=total,4=retx).
+    /// Column cursor over the top-talkers header. Processes:
+    /// 0=name,1=total,2=down,3=up,4=now,5=share,6=retx. Remotes:
+    /// 0=remote,1=process,2=total,3=down,4=up,5=now,6=share.
     pub bw_col: usize,
     /// Active sort of top talkers: (column, descending). None = default order.
     pub bw_sort: Option<(usize, bool)>,
@@ -1316,7 +1343,9 @@ pub struct AppState {
     pub input_buffer: String,
     /// Optional transient status/error message (e.g. failed DNS lookup).
     pub notice: Option<String>,
-    /// Auto-refresh paused: the periodic redraw is suppressed.
+    /// Auto-refresh paused: the periodic redraw is suppressed, and the talkers
+    /// tables stop being replaced (the collector keeps counting) so a row can
+    /// be selected and acted on without it moving.
     pub paused: bool,
     /// Which full-screen overlay is up, if any.
     pub overlay: Overlay,
@@ -1353,6 +1382,10 @@ pub struct AppState {
     pub logging_requested: bool,
     /// Present while a recording is actually open.
     pub log: Option<LogStatus>,
+    /// Set by a key handler that changed *data* the user must see even while
+    /// paused (a target added or removed, a panel reset). The UI loop takes a
+    /// fresh snapshot and lowers it.
+    pub refreeze: bool,
 
     pub should_quit: bool,
     pub started: Instant,
@@ -1379,8 +1412,10 @@ impl AppState {
             speed_total: 0,
             processes: Vec::new(),
             remotes: Vec::new(),
+            bw_reset: false,
             bw_view: BwView::Processes,
             remote_sel: 0,
+            proc_sel: 0,
             proc_status: ProcStatus::Probing,
             bw_col: 1,
             bw_sort: None,
@@ -1419,9 +1454,65 @@ impl AppState {
             missing_tools: Vec::new(),
             logging_requested: false,
             log: None,
+            refreeze: false,
             should_quit: false,
             started: Instant::now(),
         }
+    }
+
+    /// Bring a paused snapshot up to date with everything the user drives.
+    ///
+    /// While paused the screen is drawn from a copy taken at the moment of
+    /// pausing, so nothing measured moves — collectors keep writing to the
+    /// live state, invisibly. But the user is still at the keyboard: cursors,
+    /// focus, overlays and text entry must respond, and anything they asked
+    /// for by hand (a whois, a traceroute, a speed test) must arrive. Those
+    /// fields are copied across before every draw; the measurements are not.
+    pub fn sync_interactive_from(&mut self, live: &AppState) {
+        // Navigation and view.
+        self.focus = live.focus;
+        self.fullscreen = live.fullscreen;
+        self.sub_pane = live.sub_pane;
+        self.quality_view = live.quality_view;
+        self.selected = live.selected;
+        self.graph_target = live.graph_target;
+        self.window_secs = live.window_secs;
+        self.graph_marker = live.graph_marker;
+        self.q_col = live.q_col;
+        self.q_sort = live.q_sort;
+        self.bw_view = live.bw_view;
+        self.remote_sel = live.remote_sel;
+        self.proc_sel = live.proc_sel;
+        self.bw_col = live.bw_col;
+        self.bw_sort = live.bw_sort;
+        self.speed_sel = live.speed_sel;
+        self.speedtest_provider_idx = live.speedtest_provider_idx;
+        // Overlays, entry and messages.
+        self.overlay = live.overlay;
+        self.input_mode = live.input_mode.clone();
+        self.input_buffer = live.input_buffer.clone();
+        self.notice = live.notice.clone();
+        self.paused = live.paused;
+        self.explainer_pending = live.explainer_pending;
+        self.locations = live.locations.clone();
+        self.locations_sel = live.locations_sel;
+        self.events_scroll = live.events_scroll;
+        self.whois_scroll = live.whois_scroll;
+        self.logging_requested = live.logging_requested;
+        self.log = live.log.clone();
+        // Things the user asked for by hand: their results are wanted now.
+        self.whois = live.whois.clone();
+        self.traceroute = live.traceroute.clone();
+        // The path monitor is a measurement, so its numbers hold; but starting
+        // or stopping one, and its row cursor, are the user's.
+        match (&mut self.hop_monitor, &live.hop_monitor) {
+            (Some(fr), Some(lv)) if fr.generation == lv.generation => fr.selected = lv.selected,
+            _ => self.hop_monitor = live.hop_monitor.clone(),
+        }
+        self.speedtest = live.speedtest.clone();
+        self.speed_history = live.speed_history.clone();
+        self.speed_total = live.speed_total;
+        self.should_quit = live.should_quit;
     }
 
     /// Clear every latency statistic: targets, monitored hops, the one-shot
@@ -1525,6 +1616,73 @@ impl AppState {
             return None;
         }
         self.remotes.get(self.remote_sel)
+    }
+
+    /// Whether the process list holds the row cursor.
+    pub fn on_process_list(&self) -> bool {
+        self.focus == Panel::Bandwidth
+            && self.bw_view == BwView::Processes
+            && self.sub_pane == SubPane::Primary
+    }
+
+    /// Indices into `processes` in display order: the collector's ranking by
+    /// session total unless a column sort is active. Shared by the renderer
+    /// and the cursor, so ↑/↓ walk the rows as drawn.
+    pub fn process_order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.processes.len()).collect();
+        let Some((col, desc)) = self.bw_sort.filter(|_| self.bw_view == BwView::Processes) else {
+            return order;
+        };
+        order.sort_by(|&i, &j| {
+            let (a, b) = (&self.processes[i], &self.processes[j]);
+            let o = match col {
+                0 => a.name.cmp(&b.name),
+                2 => a.down_bytes.cmp(&b.down_bytes),
+                3 => a.up_bytes.cmp(&b.up_bytes),
+                4 => (a.down_bps + a.up_bps).total_cmp(&(b.down_bps + b.up_bps)),
+                5 => a.share.total_cmp(&b.share),
+                6 => a.retx.cmp(&b.retx),
+                _ => a.total_bytes.cmp(&b.total_bytes),
+            };
+            if desc { o.reverse() } else { o }
+        });
+        order
+    }
+
+    /// Indices into `remotes` in display order; see [`Self::process_order`].
+    pub fn remote_order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.remotes.len()).collect();
+        let Some((col, desc)) = self.bw_sort.filter(|_| self.bw_view == BwView::Remotes) else {
+            return order;
+        };
+        order.sort_by(|&i, &j| {
+            let (a, b) = (&self.remotes[i], &self.remotes[j]);
+            let o = match col {
+                0 => a.addr.cmp(&b.addr),
+                1 => a.process.cmp(&b.process),
+                3 => a.down_bytes.cmp(&b.down_bytes),
+                4 => a.up_bytes.cmp(&b.up_bytes),
+                5 => (a.down_bps + a.up_bps).total_cmp(&(b.down_bps + b.up_bps)),
+                6 => a.share.total_cmp(&b.share),
+                _ => a.total_bytes.cmp(&b.total_bytes),
+            };
+            if desc { o.reverse() } else { o }
+        });
+        order
+    }
+
+    /// Move a row cursor `delta` places through `order`, returning the new
+    /// index into the underlying list. A cursor sitting on a row that has
+    /// gone (the list shrank) resumes from the end.
+    pub fn step_in_order(order: &[usize], current: usize, delta: isize) -> usize {
+        if order.is_empty() {
+            return 0;
+        }
+        let pos = order
+            .iter()
+            .position(|&i| i == current)
+            .unwrap_or(order.len() - 1) as isize;
+        order[(pos + delta).clamp(0, order.len() as isize - 1) as usize]
     }
 
     /// Number of recent samples the current window covers.

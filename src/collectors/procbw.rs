@@ -1,8 +1,11 @@
 //! Per-process and per-remote bandwidth. Platform sampling returns *cumulative*
 //! byte counters per socket, so this collector diffs successive samples to
-//! derive rates, then sums them two ways: onto the owning process (who is using
-//! the link) and onto the remote address (what they are talking to). Exits
-//! early (marking unsupported) where the platform has no unprivileged source.
+//! derive per-interval deltas, then accumulates them two ways: onto the owning
+//! process (who is using the link) and onto the remote address (what they are
+//! talking to). The tables it publishes are session totals — a process that
+//! moved a gigabyte ten minutes ago still ranks above one trickling now — with
+//! the current rate alongside. Exits early (marking unsupported) where the
+//! platform has no unprivileged source.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -12,8 +15,12 @@ use std::time::{Duration, Instant};
 use crate::app::{AppState, ProcBandwidth, ProcStatus, RemoteBandwidth};
 use crate::platform;
 
-// Keep enough for the full-screen view (10); the split view shows fewer.
-const TOP_N: usize = 10;
+/// Rows published to the UI. More than any view shows, so a sort by a live
+/// column (rate) can surface a small-total process that is busy right now.
+const TOP_N: usize = 50;
+/// Bound on remembered aggregates: a long session against a CDN sees a great
+/// many addresses. Past this the smallest idle entries are dropped.
+const MAX_AGG: usize = 2000;
 
 /// Traffic that never touched the wire is not bandwidth: loopback and the
 /// unspecified address (a socket bound but not yet connected).
@@ -21,49 +28,114 @@ fn on_the_wire(addr: IpAddr) -> bool {
     !(addr.is_loopback() || addr.is_unspecified())
 }
 
-/// Bytes moved to one remote this interval, and by whom.
+/// One process's session so far, plus what it did this interval.
 #[derive(Default)]
-struct RemoteAgg {
-    d_in: f64,
-    d_out: f64,
-    /// Bytes per port, to name the busiest.
-    ports: HashMap<u16, f64>,
-    /// Bytes per process name, to name the busiest.
-    procs: HashMap<String, f64>,
+struct ProcAgg {
+    name: String,
+    down: u64,
+    up: u64,
+    retx: u64,
+    /// This interval's deltas; zeroed at the start of every tick.
+    d_in: u64,
+    d_out: u64,
+    d_retx: u64,
 }
 
-/// Turn the interval's per-remote sums into the ranked list the UI shows.
-fn rank_remotes(
-    agg: HashMap<IpAddr, RemoteAgg>,
-    totals: &HashMap<IpAddr, u64>,
+/// One remote address's session so far, and by whom.
+#[derive(Default)]
+struct RemoteAgg {
+    down: u64,
+    up: u64,
+    /// Bytes per port, to name the busiest.
+    ports: HashMap<u16, u64>,
+    /// Bytes per process name, to name the busiest.
+    procs: HashMap<String, u64>,
+    d_in: u64,
+    d_out: u64,
+}
+
+fn busiest<K: Clone>(m: &HashMap<K, u64>) -> Option<K> {
+    m.iter().max_by_key(|(_, v)| **v).map(|(k, _)| k.clone())
+}
+
+/// Turn the session's per-process aggregates into the ranked list the UI shows.
+fn rank_processes(
+    agg: &HashMap<u32, ProcAgg>,
+    names: &HashMap<u32, String>,
     secs: f64,
-) -> Vec<RemoteBandwidth> {
-    let all: f64 = agg.values().map(|a| a.d_in + a.d_out).sum();
-    fn busiest<K: Clone>(m: &HashMap<K, f64>) -> Option<K> {
-        m.iter()
-            .max_by(|a, b| a.1.total_cmp(b.1))
-            .map(|(k, _)| k.clone())
-    }
+) -> Vec<ProcBandwidth> {
+    let all: u64 = agg.values().map(|a| a.down + a.up).sum();
+    let mut list: Vec<ProcBandwidth> = agg
+        .iter()
+        .map(|(&pid, a)| ProcBandwidth {
+            name: names.get(&pid).cloned().unwrap_or_else(|| a.name.clone()),
+            pid,
+            down_bytes: a.down,
+            up_bytes: a.up,
+            total_bytes: a.down + a.up,
+            share: if all > 0 {
+                (a.down + a.up) as f64 / all as f64
+            } else {
+                0.0
+            },
+            retx: a.retx,
+            down_bps: a.d_in as f64 / secs,
+            up_bps: a.d_out as f64 / secs,
+            retx_per_sec: a.d_retx as f64 / secs,
+        })
+        .collect();
+    list.sort_by(|a, b| b.total_bytes.cmp(&a.total_bytes).then(a.pid.cmp(&b.pid)));
+    list.truncate(TOP_N);
+    list
+}
+
+/// Turn the session's per-remote aggregates into the ranked list the UI shows.
+fn rank_remotes(agg: &HashMap<IpAddr, RemoteAgg>, secs: f64) -> Vec<RemoteBandwidth> {
+    let all: u64 = agg.values().map(|a| a.down + a.up).sum();
     let mut list: Vec<RemoteBandwidth> = agg
-        .into_iter()
-        .map(|(addr, a)| RemoteBandwidth {
+        .iter()
+        .map(|(&addr, a)| RemoteBandwidth {
             addr,
             port: busiest(&a.ports).unwrap_or(0),
             ports: a.ports.len(),
             process: busiest(&a.procs).unwrap_or_default(),
-            down_bps: a.d_in / secs,
-            up_bps: a.d_out / secs,
-            total_bytes: totals.get(&addr).copied().unwrap_or_default(),
-            share: if all > 0.0 {
-                (a.d_in + a.d_out) / all
+            down_bytes: a.down,
+            up_bytes: a.up,
+            total_bytes: a.down + a.up,
+            share: if all > 0 {
+                (a.down + a.up) as f64 / all as f64
             } else {
                 0.0
             },
+            down_bps: a.d_in as f64 / secs,
+            up_bps: a.d_out as f64 / secs,
         })
         .collect();
-    list.sort_by(|a, b| (b.down_bps + b.up_bps).total_cmp(&(a.down_bps + a.up_bps)));
+    list.sort_by(|a, b| b.total_bytes.cmp(&a.total_bytes).then(a.addr.cmp(&b.addr)));
     list.truncate(TOP_N);
     list
+}
+
+/// Keep the aggregate maps bounded: once past `MAX_AGG`, drop the smallest
+/// entries that did nothing this interval until half the room is free.
+fn prune<K: Clone + Eq + std::hash::Hash, V>(
+    m: &mut HashMap<K, V>,
+    total: impl Fn(&V) -> u64,
+    idle: impl Fn(&V) -> bool,
+) {
+    if m.len() <= MAX_AGG {
+        return;
+    }
+    let mut idle_keys: Vec<(u64, K)> = m
+        .iter()
+        .filter(|(_, v)| idle(v))
+        .map(|(k, v)| (total(v), k.clone()))
+        .collect();
+    idle_keys.sort_by_key(|(t, _)| *t);
+    let drop = m.len() - MAX_AGG / 2;
+    for (_, k) in idle_keys.into_iter().take(drop) {
+        m.remove(&k);
+    }
 }
 
 /// Map pid → process name.
@@ -131,12 +203,11 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
     // by the counter, not the process: on Linux each sample is one socket, and
     // diffing per socket is what makes a closing connection harmless.
     let mut prev: HashMap<u64, (u64, u64, u64)> = HashMap::new();
-    // Bytes attributed to each pid since octomon started. Derived from deltas
-    // rather than read from the sample, since a per-socket total is not a
-    // process total.
-    let mut totals: HashMap<u32, u64> = HashMap::new();
-    // Likewise per remote address.
-    let mut remote_totals: HashMap<IpAddr, u64> = HashMap::new();
+    // Session aggregates, built from deltas rather than read from the sample,
+    // since a per-socket total is not a process total. The name in `ProcAgg`
+    // is the last one seen, so an exited process keeps its label.
+    let mut procs: HashMap<u32, ProcAgg> = HashMap::new();
+    let mut remotes: HashMap<IpAddr, RemoteAgg> = HashMap::new();
     let mut prev_at = Instant::now();
     // False until a baseline exists, so the first sample only records counters
     // rather than attributing their history to one interval.
@@ -153,10 +224,22 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
         let now = Instant::now();
         let secs = now.duration_since(prev_at).as_secs_f64().max(0.001);
 
-        // Sum each counter's delta onto its owning process, and onto the
+        // A reset from the UI wipes the session, not just the tables.
+        if state.lock().unwrap().bw_reset {
+            procs.clear();
+            remotes.clear();
+        }
+
+        // New interval: last tick's deltas are history.
+        for a in procs.values_mut() {
+            (a.d_in, a.d_out, a.d_retx) = (0, 0, 0);
+        }
+        for a in remotes.values_mut() {
+            (a.d_in, a.d_out) = (0, 0);
+        }
+
+        // Add each counter's delta onto its owning process, and onto the
         // remote it was talking to.
-        let mut agg: HashMap<u32, (f64, f64, f64, String)> = HashMap::new();
-        let mut ragg: HashMap<IpAddr, RemoteAgg> = HashMap::new();
         for s in &sample {
             let (d_in, d_out, d_retx) = match prev.get(&s.key) {
                 Some((pin, pout, pretx)) => (
@@ -179,45 +262,37 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
             if d_in == 0 && d_out == 0 && d_retx == 0 {
                 continue;
             }
-            let e = agg
-                .entry(s.pid)
-                .or_insert_with(|| (0.0, 0.0, 0.0, s.name.clone()));
-            e.0 += d_in as f64;
-            e.1 += d_out as f64;
-            e.2 += d_retx as f64;
-            *totals.entry(s.pid).or_default() += d_in + d_out;
+            let name = full_names
+                .get(&s.pid)
+                .cloned()
+                .unwrap_or_else(|| s.name.clone());
+            let p = procs.entry(s.pid).or_default();
+            p.name = name.clone();
+            p.down += d_in;
+            p.up += d_out;
+            p.retx += d_retx;
+            p.d_in += d_in;
+            p.d_out += d_out;
+            p.d_retx += d_retx;
 
             if let Some((addr, port)) = s.remote
                 && on_the_wire(addr)
                 && d_in + d_out > 0
             {
-                let r = ragg.entry(addr).or_default();
-                r.d_in += d_in as f64;
-                r.d_out += d_out as f64;
-                *r.ports.entry(port).or_default() += (d_in + d_out) as f64;
-                let name = full_names
-                    .get(&s.pid)
-                    .cloned()
-                    .unwrap_or_else(|| s.name.clone());
-                *r.procs.entry(name).or_default() += (d_in + d_out) as f64;
-                *remote_totals.entry(addr).or_default() += d_in + d_out;
+                let r = remotes.entry(addr).or_default();
+                r.down += d_in;
+                r.up += d_out;
+                r.d_in += d_in;
+                r.d_out += d_out;
+                *r.ports.entry(port).or_default() += d_in + d_out;
+                *r.procs.entry(name).or_default() += d_in + d_out;
             }
         }
-        let remotes = rank_remotes(ragg, &remote_totals, secs);
+        prune(&mut procs, |a| a.down + a.up, |a| a.d_in + a.d_out == 0);
+        prune(&mut remotes, |a| a.down + a.up, |a| a.d_in + a.d_out == 0);
 
-        let mut list: Vec<ProcBandwidth> = agg
-            .into_iter()
-            .map(|(pid, (d_in, d_out, d_retx, name))| ProcBandwidth {
-                name: full_names.get(&pid).cloned().unwrap_or(name),
-                pid,
-                down_bps: d_in / secs,
-                up_bps: d_out / secs,
-                total_bytes: totals.get(&pid).copied().unwrap_or_default(),
-                retx_per_sec: d_retx / secs,
-            })
-            .collect();
-        list.sort_by(|a, b| (b.down_bps + b.up_bps).total_cmp(&(a.down_bps + a.up_bps)));
-        list.truncate(TOP_N);
+        let proc_list = rank_processes(&procs, &full_names, secs);
+        let remote_list = rank_remotes(&remotes, secs);
 
         // Only remember counters still present; a socket that has gone away had
         // its final delta counted already.
@@ -229,11 +304,20 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
         primed = true;
 
         let mut st = state.lock().unwrap();
-        st.processes = list;
-        // Keep the cursor on a row that still exists; the list reorders as
-        // traffic shifts, which is unavoidable for a live ranking.
-        st.remote_sel = st.remote_sel.min(remotes.len().saturating_sub(1));
-        st.remotes = remotes;
+        st.bw_reset = false;
+        // Paused means the tables hold still. Aggregation carries on above,
+        // so resuming shows the true totals. The screen is drawn from a
+        // snapshot while paused, but the key handlers (W, a) act on the *live*
+        // list by cursor index, so the live list must match what is shown.
+        if st.paused {
+            continue;
+        }
+        // Keep the cursors on rows that still exist. Rows are ordered by
+        // session total, so the ranking settles rather than churning.
+        st.proc_sel = st.proc_sel.min(proc_list.len().saturating_sub(1));
+        st.processes = proc_list;
+        st.remote_sel = st.remote_sel.min(remote_list.len().saturating_sub(1));
+        st.remotes = remote_list;
     }
 }
 
@@ -247,31 +331,103 @@ mod tests {
     }
 
     #[test]
-    fn remotes_rank_by_rate_and_name_their_busiest_port_and_process() {
+    fn remotes_rank_by_session_total_and_name_their_busiest_port_and_process() {
         let mut agg: HashMap<IpAddr, RemoteAgg> = HashMap::new();
         let a = agg.entry(ip(1)).or_default();
-        a.d_in = 900.0;
-        a.d_out = 100.0;
-        a.ports.insert(443, 950.0);
-        a.ports.insert(80, 50.0);
-        a.procs.insert("firefox".into(), 700.0);
-        a.procs.insert("curl".into(), 300.0);
+        a.down = 4500;
+        a.up = 500;
+        a.d_in = 900;
+        a.d_out = 100;
+        a.ports.insert(443, 4750);
+        a.ports.insert(80, 250);
+        a.procs.insert("firefox".into(), 3500);
+        a.procs.insert("curl".into(), 1500);
+        // Busier right now, but has moved far less over the session: ranks
+        // second, since the table answers "what has been using the link".
         let b = agg.entry(ip(2)).or_default();
-        b.d_in = 100.0;
-        b.ports.insert(22, 100.0);
-        b.procs.insert("ssh".into(), 100.0);
+        b.down = 300;
+        b.d_in = 2000;
+        b.ports.insert(22, 300);
+        b.procs.insert("ssh".into(), 300);
 
-        let totals = HashMap::from([(ip(1), 5000u64), (ip(2), 300u64)]);
-        let list = rank_remotes(agg, &totals, 2.0);
+        let list = rank_remotes(&agg, 2.0);
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].addr, ip(1));
         assert_eq!((list[0].port, list[0].ports), (443, 2));
         assert_eq!(list[0].process, "firefox");
-        assert!((list[0].down_bps - 450.0).abs() < 1e-9, "bytes / secs");
-        assert!((list[0].share - 1000.0 / 1100.0).abs() < 1e-9);
+        assert_eq!((list[0].down_bytes, list[0].up_bytes), (4500, 500));
         assert_eq!(list[0].total_bytes, 5000);
+        assert!((list[0].down_bps - 450.0).abs() < 1e-9, "bytes / secs");
+        assert!((list[0].share - 5000.0 / 5300.0).abs() < 1e-9);
         assert_eq!(list[1].addr, ip(2));
         assert_eq!(list[1].ports, 1);
+        assert!((list[1].down_bps - 1000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn processes_rank_by_session_total_and_keep_idle_rows() {
+        let mut agg: HashMap<u32, ProcAgg> = HashMap::new();
+        // Exited: no longer in the name map, nothing this interval, but it
+        // moved the most bytes and stays at the top under its last name.
+        agg.insert(
+            7,
+            ProcAgg {
+                name: "rsync".into(),
+                down: 100,
+                up: 9_000,
+                retx: 3,
+                ..Default::default()
+            },
+        );
+        agg.insert(
+            8,
+            ProcAgg {
+                name: "Firefox".into(),
+                down: 1_000,
+                up: 100,
+                d_in: 500,
+                d_out: 20,
+                d_retx: 2,
+                ..Default::default()
+            },
+        );
+        let names = HashMap::from([(8u32, "firefox".to_string())]);
+        let list = rank_processes(&agg, &names, 2.0);
+        assert_eq!(list.len(), 2);
+        assert_eq!((list[0].pid, list[0].name.as_str()), (7, "rsync"));
+        assert_eq!(list[0].total_bytes, 9_100);
+        assert_eq!(list[0].down_bps, 0.0);
+        assert_eq!(list[0].retx, 3);
+        assert_eq!(list[1].name, "firefox", "live name wins over the sample's");
+        assert!((list[1].down_bps - 250.0).abs() < 1e-9);
+        assert!((list[1].retx_per_sec - 1.0).abs() < 1e-9);
+        assert!((list[1].share - 1_100.0 / 10_200.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn prune_drops_the_smallest_idle_entries_only_when_over_the_cap() {
+        let mut m: HashMap<u32, ProcAgg> = HashMap::new();
+        for i in 0..(MAX_AGG as u32 + 10) {
+            m.insert(
+                i,
+                ProcAgg {
+                    down: i as u64,
+                    // The smallest one is busy right now, so it survives.
+                    d_in: if i == 0 { 1 } else { 0 },
+                    ..Default::default()
+                },
+            );
+        }
+        prune(&mut m, |a| a.down + a.up, |a| a.d_in + a.d_out == 0);
+        assert_eq!(m.len(), MAX_AGG / 2);
+        assert!(m.contains_key(&0), "busy entries are kept");
+        assert!(m.contains_key(&(MAX_AGG as u32 + 9)), "biggest kept");
+        assert!(!m.contains_key(&1), "smallest idle dropped");
+
+        let mut small: HashMap<u32, ProcAgg> = HashMap::new();
+        small.insert(1, ProcAgg::default());
+        prune(&mut small, |a| a.down + a.up, |_| true);
+        assert_eq!(small.len(), 1, "under the cap nothing goes");
     }
 
     #[test]

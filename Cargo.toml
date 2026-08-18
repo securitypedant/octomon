@@ -16,6 +16,7 @@ rust-version = "1.88"
 # which crates.io cannot render anyway — out of what users download.
 include = [
     "src/**/*.rs",
+    "build.rs",
     "README.md",
     "PRIVILEGES.md",
     "LICENSE-MIT",

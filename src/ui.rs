@@ -483,11 +483,12 @@ fn header(f: &mut Frame, s: &AppState, area: Rect) {
 
     let up = s.started.elapsed().as_secs();
     let mut left = vec![
-        // The leading space sits outside the badge; inside it renders as a
-        // stray cyan block hanging off the left edge.
+        // Badges carry a space of their own colour either side, so the text
+        // sits centred in its block; a plain space keeps the first one off
+        // the terminal's left edge.
         Span::raw(" "),
         Span::styled(
-            "octomon ",
+            " octomon ",
             Style::new().fg(Color::Black).bg(Color::Cyan).bold(),
         ),
         Span::raw(format!(
@@ -498,8 +499,9 @@ fn header(f: &mut Frame, s: &AppState, area: Rect) {
         )),
     ];
     if s.paused {
+        left.push(Span::raw("  "));
         left.push(Span::styled(
-            "  PAUSED",
+            " PAUSED ",
             Style::new().fg(Color::Black).bg(Color::Yellow).bold(),
         ));
     }
@@ -511,11 +513,9 @@ fn header(f: &mut Frame, s: &AppState, area: Rect) {
     match &s.log {
         Some(log) => {
             let secs = log.started.elapsed().as_secs();
-            // Gap goes outside the styled span, or it renders as a red block
-            // hanging off the left of the dot.
             left.push(Span::raw("  "));
             left.push(Span::styled(
-                "● REC",
+                " ● REC ",
                 Style::new().fg(Color::White).bg(Color::Red).bold(),
             ));
             left.push(Span::styled(
@@ -613,21 +613,15 @@ fn context_line(s: &AppState) -> Line<'static> {
                 key("[v]"),
                 txt(p),
                 Span::raw(" "),
-                key("[b]"),
-                txt(match s.bw_view {
-                    BwView::Processes => "y remote ",
-                    BwView::Remotes => "y process ",
+                key("[n]"),
+                txt(match (s.bw_view, s.sub_pane) {
+                    (BwView::Processes, SubPane::Primary) => "ext: remotes ",
+                    (BwView::Remotes, SubPane::Primary) if s.fullscreen => "ext: history ",
+                    _ => "ext: processes ",
                 }),
             ];
-            if s.bw_view == BwView::Remotes {
-                v.extend([
-                    key("[↑↓]"),
-                    txt("sel "),
-                    key("[W]"),
-                    txt("hois "),
-                    key("[a]"),
-                    txt("dd "),
-                ]);
+            if s.bw_view == BwView::Remotes && s.sub_pane == SubPane::Primary {
+                v.extend([key("[W]"), txt("hois "), key("[a]"), txt("dd ")]);
             }
             v.extend([key("[R]"), txt("eset "), key("[f]"), txt("ull ")]);
             v
@@ -1681,11 +1675,17 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let inner = b.inner(area);
     f.render_widget(b, area);
 
-    // Split view shows 5 talkers, full-screen shows 10; the graphs take the rest.
-    let talkers = if s.fullscreen { 10 } else { 5 };
-    let talker_h = talkers as u16 + 1; // +1 for the section title
+    // Split view shows 5 talkers under a header. Full screen gives the tables
+    // half the height (never less than a 10-row pane, borders included) and
+    // the graphs the rest; the tables scroll for anything beyond that.
+    let speed_h = speedtest_height(s, inner.width);
+    let talker_h = if s.fullscreen {
+        (inner.height.saturating_sub(speed_h) / 2).max(13)
+    } else {
+        6
+    };
     let rows = Layout::vertical([
-        Constraint::Length(speedtest_height(s, inner.width)), // status / progress
+        Constraint::Length(speed_h),  // status / progress
         Constraint::Min(6),           // throughput graphs (given the most room)
         Constraint::Length(talker_h), // top talkers pinned to the bottom
     ])
@@ -1720,23 +1720,50 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
         )));
     f.render_widget(up, graphs[1]);
 
-    // Full-screen: processes and speed-test history each get their own panel,
-    // and 'n' moves the cursor between them.
+    // Full-screen: the talkers and speed-test history each get their own panel,
+    // and 'n' moves the cursor between them. Given the width, processes and
+    // remote addresses sit side by side and 'b' picks which one the sort and
+    // row cursor belong to; otherwise 'b' switches which of the two is shown.
     if s.fullscreen {
-        let cols = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(rows[2]);
         let on_history = s.focus == Panel::Bandwidth && s.sub_pane == SubPane::Secondary;
+        let on_talkers = s.focus == Panel::Bandwidth && !on_history;
+        let both = both_talker_tables_fit(rows[2].width);
+        let cols = if both {
+            Layout::horizontal([
+                Constraint::Fill(1),
+                Constraint::Fill(1),
+                Constraint::Length(SPEED_HISTORY_W),
+            ])
+            .split(rows[2])
+        } else {
+            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .split(rows[2])
+        };
 
         // Say how to get to the other list: a second view behind a key that
         // is not otherwise hinted at in the title is a view nobody finds.
-        let title = match s.bw_view {
-            BwView::Processes => "Processes · b to switch",
-            BwView::Remotes => "Remote addresses · b to switch",
+        let views: &[BwView] = if both {
+            &[BwView::Processes, BwView::Remotes]
+        } else {
+            std::slice::from_ref(&s.bw_view)
         };
-        let pblock = block(title, s.focus == Panel::Bandwidth && !on_history);
-        let pinner = pblock.inner(cols[0]);
-        f.render_widget(pblock, cols[0]);
-        top_talkers(f, s, pinner, talkers);
+        for (i, view) in views.iter().enumerate() {
+            let active = *view == s.bw_view;
+            let name = match view {
+                BwView::Processes => "Processes",
+                BwView::Remotes => "Remote addresses",
+            };
+            let title = if both {
+                name.to_string()
+            } else {
+                format!("{name} · n for next")
+            };
+            let tblock = block(&title, on_talkers && active);
+            let tinner = tblock.inner(cols[i]);
+            f.render_widget(tblock, cols[i]);
+            top_talkers_view(f, s, tinner, *view);
+        }
+        let hist_area = cols[views.len()];
 
         // The saved count is the point of a history; when it outgrows what is
         // held in memory, say so rather than implying the rest is gone.
@@ -1751,12 +1778,25 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
             total => format!("Speed Test History · {total} saved"),
         };
         let sblock = block(&title, on_history);
-        let sinner = sblock.inner(cols[1]);
-        f.render_widget(sblock, cols[1]);
+        let sinner = sblock.inner(hist_area);
+        f.render_widget(sblock, hist_area);
         speedtest_results(f, s, sinner, on_history);
     } else {
-        top_talkers(f, s, rows[2], talkers);
+        top_talkers_view(f, s, rows[2], s.bw_view);
     }
+}
+
+/// Width of the speed-test history pane in full screen: its five fixed columns
+/// plus borders.
+const SPEED_HISTORY_W: u16 = 12 + 11 + 7 + 7 + 8 + 4 + 2;
+
+/// Whether the full-screen talkers row is wide enough to show processes and
+/// remote addresses at once, beside the speed history. The bar is set where
+/// each table still gets the columns that make it worth having: the process
+/// table its name/total/↓/↑, the remotes its address/process/total. Trailing
+/// columns come back as the terminal widens.
+fn both_talker_tables_fit(width: u16) -> bool {
+    width >= SPEED_HISTORY_W + 2 * (52 + 2)
 }
 
 /// Table of recent speed-test results (full-screen only). Scrolls to keep the
@@ -1909,9 +1949,11 @@ fn render_speedtest(f: &mut Frame, s: &AppState, area: Rect) {
     }
 }
 
-/// Compact "top processes by bandwidth" list beneath the throughput sparklines,
-/// with per-process rtt and retransmit-rate for connection health.
-fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
+/// Compact "what has been using the link" table beneath the throughput
+/// sparklines: processes ranked by bytes moved this session, with the current
+/// rate and retransmits for connection health. As many rows as fit under the
+/// header; the row cursor scrolls the rest into view.
+fn top_talkers_view(f: &mut Frame, s: &AppState, area: Rect, view: BwView) {
     // No section title (the column header makes the list self-explanatory),
     // reclaiming a row for data.
     let inner = area;
@@ -1957,72 +1999,152 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
         ProcStatus::Supported => {}
     }
 
-    if s.bw_view == BwView::Remotes {
-        return top_remotes(f, s, inner, limit);
+    if view == BwView::Remotes {
+        return top_remotes(f, s, inner);
     }
+    // Only the active table (of the two shown side by side in full screen)
+    // carries the column cursor and sort.
+    let active = s.bw_view == BwView::Processes;
 
-    // Header with the column cursor highlighted and a sort-direction arrow.
-    let header = talkers_header(s, &["name", "↓", "↑", "total", "retx"]);
+    // Session totals lead (that is what the table ranks by); the live rate and
+    // health columns follow, and go first when the panel is narrow.
+    // Sized so every column fits the full-screen pane of a 120-column terminal.
+    const WIDTHS: [u16; 7] = [21, 7, 7, 7, 10, 5, 5];
+    let ncols = fitting_columns(&WIDTHS, inner.width);
+    let labels = ["name", "total", "↓", "↑", "now", "share", "retx"];
+    let header = talkers_header(s, &labels[..ncols], active);
 
-    // Apply the active sort (a copy — the collector keeps its own order).
-    let mut procs: Vec<&crate::app::ProcBandwidth> = s.processes.iter().collect();
-    if let Some((col, desc)) = s.bw_sort {
-        procs.sort_by(|a, b| {
-            let o = match col {
-                0 => a.name.cmp(&b.name),
-                2 => a.up_bps.total_cmp(&b.up_bps),
-                3 => a.total_bytes.cmp(&b.total_bytes),
-                4 => a.retx_per_sec.total_cmp(&b.retx_per_sec),
-                _ => a.down_bps.total_cmp(&b.down_bps),
-            };
-            if desc { o.reverse() } else { o }
-        });
-    }
+    // Rows as drawn (the sort, when one is active), scrolled to keep the
+    // cursor in view, with a cue beside them when there is more.
+    let order = s.process_order();
+    let cursor_on = s.on_process_list();
+    let (inner, first, visible) = talkers_scroll(f, inner, &order, s.proc_sel);
 
-    let rows = procs.into_iter().take(limit).map(|p| {
-        let name: String = p.name.chars().take(36).collect();
+    let rows = order.iter().skip(first).take(visible).map(|&idx| {
+        let p = &s.processes[idx];
+        let name: String = p.name.chars().take(WIDTHS[0] as usize).collect();
+        // Retransmits: red while they are happening, the session count once
+        // they have, nothing when there were none.
         let (retx, retx_style) = if p.retx_per_sec >= 1.0 {
             (
                 format!("{:.0}/s", p.retx_per_sec),
                 Style::new().fg(Color::Red),
             )
+        } else if p.retx > 0 {
+            (p.retx.to_string(), Style::new().fg(Color::Gray))
         } else {
             ("·".to_string(), Style::new().fg(Color::DarkGray))
         };
-        Row::new(vec![
+        let mut cells = vec![
             Cell::from(name),
             Cell::from(Span::styled(
-                fmt_rate(p.down_bps),
+                fmt_bytes(p.total_bytes),
+                Style::new().fg(Color::White),
+            )),
+            Cell::from(Span::styled(
+                fmt_bytes(p.down_bytes),
                 Style::new().fg(Color::Green),
             )),
             Cell::from(Span::styled(
-                fmt_rate(p.up_bps),
+                fmt_bytes(p.up_bytes),
                 Style::new().fg(Color::Magenta),
             )),
+            fmt_now(p.down_bps + p.up_bps),
             Cell::from(Span::styled(
-                fmt_bytes(p.total_bytes),
+                format!("{:.0}%", p.share * 100.0),
                 Style::new().fg(Color::Gray),
             )),
             Cell::from(Span::styled(retx, retx_style)),
-        ])
+        ];
+        cells.truncate(ncols);
+        Row::new(cells).style(row_style(cursor_on && idx == s.proc_sel))
     });
-    let widths = [
-        Constraint::Length(38),
-        Constraint::Length(12),
-        Constraint::Length(12),
-        Constraint::Length(8),
-        Constraint::Length(8),
-    ];
+    let widths: Vec<Constraint> = WIDTHS[..ncols]
+        .iter()
+        .map(|w| Constraint::Length(*w))
+        .collect();
     f.render_widget(Table::new(rows, widths).header(header), inner);
+}
+
+/// Cursor-row highlight shared by the talkers tables.
+fn row_style(selected: bool) -> Style {
+    if selected {
+        Style::new()
+            .bg(Color::Rgb(40, 40, 55))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::new()
+    }
+}
+
+/// Scroll a talkers table so the cursor row stays visible, and draw the
+/// scroll cue beside the rows (under the header) when they overflow. Returns
+/// the area left for the table, the first row to draw, and how many.
+fn talkers_scroll(
+    f: &mut Frame,
+    area: Rect,
+    order: &[usize],
+    cursor: usize,
+) -> (Rect, usize, usize) {
+    let visible = area.height.saturating_sub(1) as usize; // header row
+    let pos = order.iter().position(|&i| i == cursor).unwrap_or(0);
+    let first = if visible == 0 {
+        0
+    } else {
+        pos.saturating_sub(visible - 1)
+    };
+    let body = Rect {
+        y: area.y + 1,
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    let body = scroll_cue(f, body, order.len(), first, visible);
+    (
+        Rect {
+            width: body.width,
+            ..area
+        },
+        first,
+        visible,
+    )
+}
+
+/// How many leading columns of the given widths (plus one-cell gaps) fit in
+/// `width`. Fixed widths, and when the panel is narrower than the lot (the
+/// split view is), the trailing columns go rather than every column squeezing.
+/// Always at least one.
+fn fitting_columns(widths: &[u16], width: u16) -> usize {
+    let mut ncols = 0;
+    let mut used = 0u16;
+    for w in widths {
+        let next = used + w + if ncols > 0 { 1 } else { 0 };
+        if next > width {
+            break;
+        }
+        used = next;
+        ncols += 1;
+    }
+    ncols.max(1)
+}
+
+/// The "now" column: the current combined rate, or a dim dot when idle so a
+/// quiet row reads as quiet rather than as "0 B/s".
+fn fmt_now(bps: f64) -> Cell<'static> {
+    if bps > 0.0 {
+        Cell::from(Span::styled(fmt_rate(bps), Style::new().fg(Color::Cyan)))
+    } else {
+        Cell::from(Span::styled("·", Style::new().fg(Color::DarkGray)))
+    }
 }
 
 /// Sortable header row for a talkers table: the column under the cursor is
 /// highlighted, the sorted column carries a direction arrow.
-fn talkers_header<'a>(s: &AppState, labels: &[&'a str]) -> Row<'a> {
-    let focused = s.focus == Panel::Bandwidth;
+fn talkers_header<'a>(s: &AppState, labels: &[&'a str], active: bool) -> Row<'a> {
+    let focused = active && s.focus == Panel::Bandwidth;
     Row::new(labels.iter().enumerate().map(|(i, l)| {
         let mut txt = (*l).to_string();
         if let Some((c, desc)) = s.bw_sort
+            && active
             && c == i
         {
             txt.push(if desc { '▼' } else { '▲' });
@@ -2048,55 +2170,33 @@ fn fmt_remote(r: &crate::app::RemoteBandwidth) -> String {
 }
 
 /// "Which address is eating my link": the top remotes by bandwidth, with the
-/// process talking to each. Has a row cursor, unlike the process list, because
-/// an address is something to act on — [W] asks who owns it, [a] pings it.
-fn top_remotes(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
+/// process talking to each. Its row cursor is one to act on — [W] asks who
+/// owns the address, [a] pings it — as well as what scrolls the list.
+fn top_remotes(f: &mut Frame, s: &AppState, area: Rect) {
     if s.remotes.is_empty() {
         f.render_widget(
             Paragraph::new(Span::styled(
-                "no traffic to remote addresses this interval",
+                "no traffic to remote addresses yet",
                 Style::new().fg(Color::DarkGray),
             )),
             area,
         );
         return;
     }
-    // Fixed widths, and when the panel is narrower than the lot (the split
-    // view is), the trailing columns go rather than every column squeezing —
-    // a squeezed address column is the one thing this table must not have.
-    const WIDTHS: [u16; 6] = [24, 14, 10, 10, 5, 8];
-    let mut ncols = 0;
-    let mut used = 0u16;
-    for w in WIDTHS {
-        let next = used + w + if ncols > 0 { 1 } else { 0 };
-        if next > area.width {
-            break;
-        }
-        used = next;
-        ncols += 1;
-    }
-    let ncols = ncols.max(1);
-    let labels = ["remote", "process", "↓", "↑", "share", "total"];
-    let header = talkers_header(s, &labels[..ncols]);
+    // A squeezed address column is the one thing this table must not have, so
+    // trailing columns are dropped instead when the panel is narrow.
+    const WIDTHS: [u16; 7] = [24, 12, 7, 7, 7, 10, 5];
+    let ncols = fitting_columns(&WIDTHS, area.width);
+    let labels = ["remote", "process", "total", "↓", "↑", "now", "share"];
+    let active = s.bw_view == BwView::Remotes;
+    let header = talkers_header(s, &labels[..ncols], active);
 
-    let mut list: Vec<(usize, &crate::app::RemoteBandwidth)> =
-        s.remotes.iter().enumerate().collect();
-    if let Some((col, desc)) = s.bw_sort {
-        list.sort_by(|(_, a), (_, b)| {
-            let o = match col {
-                0 => a.addr.cmp(&b.addr),
-                1 => a.process.cmp(&b.process),
-                3 => a.up_bps.total_cmp(&b.up_bps),
-                4 => a.share.total_cmp(&b.share),
-                5 => a.total_bytes.cmp(&b.total_bytes),
-                _ => a.down_bps.total_cmp(&b.down_bps),
-            };
-            if desc { o.reverse() } else { o }
-        });
-    }
-
+    let order = s.remote_order();
     let cursor_on = s.selected_remote().is_some();
-    let rows = list.into_iter().take(limit).map(|(idx, r)| {
+    let (area, first, visible) = talkers_scroll(f, area, &order, s.remote_sel);
+
+    let rows = order.iter().skip(first).take(visible).map(|&idx| {
+        let r = &s.remotes[idx];
         let selected = cursor_on && idx == s.remote_sel;
         // v6 with a port can outrun the column; keep the tail, which is the
         // distinctive part of the address.
@@ -2109,35 +2209,30 @@ fn top_remotes(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
                 full
             }
         };
-        let process: String = r.process.chars().take(14).collect();
+        let process: String = r.process.chars().take(WIDTHS[1] as usize).collect();
         let mut cells = vec![
             Cell::from(remote),
             Cell::from(Span::styled(process, Style::new().fg(Color::Gray))),
             Cell::from(Span::styled(
-                fmt_rate(r.down_bps),
+                fmt_bytes(r.total_bytes),
+                Style::new().fg(Color::White),
+            )),
+            Cell::from(Span::styled(
+                fmt_bytes(r.down_bytes),
                 Style::new().fg(Color::Green),
             )),
             Cell::from(Span::styled(
-                fmt_rate(r.up_bps),
+                fmt_bytes(r.up_bytes),
                 Style::new().fg(Color::Magenta),
             )),
+            fmt_now(r.down_bps + r.up_bps),
             Cell::from(Span::styled(
                 format!("{:.0}%", r.share * 100.0),
                 Style::new().fg(Color::Gray),
             )),
-            Cell::from(Span::styled(
-                fmt_bytes(r.total_bytes),
-                Style::new().fg(Color::Gray),
-            )),
         ];
         cells.truncate(ncols);
-        Row::new(cells).style(if selected {
-            Style::new()
-                .bg(Color::Rgb(40, 40, 55))
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::new()
-        })
+        Row::new(cells).style(row_style(selected))
     });
     let widths: Vec<Constraint> = WIDTHS[..ncols]
         .iter()
@@ -2172,7 +2267,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("n", "next sub-pane in panel"),
         row("Esc", "back / exit full-screen"),
         row("s", "run speed test"),
-        row("p", "pause / resume refresh"),
+        row("p", "pause / resume the display"),
         row("r", "re-probe network info"),
         row("w", "stats window 1m/5m/15m"),
         row("l", "start / stop CSV recording"),
@@ -2201,9 +2296,8 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         Line::from(""),
         head("Bandwidth"),
         row("v", "cycle speed-test provider"),
-        row("b", "processes ⇄ remote addrs"),
+        row("n", "procs → remotes → history"),
         row("W / a", "whois / add sel. remote"),
-        row("n", "talkers ⇄ speed history"),
         Line::from(""),
         head("Network"),
         row("r", "re-probe"),
@@ -2252,7 +2346,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     let outer = Block::bordered()
         .padding(Padding::new(1, 1, 0, 0))
         .title(Span::styled(
-            format!(" octomon v{} · Shortcuts ", env!("CARGO_PKG_VERSION")),
+            format!(" octomon v{} · Shortcuts ", crate::util::VERSION),
             Style::new().bold(),
         ))
         .title_bottom(Span::styled(
@@ -3951,40 +4045,69 @@ mod tests {
         let mut s = AppState::new(vec![]);
         s.focus = Panel::Bandwidth;
         s.proc_status = ProcStatus::Supported;
-        s.processes = vec![crate::app::ProcBandwidth {
-            name: "firefox".into(),
-            pid: 1,
-            down_bps: 1.0,
-            up_bps: 1.0,
-            total_bytes: 1,
-            retx_per_sec: 0.0,
-        }];
+        s.processes = vec![
+            crate::app::ProcBandwidth {
+                name: "firefox".into(),
+                pid: 1,
+                down_bytes: 4_000_000,
+                up_bytes: 1_000_000,
+                total_bytes: 5_000_000,
+                share: 0.8,
+                retx: 3,
+                down_bps: 900_000.0,
+                up_bps: 10_000.0,
+                retx_per_sec: 0.0,
+            },
+            // Idle now, but keeps its row with its session totals.
+            crate::app::ProcBandwidth {
+                name: "rsync".into(),
+                pid: 2,
+                down_bytes: 0,
+                up_bytes: 1_250_000,
+                total_bytes: 1_250_000,
+                share: 0.2,
+                ..Default::default()
+            },
+        ];
         s.remotes = vec![
             RemoteBandwidth {
                 addr: IpAddr::V4(Ipv4Addr::new(151, 101, 193, 111)),
                 port: 443,
                 ports: 2,
                 process: "firefox".into(),
-                down_bps: 900_000.0,
-                up_bps: 10_000.0,
+                down_bytes: 4_000_000,
+                up_bytes: 1_000_000,
                 total_bytes: 5_000_000,
                 share: 0.8,
+                down_bps: 900_000.0,
+                up_bps: 10_000.0,
             },
             RemoteBandwidth {
                 addr: "2606:4700:4700::1111".parse().unwrap(),
                 port: 53,
                 ports: 1,
                 process: "mDNSResponder".into(),
-                down_bps: 100.0,
-                up_bps: 100.0,
+                down_bytes: 500,
+                up_bytes: 500,
                 total_bytes: 1_000,
                 share: 0.2,
+                down_bps: 0.0,
+                up_bps: 0.0,
             },
         ];
         // Process view by default: no addresses shown.
         let out = draw(&s, 120, 30);
         assert!(out.contains("firefox"));
+        assert!(out.contains("rsync"), "idle processes keep their row");
         assert!(!out.contains("151.101.193.111"));
+        // Full screen has room for every column: session bytes, the live rate
+        // and the retransmit count.
+        s.fullscreen = true;
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("now"), "{out}");
+        assert!(out.contains("910.0 KB/s"), "{out}");
+        assert!(out.contains("80%"), "{out}");
+        s.fullscreen = false;
 
         s.bw_view = BwView::Remotes;
         s.remote_sel = 1;
@@ -3997,20 +4120,112 @@ mod tests {
         assert!(out.contains("…606:4700:4700::1111]:53"));
         assert!(out.contains("mDNSRespond"));
         assert!(out.contains("remote"));
-        // The split view is too narrow for every column: share and total go,
+        // The split view is too narrow for every column: the byte columns go,
         // the address does not get squeezed.
-        assert!(!out.contains("80%"));
+        assert!(!out.contains("977K"), "{out}");
         s.fullscreen = true;
         let out = draw(&s, 120, 30);
-        assert!(out.contains("80%"));
-        assert!(out.contains("Remote addresses · b to switch"));
+        assert!(out.contains("977K"), "{out}");
+        assert!(out.contains("Remote addresses · n for next"));
         assert_eq!(
             s.selected_addr(),
             Some("2606:4700:4700::1111".parse().unwrap()),
             "the cursor row is what W and a act on"
         );
         s.bw_view = BwView::Processes;
-        assert!(draw(&s, 120, 30).contains("Processes · b to switch"));
+        assert!(draw(&s, 120, 30).contains("Processes · n for next"));
+
+        // Wide enough, full screen shows both tables at once beside the
+        // history; 'n' then moves the focus (sort/cursor) between them, and
+        // the focused one carries the highlighted border rather than a hint.
+        let out = draw(&s, 200, 30);
+        assert!(out.contains("Processes ─"), "{out}");
+        assert!(out.contains("Remote addresses ─"), "{out}");
+        assert!(!out.contains("n for next"), "{out}");
+        assert!(out.contains("rsync") && out.contains("151.101.193.111:443+"));
+        assert!(out.contains("Speed Test History"));
+    }
+
+    /// The talkers tables scroll with their row cursor and show the cue only
+    /// when there is more than fits; ↑/↓ walk the rows as drawn under a sort.
+    #[test]
+    fn talkers_tables_scroll_with_the_cursor_in_display_order() {
+        use crate::app::{BwView, ProcStatus};
+        let mut s = AppState::new(vec![]);
+        s.focus = Panel::Bandwidth;
+        s.fullscreen = true;
+        s.proc_status = ProcStatus::Supported;
+        // 30 processes; the pane at 30 rows tall shows about ten.
+        s.processes = (0..30)
+            .map(|i| crate::app::ProcBandwidth {
+                name: format!("proc{i:02}"),
+                pid: i,
+                total_bytes: (30 - i) as u64 * 1_000_000,
+                ..Default::default()
+            })
+            .collect();
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("proc00") && !out.contains("proc29"), "{out}");
+        assert!(out.contains('┃'), "scroll cue when rows overflow: {out}");
+
+        // Cursor to the last row in display order: the list scrolls to it.
+        let order = s.process_order();
+        s.proc_sel = *order.last().unwrap();
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("proc29") && !out.contains("proc00"), "{out}");
+
+        // Under an ascending name sort the cursor steps through names, not
+        // collector indices.
+        s.bw_view = BwView::Processes;
+        s.bw_sort = Some((0, false));
+        s.proc_sel = 0;
+        let order = s.process_order();
+        assert_eq!(&s.processes[order[0]].name, "proc00");
+        let next = AppState::step_in_order(&order, s.proc_sel, 1);
+        assert_eq!(&s.processes[next].name, "proc01");
+        // Reverse it: stepping "down" from proc00 goes nowhere (it is last).
+        s.bw_sort = Some((0, true));
+        let order = s.process_order();
+        assert_eq!(AppState::step_in_order(&order, 0, 1), 0);
+        assert_eq!(
+            &s.processes[AppState::step_in_order(&order, 0, -1)].name,
+            "proc01"
+        );
+
+        // A short list draws no cue.
+        s.processes.truncate(3);
+        s.bw_sort = None;
+        s.proc_sel = 0;
+        assert!(!draw(&s, 120, 30).contains('┃'));
+    }
+
+    /// While paused the screen is drawn from a snapshot; what the user drives
+    /// is copied across, what is measured is not.
+    #[test]
+    fn paused_snapshot_takes_navigation_but_not_measurements() {
+        use crate::app::{BwView, Whois};
+        let mut live = AppState::new(vec![]);
+        let mut frozen = live.clone();
+        live.throughput.down_bps = 12345.0;
+        live.bw_view = BwView::Remotes;
+        live.remote_sel = 3;
+        live.fullscreen = true;
+        live.notice = Some("hello".into());
+        live.whois = Some(Whois {
+            addr: "1.1.1.1".parse().unwrap(),
+            running: true,
+            fields: vec![],
+            raw: vec![],
+            source: String::new(),
+            error: None,
+        });
+        frozen.sync_interactive_from(&live);
+        assert_eq!(frozen.throughput.down_bps, 0.0, "measurement stays put");
+        assert_eq!(frozen.bw_view, BwView::Remotes);
+        assert_eq!(frozen.remote_sel, 3);
+        assert!(frozen.fullscreen);
+        assert_eq!(frozen.notice.as_deref(), Some("hello"));
+        assert!(frozen.whois.is_some(), "a whois the user asked for arrives");
     }
 
     #[test]
@@ -4191,7 +4406,6 @@ mod tests {
             "e",
             "N",
             "W",
-            "b",
             "W / a",
         ] {
             assert!(out.contains(key), "help is missing a binding for {key:?}");
@@ -4212,8 +4426,7 @@ mod tests {
             "monitor every hop (MTR)",
             "whois: who owns address",
             "cycle speed-test provider",
-            "processes ⇄ remote addrs",
-            "talkers ⇄ speed history",
+            "procs → remotes → history",
             "full-screen for DNS graphs",
         ] {
             assert!(

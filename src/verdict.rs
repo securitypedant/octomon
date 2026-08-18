@@ -1210,11 +1210,13 @@ pub struct Transition {
     pub after: Option<Duration>,
 }
 
+#[derive(Clone)]
 struct Track {
     hits: VecDeque<bool>,
     active: Option<Active>,
 }
 
+#[derive(Clone)]
 struct Active {
     since: Instant,
     quiet: u32,
@@ -1224,7 +1226,7 @@ struct Active {
 /// Hysteresis over [`evaluate`]'s raw findings, keyed by `(cause, subject)`:
 /// raise on ≥4 of the last 6 ticks, clear after 8 consecutive quiet ticks.
 /// Severity/confidence/evidence of an active finding update live.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct VerdictState {
     pub current: Verdict,
     /// Latest full ladder, for the triage overlay.

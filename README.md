@@ -61,8 +61,8 @@ Windows each hold one thing back, covered in [Privileges](#privileges):
   loss, latency and an inline trace.
 - **Bandwidth** — live up/down throughput, an on-demand **speed test** with a
   choice of provider (**Cloudflare / M-Lab / LibreSpeed**), and **per-process**
-  talkers showing which apps are using the network (with retransmit rate and
-  session totals) — or, with `b`, the same traffic **by remote address**, so
+  talkers ranked by bytes moved this session (down/up/share, current rate and
+  retransmits) — or, with `n`, the same traffic **by remote address**, so
   the one host eating your link stands out, and can be whois'd (`W`) or added
   as a ping target (`a`) on the spot. Speed-test history is kept and browsable.
 - **Network** — interface, **connection type** (Wi-Fi / Ethernet / cellular /
@@ -260,7 +260,7 @@ octomon --help
 | `Tab` / `Shift+Tab` | Cycle panel focus (forward / back) |
 | `f` | Full-screen the focused panel |
 | `s` | Run a speed test |
-| `p` | Pause auto-refresh |
+| `p` | Pause the display (collection continues; cursors, whois etc. still work) |
 | `r` | Re-probe network info |
 | `w` | Cycle the stats window (30 / 60 / 300s) |
 | `n` | Move between sub-panes of the focused panel |
@@ -281,9 +281,8 @@ octomon --help
 | `W` | Who owns the selected address (target or hop) — RDAP/whois lookup |
 | **Bandwidth** | |
 | `v` | Cycle the speed-test provider (saved to config) |
-| `b` | Talkers by process ⇄ by remote address |
+| `n` | Cycle the lower panes: processes → remote addresses → Speed Test History (full-screen; a wide terminal shows both talker tables at once) |
 | `W` / `a` | Whois the selected remote address / add it as a target |
-| `n` | Switch between the talkers table and Speed Test History (full-screen) |
 
 ## Speed-test providers
 
