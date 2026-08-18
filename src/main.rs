@@ -8,6 +8,7 @@ mod app;
 mod baseline;
 mod collectors;
 mod config;
+mod demo;
 mod history;
 mod platform;
 mod store;
@@ -36,6 +37,8 @@ struct Ctx {
     netinfo_refresh: Arc<Notify>,
     ping_clients: collectors::ping::Clients,
     cfg: Config,
+    /// `--demo`: draw from a disguised copy of the state.
+    demo: bool,
 }
 
 /// Terminal dashboard for network performance.
@@ -73,6 +76,12 @@ struct Cli {
     /// Disable the on-demand speed test.
     #[arg(long)]
     no_speedtest: bool,
+
+    /// Demo mode: everything measures for real, but the screen shows fake
+    /// MAC addresses, addresses, SSIDs and other identifying details, kept
+    /// consistent for the session — safe to screen-record.
+    #[arg(long)]
+    demo: bool,
 
     /// Add an ICMP target: `LABEL=IP` or bare `IP`. Repeatable.
     #[arg(short = 't', long = "target", value_name = "[LABEL=]IP")]
@@ -271,7 +280,13 @@ async fn main() -> Result<()> {
             // The macOS Wi-Fi probe (system_profiler) is slow; wait for it.
             tokio::time::sleep(Duration::from_secs(17)).await;
         }
-        print_snapshot(&state.lock().unwrap());
+        if cli.demo {
+            let mut d = demo::Disguise::new();
+            let view = demo::disguise(&state.lock().unwrap(), &mut d);
+            print_snapshot(&view);
+        } else {
+            print_snapshot(&state.lock().unwrap());
+        }
         return Ok(());
     }
 
@@ -344,6 +359,7 @@ async fn main() -> Result<()> {
         netinfo_refresh,
         ping_clients,
         cfg,
+        demo: cli.demo,
     };
     let result = run_ui(&mut terminal, &ctx, rx).await;
     ratatui::restore();
@@ -361,6 +377,9 @@ async fn run_ui(
     // the live state underneath. What the user drives (cursors, overlays, a
     // whois they asked for) is copied across before each draw.
     let mut frozen: Option<Box<AppState>> = None;
+    // `--demo`: the mapping from real to fake, kept for the session so the
+    // fakes stay consistent frame to frame.
+    let mut disguise = ctx.demo.then(demo::Disguise::new);
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
@@ -373,7 +392,15 @@ async fn run_ui(
         }
         if !s.paused {
             frozen = None;
-            terminal.draw(|f| ui::render(f, &s))?;
+            match disguise.as_mut() {
+                Some(d) => {
+                    let view = demo::disguise(&s, d);
+                    terminal.draw(|f| ui::render(f, &view))?;
+                }
+                None => {
+                    terminal.draw(|f| ui::render(f, &s))?;
+                }
+            };
             continue;
         }
         if frozen.is_none() || s.refreeze {
@@ -382,7 +409,15 @@ async fn run_ui(
         }
         let fr = frozen.as_mut().unwrap();
         fr.sync_interactive_from(&s);
-        terminal.draw(|f| ui::render(f, fr))?;
+        match disguise.as_mut() {
+            Some(d) => {
+                let view = demo::disguise(fr, d);
+                terminal.draw(|f| ui::render(f, &view))?;
+            }
+            None => {
+                terminal.draw(|f| ui::render(f, fr))?;
+            }
+        };
     }
     Ok(())
 }

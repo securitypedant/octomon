@@ -181,6 +181,7 @@ octomon --no-speedtest       # disable the speed test
 octomon --ping-interval 500  # override the ping interval (ms)
 octomon --log                # start recording to CSV immediately (headless recorder)
 octomon --check              # print a one-shot text snapshot and exit (no TUI)
+octomon --demo               # real measurements, fake MACs/addresses/SSIDs — safe to screen-record
 octomon --doctor [--json] [--full] [--speedtest] [--observe SECS]
 octomon --help
 ```
