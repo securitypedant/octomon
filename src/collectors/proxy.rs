@@ -97,6 +97,7 @@ fn from_env() -> Option<ProxyConfig> {
 ///   ExceptionsList : <array> { 0 : *.local  1 : 169.254/16 }
 /// }
 /// ```
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn parse_scutil(text: &str) -> Option<ProxyConfig> {
     let mut kv = std::collections::HashMap::new();
     for line in text.lines() {

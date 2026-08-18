@@ -933,6 +933,8 @@ pub enum ProxyKind {
     /// A PAC script at this URL decides per request — not evaluable here.
     Pac(String),
     /// Auto-discovery (WPAD): the network names its own proxy via DHCP/DNS.
+    /// (Only the macOS and GNOME readers can report it.)
+    #[cfg_attr(windows, allow(dead_code))]
     Wpad,
 }
 

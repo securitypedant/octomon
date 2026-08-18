@@ -92,7 +92,9 @@ pub async fn run(
 
 /// Smallest size worth searching down to: the smallest datagram a QUIC server
 /// must answer (1200 bytes) plus IP and UDP headers.
+#[cfg(unix)]
 const FLOOR: u32 = 1228;
+#[cfg(unix)]
 const REPLY_WAIT: Duration = Duration::from_millis(1500);
 /// QUIC's port at the probe hosts.
 const QUIC_PORT: u16 = 443;
