@@ -45,9 +45,19 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr, label: String) {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if let Some(hop) = tr::parse_hop(&line) {
+                    // The first answer from the destination ends the path, as
+                    // in the hop monitor: traceroute itself only stops on
+                    // port-unreachable, and Cloudflare's edge answers
+                    // time-exceeded from 1.1.1.1 itself, so the raw output
+                    // would list the destination twice.
+                    let done = hop.addr.as_deref() == Some(addr.to_string().as_str());
                     let mut s = state.lock().unwrap();
                     if let Some(tr) = s.traceroute.as_mut() {
                         tr.hops.push(hop);
+                    }
+                    if done {
+                        let _ = child.start_kill();
+                        break;
                     }
                 }
             }

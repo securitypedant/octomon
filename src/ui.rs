@@ -7,11 +7,12 @@ use ratatui::style::Modifier;
 use ratatui::symbols::Marker;
 use ratatui::widgets::{
     Axis, Block, Cell, Chart, Clear, Dataset, Gauge, GraphType, LineGauge, Padding, Paragraph, Row,
-    Sparkline, SparklineBar, Table, Wrap,
+    Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, SparklineBar, Table, Wrap,
 };
 
 use crate::app::{
-    AppState, InputMode, LinkMedium, Overlay, Panel, ProcStatus, QualityView, SpeedStatus, SubPane,
+    AppState, BwView, InputMode, LinkMedium, Overlay, Panel, ProcStatus, QualityView, SpeedStatus,
+    SubPane,
 };
 use crate::verdict::{RungStatus, Severity, Verdict, thresholds as th};
 
@@ -57,8 +58,118 @@ pub fn render(f: &mut Frame, s: &AppState) {
         Overlay::Events => events_overlay(f, s, f.area()),
         Overlay::Explainer => explainer_overlay(f, f.area()),
         Overlay::Locations => locations_overlay(f, s, f.area()),
+        Overlay::Whois => whois_overlay(f, s, f.area()),
         Overlay::None => {}
     }
+}
+
+/// Who owns the selected address: the registry's answer, so a bad hop can be
+/// pinned on an organisation. Structured fields from RDAP; raw text when the
+/// system `whois` had to answer instead.
+fn whois_overlay(f: &mut Frame, s: &AppState, area: Rect) {
+    let Some(w) = s.whois.as_ref() else {
+        return;
+    };
+    let width = 84u16.min(area.width);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let key = |k: &str| Span::styled(format!("{k:<12}"), Style::new().fg(Color::Cyan));
+    lines.push(Line::from(vec![
+        key("address"),
+        Span::styled(w.addr.to_string(), Style::new().fg(Color::White).bold()),
+    ]));
+    if w.running {
+        lines.push(Line::from(Span::styled(
+            "looking up…",
+            Style::new().fg(Color::DarkGray),
+        )));
+    } else if let Some(e) = &w.error {
+        lines.push(Line::from(Span::styled(
+            format!("lookup failed — {e}"),
+            Style::new().fg(Color::Red),
+        )));
+    } else if !w.fields.is_empty() {
+        // Wrap long values (remarks, ranges) under the key column rather than
+        // letting the paragraph wrap them back to column zero.
+        let val_w = (width as usize).saturating_sub(4 + 12).max(20);
+        for (k, v) in &w.fields {
+            let mut first = true;
+            for chunk in wrap_words(v, val_w) {
+                lines.push(Line::from(vec![
+                    if first { key(k) } else { key("") },
+                    Span::styled(chunk, Style::new().fg(Color::White)),
+                ]));
+                first = false;
+            }
+        }
+    } else if !w.raw.is_empty() {
+        for l in &w.raw {
+            lines.push(Line::from(Span::styled(
+                l.clone(),
+                Style::new().fg(Color::Gray),
+            )));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "the registry had nothing to say about this address",
+            Style::new().fg(Color::DarkGray),
+        )));
+    }
+    if !w.source.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("source: {}", w.source),
+            Style::new().fg(Color::DarkGray),
+        )));
+    }
+
+    let h = ((lines.len() as u16) + 2)
+        .clamp(5, area.height * 4 / 5)
+        .min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width,
+        height: h,
+    };
+    let visible = rect.height.saturating_sub(2) as usize;
+    let first = s.whois_scroll.min(lines.len().saturating_sub(visible));
+    let shown: Vec<Line> = lines.into_iter().skip(first).collect();
+
+    f.render_widget(Clear, rect);
+    let outer = Block::bordered()
+        .padding(Padding::new(1, 1, 0, 0))
+        .title(Span::styled(
+            " octomon · who owns this address ",
+            Style::new().bold(),
+        ))
+        .title_bottom(Span::styled(
+            " ↑↓ scroll · press W or Esc to close ",
+            Style::new().fg(Color::DarkGray),
+        ))
+        .border_style(Style::new().fg(Color::Cyan));
+    let inner = outer.inner(rect);
+    f.render_widget(outer, rect);
+    f.render_widget(Paragraph::new(shown), inner);
+}
+
+/// Greedy word wrap to `width` columns; a single over-long word stands alone.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > width {
+            out.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+    }
+    if !cur.is_empty() || out.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 /// Every stored network location with its learned baseline: what "normal"
@@ -428,6 +539,41 @@ fn header(f: &mut Frame, s: &AppState, area: Rect) {
     );
 }
 
+/// A vertical scrollbar down the right edge of `area` when `total` rows do not
+/// all fit in `visible`; nothing when they do. Purely a cue — there is no mouse
+/// to drag it — so it is drawn only when there is somewhere to scroll to.
+/// Returns the area left for the content: one column narrower when drawn.
+fn scroll_cue(f: &mut Frame, area: Rect, total: usize, first: usize, visible: usize) -> Rect {
+    if total <= visible || area.width < 2 || area.height == 0 {
+        return area;
+    }
+    let mut state = ScrollbarState::new(total.saturating_sub(visible))
+        .position(first)
+        .viewport_content_length(visible);
+    let bar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None)
+        .track_symbol(Some("│"))
+        .thumb_symbol("┃")
+        .track_style(Style::new().fg(Color::DarkGray))
+        .thumb_style(Style::new().fg(Color::Gray));
+    f.render_stateful_widget(bar, area, &mut state);
+    Rect {
+        width: area.width - 1,
+        ..area
+    }
+}
+
+/// The ttl column: the number, or "dest" for the endpoint row a walk that
+/// stopped short still gets.
+fn hop_ttl(h: &crate::app::MonitoredHop) -> String {
+    if h.is_dest_placeholder() {
+        "dest".to_string()
+    } else {
+        format!("{:>2}", h.ttl)
+    }
+}
+
 /// Panel-specific action hints shown at top-right.
 fn context_line(s: &AppState) -> Line<'static> {
     let key = |k: &str| Span::styled(k.to_string(), Style::new().fg(Color::Cyan));
@@ -446,6 +592,8 @@ fn context_line(s: &AppState) -> Line<'static> {
             txt("race "),
             key("[m]"),
             txt("onitor "),
+            key("[W]"),
+            txt("hois "),
             key("[n]"),
             txt("pane "),
             key("[←→ ↵]"),
@@ -459,17 +607,30 @@ fn context_line(s: &AppState) -> Line<'static> {
                 .get(s.speedtest_provider_idx)
                 .map(String::as_str)
                 .unwrap_or("—");
-            vec![
+            let mut v = vec![
                 key("[s]"),
                 txt("peed "),
                 key("[v]"),
                 txt(p),
                 Span::raw(" "),
-                key("[R]"),
-                txt("eset "),
-                key("[f]"),
-                txt("ull "),
-            ]
+                key("[b]"),
+                txt(match s.bw_view {
+                    BwView::Processes => "y remote ",
+                    BwView::Remotes => "y process ",
+                }),
+            ];
+            if s.bw_view == BwView::Remotes {
+                v.extend([
+                    key("[↑↓]"),
+                    txt("sel "),
+                    key("[W]"),
+                    txt("hois "),
+                    key("[a]"),
+                    txt("dd "),
+                ]);
+            }
+            v.extend([key("[R]"), txt("eset "), key("[f]"), txt("ull ")]);
+            v
         }
         Panel::NetInfo => vec![
             key("[r]"),
@@ -861,7 +1022,18 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     }
     title.push(')');
     f.render_widget(block(&title, s.focus == Panel::Quality), area);
-    f.render_widget(Table::new(rows, widths).header(header), parts[0]);
+    // The scroll cue runs beside the rows, under the header.
+    let body = Rect {
+        y: parts[0].y + 1,
+        height: parts[0].height.saturating_sub(1),
+        ..parts[0]
+    };
+    let body = scroll_cue(f, body, order.len(), first, rows_avail);
+    let table_area = Rect {
+        width: body.width,
+        ..parts[0]
+    };
+    f.render_widget(Table::new(rows, widths).header(header), table_area);
 
     match s.quality_view {
         QualityView::Graph => latency_graph(f, s, n, parts[1]),
@@ -1033,8 +1205,6 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
     // Table adds one cell of spacing between columns; leaving it out squeezes
     // the columns and silently truncates the address cell.
     let table_w: u16 = COLS.iter().sum::<u16>() + COLS.len() as u16 - 1;
-    let spark_w = inner.width.saturating_sub(table_w + 1);
-    let show_sparks = spark_w >= 8;
 
     let header = Row::new(["ttl", "address", "loss", "last", "avg", "p95", "jitter"])
         .style(Style::new().fg(Color::Gray).bold());
@@ -1055,6 +1225,17 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
     let visible: Vec<&HopRow> = all_rows.iter().skip(first).take(rows_avail).collect();
     let hidden_above = first;
     let hidden_below = all_rows.len().saturating_sub(first + visible.len());
+    // The scroll cue takes the last column when the list overflows; the
+    // sparklines give it up. Drawn last, so nothing paints over it.
+    let body = Rect {
+        y: inner.y + 1,
+        height: inner.height.saturating_sub(1),
+        ..inner
+    };
+    let overflow = all_rows.len() > rows_avail;
+    let inner_w = inner.width.saturating_sub(overflow as u16);
+    let spark_w = inner_w.saturating_sub(table_w + 1);
+    let show_sparks = spark_w >= 8;
 
     // Counts belong in the title, the way the target list does it. A footer row
     // costs one of the rows it is complaining about, and it used to tell the
@@ -1084,7 +1265,7 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                     style = style.bg(Color::Rgb(40, 40, 55));
                 }
                 return Row::new(vec![
-                    Cell::from(format!("{:>2}", h.ttl)),
+                    Cell::from(hop_ttl(h)),
                     Cell::from("*"),
                     Cell::from("—"),
                     Cell::from("—"),
@@ -1103,7 +1284,7 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                     .add_modifier(Modifier::BOLD);
             }
             Row::new(vec![
-                Cell::from(format!("{:>2}", h.ttl)),
+                Cell::from(hop_ttl(h)),
                 Cell::from(
                     h.addr
                         .map(|a| a.to_string())
@@ -1148,7 +1329,7 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                     Rect {
                         x: inner.x,
                         y,
-                        width: inner.width,
+                        width: inner_w,
                         height: 1,
                     },
                 );
@@ -1195,6 +1376,7 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
             }
         }
     }
+    scroll_cue(f, body, all_rows.len(), first, rows_avail);
 
     if let Some(chart_area) = chart_area {
         hop_chart(f, m, n, chart_area, s.graph_marker);
@@ -1205,6 +1387,10 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
 fn hop_chart(f: &mut Frame, m: &crate::app::HopMonitor, n: usize, area: Rect, marker: Marker) {
     let hop = m.hops.get(m.selected);
     let label = match hop {
+        Some(h) if h.is_dest_placeholder() => match h.addr {
+            Some(a) => format!("dest · {a}"),
+            None => "dest".to_string(),
+        },
         Some(h) => match h.addr {
             Some(a) => format!("hop {} · {a}", h.ttl),
             None => format!("hop {} · no reply", h.ttl),
@@ -1541,7 +1727,13 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
             .split(rows[2]);
         let on_history = s.focus == Panel::Bandwidth && s.sub_pane == SubPane::Secondary;
 
-        let pblock = block("Processes", s.focus == Panel::Bandwidth && !on_history);
+        // Say how to get to the other list: a second view behind a key that
+        // is not otherwise hinted at in the title is a view nobody finds.
+        let title = match s.bw_view {
+            BwView::Processes => "Processes · b to switch",
+            BwView::Remotes => "Remote addresses · b to switch",
+        };
+        let pblock = block(title, s.focus == Panel::Bandwidth && !on_history);
         let pinner = pblock.inner(cols[0]);
         f.render_widget(pblock, cols[0]);
         top_talkers(f, s, pinner, talkers);
@@ -1765,25 +1957,12 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
         ProcStatus::Supported => {}
     }
 
+    if s.bw_view == BwView::Remotes {
+        return top_remotes(f, s, inner, limit);
+    }
+
     // Header with the column cursor highlighted and a sort-direction arrow.
-    let focused = s.focus == Panel::Bandwidth;
-    let labels = ["name", "↓", "↑", "total", "retx"];
-    let header = Row::new(labels.iter().enumerate().map(|(i, l)| {
-        let mut txt = (*l).to_string();
-        if let Some((c, desc)) = s.bw_sort
-            && c == i
-        {
-            txt.push(if desc { '▼' } else { '▲' });
-        }
-        let style = if focused && i == s.bw_col {
-            Style::new()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-        } else {
-            Style::new().fg(Color::DarkGray)
-        };
-        Cell::from(Span::styled(txt, style))
-    }));
+    let header = talkers_header(s, &["name", "↓", "↑", "total", "retx"]);
 
     // Apply the active sort (a copy — the collector keeps its own order).
     let mut procs: Vec<&crate::app::ProcBandwidth> = s.processes.iter().collect();
@@ -1837,6 +2016,136 @@ fn top_talkers(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
     f.render_widget(Table::new(rows, widths).header(header), inner);
 }
 
+/// Sortable header row for a talkers table: the column under the cursor is
+/// highlighted, the sorted column carries a direction arrow.
+fn talkers_header<'a>(s: &AppState, labels: &[&'a str]) -> Row<'a> {
+    let focused = s.focus == Panel::Bandwidth;
+    Row::new(labels.iter().enumerate().map(|(i, l)| {
+        let mut txt = (*l).to_string();
+        if let Some((c, desc)) = s.bw_sort
+            && c == i
+        {
+            txt.push(if desc { '▼' } else { '▲' });
+        }
+        let style = if focused && i == s.bw_col {
+            Style::new()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::new().fg(Color::DarkGray)
+        };
+        Cell::from(Span::styled(txt, style))
+    }))
+}
+
+/// `addr:port`, bracketing v6, with a `+` when more than one port was in use.
+fn fmt_remote(r: &crate::app::RemoteBandwidth) -> String {
+    let more = if r.ports > 1 { "+" } else { "" };
+    match r.addr {
+        std::net::IpAddr::V4(a) => format!("{a}:{}{more}", r.port),
+        std::net::IpAddr::V6(a) => format!("[{a}]:{}{more}", r.port),
+    }
+}
+
+/// "Which address is eating my link": the top remotes by bandwidth, with the
+/// process talking to each. Has a row cursor, unlike the process list, because
+/// an address is something to act on — [W] asks who owns it, [a] pings it.
+fn top_remotes(f: &mut Frame, s: &AppState, area: Rect, limit: usize) {
+    if s.remotes.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "no traffic to remote addresses this interval",
+                Style::new().fg(Color::DarkGray),
+            )),
+            area,
+        );
+        return;
+    }
+    // Fixed widths, and when the panel is narrower than the lot (the split
+    // view is), the trailing columns go rather than every column squeezing —
+    // a squeezed address column is the one thing this table must not have.
+    const WIDTHS: [u16; 6] = [24, 14, 10, 10, 5, 8];
+    let mut ncols = 0;
+    let mut used = 0u16;
+    for w in WIDTHS {
+        let next = used + w + if ncols > 0 { 1 } else { 0 };
+        if next > area.width {
+            break;
+        }
+        used = next;
+        ncols += 1;
+    }
+    let ncols = ncols.max(1);
+    let labels = ["remote", "process", "↓", "↑", "share", "total"];
+    let header = talkers_header(s, &labels[..ncols]);
+
+    let mut list: Vec<(usize, &crate::app::RemoteBandwidth)> =
+        s.remotes.iter().enumerate().collect();
+    if let Some((col, desc)) = s.bw_sort {
+        list.sort_by(|(_, a), (_, b)| {
+            let o = match col {
+                0 => a.addr.cmp(&b.addr),
+                1 => a.process.cmp(&b.process),
+                3 => a.up_bps.total_cmp(&b.up_bps),
+                4 => a.share.total_cmp(&b.share),
+                5 => a.total_bytes.cmp(&b.total_bytes),
+                _ => a.down_bps.total_cmp(&b.down_bps),
+            };
+            if desc { o.reverse() } else { o }
+        });
+    }
+
+    let cursor_on = s.selected_remote().is_some();
+    let rows = list.into_iter().take(limit).map(|(idx, r)| {
+        let selected = cursor_on && idx == s.remote_sel;
+        // v6 with a port can outrun the column; keep the tail, which is the
+        // distinctive part of the address.
+        let remote: String = {
+            let full = fmt_remote(r);
+            let n = full.chars().count();
+            if n > 24 {
+                format!("…{}", full.chars().skip(n - 23).collect::<String>())
+            } else {
+                full
+            }
+        };
+        let process: String = r.process.chars().take(14).collect();
+        let mut cells = vec![
+            Cell::from(remote),
+            Cell::from(Span::styled(process, Style::new().fg(Color::Gray))),
+            Cell::from(Span::styled(
+                fmt_rate(r.down_bps),
+                Style::new().fg(Color::Green),
+            )),
+            Cell::from(Span::styled(
+                fmt_rate(r.up_bps),
+                Style::new().fg(Color::Magenta),
+            )),
+            Cell::from(Span::styled(
+                format!("{:.0}%", r.share * 100.0),
+                Style::new().fg(Color::Gray),
+            )),
+            Cell::from(Span::styled(
+                fmt_bytes(r.total_bytes),
+                Style::new().fg(Color::Gray),
+            )),
+        ];
+        cells.truncate(ncols);
+        Row::new(cells).style(if selected {
+            Style::new()
+                .bg(Color::Rgb(40, 40, 55))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+        })
+    });
+    let widths: Vec<Constraint> = WIDTHS[..ncols]
+        .iter()
+        .map(|w| Constraint::Length(*w))
+        .collect();
+    f.render_widget(Table::new(rows, widths).header(header), area);
+}
+
 /// Centered modal listing all keyboard shortcuts, titled with the running
 /// version so users can report what they're actually on.
 fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
@@ -1888,10 +2197,13 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("g", "graph selected target"),
         row("t", "traceroute once"),
         row("m", "monitor every hop (MTR)"),
+        row("W", "whois: who owns address"),
         Line::from(""),
         head("Bandwidth"),
         row("v", "cycle speed-test provider"),
-        row("n", "processes ⇄ speed history"),
+        row("b", "processes ⇄ remote addrs"),
+        row("W / a", "whois / add sel. remote"),
+        row("n", "talkers ⇄ speed history"),
         Line::from(""),
         head("Network"),
         row("r", "re-probe"),
@@ -3586,6 +3898,181 @@ mod tests {
         assert!(draw(&s, 120, 24).contains(name));
     }
 
+    /// The whois overlay shows the address while the query is in flight, the
+    /// registry's fields once it lands, and the failure when it doesn't.
+    #[test]
+    fn whois_overlay_renders_each_state() {
+        use crate::app::{Overlay, Whois};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let addr = IpAddr::V4(Ipv4Addr::new(75, 101, 33, 185));
+        let mut s = AppState::new(vec![]);
+        s.overlay = Overlay::Whois;
+        s.whois = Some(Whois {
+            addr,
+            running: true,
+            fields: Vec::new(),
+            raw: Vec::new(),
+            source: String::new(),
+            error: None,
+        });
+        let out = draw(&s, 100, 30);
+        assert!(out.contains("75.101.33.185"));
+        assert!(out.contains("looking up"));
+
+        let w = s.whois.as_mut().unwrap();
+        w.running = false;
+        w.source = "rdap.arin.net".into();
+        w.fields = vec![
+            (
+                "network".into(),
+                "75.101.0.0 – 75.101.63.255  (75.101.0.0/18)".into(),
+            ),
+            ("registrant".into(), "Sonic.net, LLC".into()),
+            ("remarks".into(), "word ".repeat(40).trim().into()),
+        ];
+        let out = draw(&s, 100, 30);
+        assert!(out.contains("Sonic.net, LLC"));
+        assert!(out.contains("75.101.0.0/18"));
+        assert!(out.contains("rdap.arin.net"));
+
+        s.whois.as_mut().unwrap().error = Some("timed out".into());
+        let out = draw(&s, 100, 30);
+        assert!(out.contains("lookup failed"));
+    }
+
+    /// The remotes view lists addresses with their busiest port and process,
+    /// marks a multi-port address, and highlights the cursor row.
+    #[test]
+    fn remotes_view_lists_addresses_with_port_and_process() {
+        use crate::app::{BwView, ProcStatus, RemoteBandwidth};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let mut s = AppState::new(vec![]);
+        s.focus = Panel::Bandwidth;
+        s.proc_status = ProcStatus::Supported;
+        s.processes = vec![crate::app::ProcBandwidth {
+            name: "firefox".into(),
+            pid: 1,
+            down_bps: 1.0,
+            up_bps: 1.0,
+            total_bytes: 1,
+            retx_per_sec: 0.0,
+        }];
+        s.remotes = vec![
+            RemoteBandwidth {
+                addr: IpAddr::V4(Ipv4Addr::new(151, 101, 193, 111)),
+                port: 443,
+                ports: 2,
+                process: "firefox".into(),
+                down_bps: 900_000.0,
+                up_bps: 10_000.0,
+                total_bytes: 5_000_000,
+                share: 0.8,
+            },
+            RemoteBandwidth {
+                addr: "2606:4700:4700::1111".parse().unwrap(),
+                port: 53,
+                ports: 1,
+                process: "mDNSResponder".into(),
+                down_bps: 100.0,
+                up_bps: 100.0,
+                total_bytes: 1_000,
+                share: 0.2,
+            },
+        ];
+        // Process view by default: no addresses shown.
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("firefox"));
+        assert!(!out.contains("151.101.193.111"));
+
+        s.bw_view = BwView::Remotes;
+        s.remote_sel = 1;
+        let out = draw(&s, 120, 30);
+        assert!(
+            out.contains("151.101.193.111:443+"),
+            "busiest port, + for more"
+        );
+        // A long v6 keeps its distinctive tail rather than being squeezed.
+        assert!(out.contains("…606:4700:4700::1111]:53"));
+        assert!(out.contains("mDNSRespond"));
+        assert!(out.contains("remote"));
+        // The split view is too narrow for every column: share and total go,
+        // the address does not get squeezed.
+        assert!(!out.contains("80%"));
+        s.fullscreen = true;
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("80%"));
+        assert!(out.contains("Remote addresses · b to switch"));
+        assert_eq!(
+            s.selected_addr(),
+            Some("2606:4700:4700::1111".parse().unwrap()),
+            "the cursor row is what W and a act on"
+        );
+        s.bw_view = BwView::Processes;
+        assert!(draw(&s, 120, 30).contains("Processes · b to switch"));
+    }
+
+    #[test]
+    fn long_values_wrap_under_the_key_column() {
+        let lines = wrap_words("aa bb cc dd", 5);
+        assert_eq!(lines, vec!["aa bb", "cc dd"]);
+        assert_eq!(wrap_words("", 5), vec![""]);
+        assert_eq!(wrap_words("abcdefghij", 5), vec!["abcdefghij"]);
+    }
+
+    /// The scroll cue is a visual only — no mouse — so it appears only when
+    /// there is somewhere to scroll to, on both lists.
+    #[test]
+    fn scroll_cue_appears_only_when_a_list_overflows() {
+        use crate::app::{HopMonitor, MonitoredHop, QualityView, TargetStat};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        // Three targets in a tall terminal: everything fits, no cue.
+        let targets: Vec<TargetStat> = (1..=3)
+            .map(|i| TargetStat::new(format!("t{i}"), IpAddr::V4(Ipv4Addr::new(10, 0, 0, i))))
+            .collect();
+        let s = AppState::new(targets);
+        let out = draw(&s, 120, 40);
+        assert!(!out.contains('┃'), "no cue when the list fits");
+
+        // Thirty targets in a short terminal: the cue's thumb shows.
+        let targets: Vec<TargetStat> = (1..=30)
+            .map(|i| TargetStat::new(format!("t{i}"), IpAddr::V4(Ipv4Addr::new(10, 0, 0, i))))
+            .collect();
+        let s = AppState::new(targets);
+        let out = draw(&s, 120, 24);
+        assert!(out.contains('┃'), "cue when the target list overflows");
+
+        // Same for the hop list.
+        let hops: Vec<MonitoredHop> = (1..=25)
+            .map(|ttl| {
+                let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, ttl));
+                MonitoredHop {
+                    ttl,
+                    addr: Some(addr),
+                    stat: Some(TargetStat::new(format!("hop {ttl}"), addr)),
+                }
+            })
+            .collect();
+        let mut s = AppState::new(vec![]);
+        s.focus = Panel::Quality;
+        s.quality_view = QualityView::HopMonitor;
+        s.hop_monitor = Some(HopMonitor {
+            target: "dest".into(),
+            dest: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            hops,
+            discovering: false,
+            generation: 1,
+            selected: 0,
+        });
+        let out = draw(&s, 120, 24);
+        assert!(out.contains('┃'), "cue when the hop list overflows");
+        s.fullscreen = true;
+        let out = draw(&s, 120, 60);
+        assert!(!out.contains('┃'), "no cue once every hop fits");
+    }
+
     #[test]
     fn hop_list_scrolls_to_keep_the_selection_visible() {
         use crate::app::{HopMonitor, MonitoredHop, QualityView, TargetStat};
@@ -3703,6 +4190,9 @@ mod tests {
             "y",
             "e",
             "N",
+            "W",
+            "b",
+            "W / a",
         ] {
             assert!(out.contains(key), "help is missing a binding for {key:?}");
         }
@@ -3720,8 +4210,10 @@ mod tests {
             "back / exit full-screen",
             "start / stop CSV recording",
             "monitor every hop (MTR)",
+            "whois: who owns address",
             "cycle speed-test provider",
-            "processes ⇄ speed history",
+            "processes ⇄ remote addrs",
+            "talkers ⇄ speed history",
             "full-screen for DNS graphs",
         ] {
             assert!(

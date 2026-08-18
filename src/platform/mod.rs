@@ -12,14 +12,16 @@ mod etw;
 #[cfg(windows)]
 mod windows;
 
-/// One counter source at a point in time, attributed to a process.
+/// One counter source at a point in time, attributed to a process and, where
+/// the platform says, to the remote endpoint it was talking to.
 ///
-/// What a sample *counts* differs by platform: macOS reports per-process
-/// totals, Linux per-socket ones. `key` identifies the counter so successive
-/// samples can be diffed correctly — summing a process's live sockets is not
-/// monotonic, because a closing socket takes its bytes out of the total.
+/// Every platform now counts per *socket* (or per pid+remote on Windows) rather
+/// than per process. `key` identifies the counter so successive samples can be
+/// diffed correctly — summing a process's live sockets is not monotonic,
+/// because a closing socket takes its bytes out of the total.
 pub struct ProcSample {
-    /// Identity of the counter itself: a pid on macOS, a socket inode on Linux.
+    /// Identity of the counter itself: a socket on macOS/Linux, a pid+remote
+    /// pair on Windows.
     pub key: u64,
     pub pid: u32,
     pub name: String,
@@ -27,6 +29,45 @@ pub struct ProcSample {
     pub bytes_out: u64,
     /// Cumulative TCP retransmissions.
     pub retx: u64,
+    /// The far end, when the socket has one. `None` for unconnected sockets
+    /// (a UDP resolver socket, a listener) — their bytes still count for the
+    /// process, just not for any address.
+    pub remote: Option<(std::net::IpAddr, u16)>,
+}
+
+/// Parse a printed endpoint into address and port. Accepts the shapes the
+/// tools print: `1.2.3.4:443`, `[2606:4700::1111]:443` (ss), `::1.8021` (nettop
+/// separates a v6 port with a dot, since colons are taken), and a `%scope`
+/// suffix on link-local addresses. `None` for the wildcard `*` forms.
+pub fn parse_endpoint(text: &str) -> Option<(std::net::IpAddr, u16)> {
+    let text = text.trim();
+    if text.is_empty() || text.starts_with('*') {
+        return None;
+    }
+    let (addr, port) = if let Some(rest) = text.strip_prefix('[') {
+        // [v6]:port
+        let (a, p) = rest.split_once("]:")?;
+        (a, p)
+    } else if text.matches(':').count() > 1 {
+        // Bare v6 — nettop's `addr.port`.
+        text.rsplit_once('.')?
+    } else {
+        text.rsplit_once(':')?
+    };
+    let addr = addr.split('%').next().unwrap_or(addr);
+    Some((addr.parse().ok()?, port.parse().ok()?))
+}
+
+/// Stable identity for a per-socket row that has no inode to key on: the pid,
+/// the row's own text and its position among identical rows (a process can
+/// hold several unbound `*:*` sockets that print the same).
+pub fn socket_key(pid: u32, row: &str, nth: usize) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    pid.hash(&mut h);
+    row.hash(&mut h);
+    nth.hash(&mut h);
+    h.finish()
 }
 
 /// Sample cumulative per-process network counters. `None` on platforms without
@@ -170,13 +211,18 @@ mod macos {
         }
     }
 
-    /// One-shot per-process cumulative counters via `nettop`. Note: passing `-s`
-    /// makes nettop reject the arg set and print usage, so it is omitted; `-L 1`
-    /// takes a single sample (~5s incl. startup). Unprivileged for the user's
-    /// own processes.
+    /// One-shot cumulative counters via `nettop`, one sample per socket. Note:
+    /// passing `-s` makes nettop reject the arg set and print usage, so it is
+    /// omitted; `-L 1` takes a single sample (~5s incl. startup); `-n` keeps
+    /// remote addresses numeric. Unprivileged for the user's own processes.
+    ///
+    /// Without `-P` nettop lists each process followed by its sockets, and the
+    /// process row is exactly the sum of the socket rows beneath it (checked
+    /// against a live machine), so counting sockets loses nothing and gains the
+    /// remote address — and a socket that closes takes only its own bytes.
     pub async fn proc_net_sample() -> Option<Vec<ProcSample>> {
         let out = tokio::process::Command::new("nettop")
-            .args(["-P", "-L", "1", "-x", "-J", "bytes_in,bytes_out,re-tx"])
+            .args(["-n", "-L", "1", "-x", "-J", "bytes_in,bytes_out,re-tx"])
             .stdin(std::process::Stdio::null())
             .output()
             .await
@@ -193,8 +239,13 @@ mod macos {
 
     /// Parse nettop CSV. Requesting extra columns makes nettop prepend a `time`
     /// column and reorder fields, so map columns by header name rather than
-    /// position. The process column has an empty header and holds `name.pid`
-    /// (the pid follows the final dot; names contain dots).
+    /// position. The first column has an empty header and holds either a
+    /// process, `name.pid` (the pid follows the final dot; names contain dots),
+    /// or one of its sockets, `tcp4 local<->remote` — indented in the TTY view
+    /// but not in `-x` output, so it is told apart by its `tcp`/`udp` prefix.
+    ///
+    /// One sample per socket. A process listed with no sockets at all still
+    /// gets its own row so its bytes are not lost.
     fn parse_nettop(text: &str) -> Vec<ProcSample> {
         let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
         let Some(header) = lines.next() else {
@@ -212,26 +263,84 @@ mod macos {
         fn get<'a>(row: &[&'a str], i: usize) -> &'a str {
             row.get(i).map(|s| s.trim()).unwrap_or("")
         }
+        /// The process the following socket rows belong to.
+        struct Proc {
+            pid: u32,
+            name: String,
+            sockets: usize,
+            /// Its own row's counters, used only if it lists no sockets.
+            counters: (u64, u64, u64),
+        }
         let mut samples = Vec::new();
+        let mut current: Option<Proc> = None;
+        // Identical socket rows under one process are told apart by position.
+        let mut seen: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+        let flush = |cur: &Option<Proc>, samples: &mut Vec<ProcSample>| {
+            if let Some(p) = cur
+                && p.sockets == 0
+            {
+                samples.push(ProcSample {
+                    key: p.pid as u64,
+                    pid: p.pid,
+                    name: p.name.clone(),
+                    bytes_in: p.counters.0,
+                    bytes_out: p.counters.1,
+                    retx: p.counters.2,
+                    remote: None,
+                });
+            }
+        };
         for line in lines {
             let row: Vec<&str> = line.split(',').collect();
-            let Some((name, pid_str)) = get(&row, i_proc).rsplit_once('.') else {
+            let first = get(&row, i_proc);
+            let counters = (
+                get(&row, i_in).parse().unwrap_or(0),
+                get(&row, i_out).parse().unwrap_or(0),
+                i_retx
+                    .map(|i| get(&row, i).parse().unwrap_or(0))
+                    .unwrap_or(0),
+            );
+            let is_socket = ["tcp4 ", "tcp6 ", "udp4 ", "udp6 "]
+                .iter()
+                .any(|p| first.starts_with(p));
+            if is_socket {
+                let Some(p) = current.as_mut() else {
+                    continue; // a socket before any process: not nettop's shape
+                };
+                p.sockets += 1;
+                let remote = first
+                    .split_once("<->")
+                    .and_then(|(_, r)| super::parse_endpoint(r));
+                let base = super::socket_key(p.pid, first, 0);
+                let nth = seen.entry(base).or_default();
+                let key = super::socket_key(p.pid, first, *nth);
+                *nth += 1;
+                samples.push(ProcSample {
+                    key,
+                    pid: p.pid,
+                    name: p.name.clone(),
+                    bytes_in: counters.0,
+                    bytes_out: counters.1,
+                    retx: counters.2,
+                    remote,
+                });
+                continue;
+            }
+            let Some((name, pid_str)) = first.rsplit_once('.') else {
                 continue;
             };
             let Ok(pid) = pid_str.parse::<u32>() else {
                 continue;
             };
-            samples.push(ProcSample {
-                key: pid as u64,
+            flush(&current, &mut samples);
+            current = Some(Proc {
                 pid,
                 name: name.to_string(),
-                bytes_in: get(&row, i_in).parse().unwrap_or(0),
-                bytes_out: get(&row, i_out).parse().unwrap_or(0),
-                retx: i_retx
-                    .map(|i| get(&row, i).parse().unwrap_or(0))
-                    .unwrap_or(0),
+                sockets: 0,
+                counters,
             });
         }
+        flush(&current, &mut samples);
         samples
     }
 
@@ -389,6 +498,115 @@ mod macos {
 
     fn indent(line: &str) -> usize {
         line.len() - line.trim_start().len()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Verbatim shape of `nettop -n -L 1 -x -J bytes_in,bytes_out,re-tx`:
+        /// a process row, then its sockets. Every socket becomes a sample; the
+        /// process row does not, since it is the sum of them.
+        #[test]
+        fn nettop_gives_one_sample_per_socket_with_its_remote() {
+            let text = ",bytes_in,bytes_out,re-tx,
+kernel_task.0,388658915,173246711,0,
+tcp4 192.168.1.89:65068<->192.168.1.20:445,388658915,173246711,0,
+launchd.1,0,0,0,
+tcp4 127.0.0.1:8021<->*:*,,,,
+tcp6 ::1.8021<->*.*,,,,
+syslogd.572,0,107228,0,
+udp4 *:60669<->*:*,0,107228,0,
+apsd.578,355146,673496,12,
+tcp4 192.168.1.89:60926<->17.57.144.120:5223,355146,673496,12,
+Safari.900,10,20,0,
+tcp6 2001:db8::5.52000<->2606:4700::6810:84e5.443,10,20,0,
+";
+            let s = parse_nettop(text);
+            let by_pid = |pid: u32| s.iter().filter(|p| p.pid == pid).collect::<Vec<_>>();
+
+            let k = by_pid(0);
+            assert_eq!(k.len(), 1);
+            assert_eq!(k[0].name, "kernel_task");
+            assert_eq!((k[0].bytes_in, k[0].bytes_out), (388658915, 173246711));
+            assert_eq!(k[0].remote, Some(("192.168.1.20".parse().unwrap(), 445)));
+
+            // Listeners have no remote and no bytes, but are still sockets.
+            let l = by_pid(1);
+            assert_eq!(l.len(), 2);
+            assert!(l.iter().all(|p| p.remote.is_none() && p.bytes_in == 0));
+            assert_ne!(l[0].key, l[1].key, "distinct sockets, distinct keys");
+
+            // An unbound UDP socket keeps its bytes for the process.
+            let u = by_pid(572);
+            assert_eq!(u.len(), 1);
+            assert_eq!(u[0].bytes_out, 107228);
+            assert_eq!(u[0].remote, None);
+
+            let a = by_pid(578);
+            assert_eq!(a[0].retx, 12);
+            assert_eq!(a[0].remote, Some(("17.57.144.120".parse().unwrap(), 5223)));
+
+            // nettop separates a v6 port with a dot.
+            let v6 = by_pid(900);
+            assert_eq!(
+                v6[0].remote,
+                Some(("2606:4700::6810:84e5".parse().unwrap(), 443))
+            );
+
+            assert!(
+                !s.iter().any(|p| p.name == "kernel_task" && p.key == 0),
+                "the process row itself is not a sample when it has sockets"
+            );
+        }
+
+        /// Against the real nettop. Ignored by default — needs the tool and
+        /// live sockets. `cargo test -- --ignored --nocapture live_nettop`
+        #[tokio::test]
+        #[ignore = "requires nettop and live sockets"]
+        async fn live_nettop() {
+            let s = proc_net_sample().await.expect("nettop runs");
+            let with_remote = s.iter().filter(|p| p.remote.is_some()).count();
+            println!("{} sockets, {with_remote} with a remote", s.len());
+            for p in s.iter().filter(|p| p.remote.is_some()).take(8) {
+                println!(
+                    "  {:>6} {:<18} {:?} in={} out={}",
+                    p.pid, p.name, p.remote, p.bytes_in, p.bytes_out
+                );
+            }
+            assert!(
+                with_remote > 0,
+                "a live machine has at least one connection"
+            );
+        }
+
+        /// A process listed with no socket rows keeps a row of its own.
+        #[test]
+        fn nettop_process_without_sockets_is_still_counted() {
+            let text = ",bytes_in,bytes_out,
+odd.42,10,20,
+";
+            let s = parse_nettop(text);
+            assert_eq!(s.len(), 1);
+            assert_eq!((s[0].pid, s[0].bytes_in, s[0].remote), (42, 10, None));
+        }
+
+        /// Keys are stable across samples: the same socket text under the same
+        /// pid hashes the same, so successive samples diff correctly.
+        #[test]
+        fn nettop_socket_keys_are_stable_and_positional() {
+            let text = ",bytes_in,bytes_out,
+p.1,0,0,
+udp4 *:*<->*:*,1,0,
+udp4 *:*<->*:*,2,0,
+";
+            let a = parse_nettop(text);
+            let b = parse_nettop(text);
+            assert_eq!(a.len(), 2);
+            assert_eq!(a[0].key, b[0].key);
+            assert_eq!(a[1].key, b[1].key);
+            assert_ne!(a[0].key, a[1].key);
+        }
     }
 }
 
@@ -626,7 +844,7 @@ mod linux {
     /// when a connection closes, and the drop cancels out real traffic.
     fn parse_ss(text: &str) -> Vec<ProcSample> {
         let mut out: Vec<ProcSample> = Vec::new();
-        let mut current: Option<(u32, String, u64)> = None;
+        let mut current: Option<(u32, String, u64, Option<(std::net::IpAddr, u16)>)> = None;
 
         for line in text.lines() {
             let trimmed = line.trim();
@@ -636,7 +854,7 @@ mod linux {
             // An indented continuation line holds this socket's counters.
             let is_continuation = line.starts_with([' ', '\t']) && current.is_some();
             if is_continuation {
-                let (pid, name, key) = current.take().unwrap();
+                let (pid, name, key, remote) = current.take().unwrap();
                 let mut sample = ProcSample {
                     key,
                     pid,
@@ -644,6 +862,7 @@ mod linux {
                     bytes_in: 0,
                     bytes_out: 0,
                     retx: 0,
+                    remote,
                 };
                 for tok in trimmed.split_whitespace() {
                     if let Some(v) = tok.strip_prefix("bytes_sent:") {
@@ -659,9 +878,18 @@ mod linux {
                 out.push(sample);
                 continue;
             }
-            current = parse_ss_users(trimmed);
+            current = parse_ss_users(trimmed)
+                .map(|(pid, name, ino)| (pid, name, ino, parse_ss_peer(trimmed)));
         }
         out
+    }
+
+    /// The peer endpoint from an address line: with `-t` the columns run
+    /// `State Recv-Q Send-Q Local Peer …`, so the peer is the fifth token.
+    /// v6 comes bracketed, `[2606:4700::1111]:443`, which `parse_endpoint`
+    /// understands.
+    fn parse_ss_peer(line: &str) -> Option<(std::net::IpAddr, u16)> {
+        super::parse_endpoint(line.split_whitespace().nth(4)?)
     }
 
     /// Pull (pid, name, socket inode) out of an address line such as
@@ -795,6 +1023,23 @@ ESTAB 0 0 10.0.0.2:22 3.3.3.3:22 users:((\"ssh\",pid=200,fd=3)) ino:333 sk:3
                 s[2].retx, 0,
                 "ss omits retrans: entirely when there are none"
             );
+            // Each socket knows who it was talking to.
+            assert_eq!(s[0].remote, Some(("1.1.1.1".parse().unwrap(), 443)));
+            assert_eq!(s[2].remote, Some(("3.3.3.3".parse().unwrap(), 22)));
+        }
+
+        #[test]
+        fn ss_peers_come_in_v4_and_bracketed_v6() {
+            let text = "ESTAB 0 0 [2001:db8::2]:52000 [2606:4700:4700::1111]:443 users:((\"curl\",pid=1,fd=4)) ino:9\n\
+\t cubic bytes_sent:1 bytes_received:2\n\
+ESTAB 0 0 [fe80::1%eth0]:52001 [fe80::2%eth0]:22 users:((\"ssh\",pid=2,fd=4)) ino:10\n\
+\t cubic bytes_sent:1 bytes_received:2\n";
+            let s = parse_ss(text);
+            assert_eq!(
+                s[0].remote,
+                Some(("2606:4700:4700::1111".parse().unwrap(), 443))
+            );
+            assert_eq!(s[1].remote, Some(("fe80::2".parse().unwrap(), 22)));
         }
 
         /// Without `-e` there is no inode; the pid keeps the sample usable.
@@ -841,5 +1086,36 @@ ESTAB 0 0 10.0.0.2:22 3.3.3.3:22 users:((\"ssh\",pid=200,fd=3)) ino:333 sk:3
             let text = "ESTAB 0 0 10.0.0.2:443 1.1.1.1:443\n\t cubic bytes_sent:10\n";
             assert!(parse_ss(text).is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::parse_endpoint;
+
+    #[test]
+    fn every_printed_endpoint_shape_parses() {
+        assert_eq!(
+            parse_endpoint("1.2.3.4:443"),
+            Some(("1.2.3.4".parse().unwrap(), 443))
+        );
+        assert_eq!(
+            parse_endpoint("[2606:4700::1111]:443"),
+            Some(("2606:4700::1111".parse().unwrap(), 443))
+        );
+        // nettop's dotted v6 port.
+        assert_eq!(
+            parse_endpoint("::1.8021"),
+            Some(("::1".parse().unwrap(), 8021))
+        );
+        assert_eq!(
+            parse_endpoint("fe80::1%en0.5353"),
+            Some(("fe80::1".parse().unwrap(), 5353))
+        );
+        // Wildcards and junk are not endpoints.
+        assert_eq!(parse_endpoint("*:*"), None);
+        assert_eq!(parse_endpoint("*.*"), None);
+        assert_eq!(parse_endpoint(""), None);
+        assert_eq!(parse_endpoint("nas.local:445"), None);
     }
 }

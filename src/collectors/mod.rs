@@ -18,4 +18,5 @@ pub mod throughput;
 pub mod traceroute;
 pub mod vitals;
 pub mod web;
+pub mod whois;
 pub mod wifi;

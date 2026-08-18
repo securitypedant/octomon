@@ -356,6 +356,35 @@ pub struct ProcBandwidth {
     pub retx_per_sec: f64,
 }
 
+/// Bandwidth to one remote address, summed over every socket and process
+/// talking to it — the "which address is eating my link" view.
+#[derive(Clone)]
+pub struct RemoteBandwidth {
+    pub addr: IpAddr,
+    /// The port carrying most of the bytes this interval, when connections to
+    /// this address used more than one.
+    pub port: u16,
+    /// Number of distinct ports seen this interval; more than one means `port`
+    /// is only the biggest.
+    pub ports: usize,
+    /// The process moving most bytes to this address this interval.
+    pub process: String,
+    pub down_bps: f64,
+    pub up_bps: f64,
+    /// Cumulative bytes (in+out) to this address this session.
+    pub total_bytes: u64,
+    /// This address's share of all attributed traffic this interval, 0–1.
+    pub share: f64,
+}
+
+/// Which list the bandwidth panel's talkers table shows.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum BwView {
+    #[default]
+    Processes,
+    Remotes,
+}
+
 /// A single traceroute hop.
 #[derive(Clone)]
 pub struct Hop {
@@ -373,15 +402,43 @@ pub struct Traceroute {
     pub hops: Vec<Hop>,
 }
 
+/// Who owns an address: the answer to "whose router is dropping my packets?".
+/// `fields` come from RDAP (structured); `raw` from the system `whois` when
+/// RDAP was unreachable. `running` while the query is in flight.
+#[derive(Clone)]
+pub struct Whois {
+    pub addr: IpAddr,
+    pub running: bool,
+    pub fields: Vec<(String, String)>,
+    pub raw: Vec<String>,
+    /// Which registry / tool answered, e.g. "rdap.arin.net" or "whois".
+    pub source: String,
+    pub error: Option<String>,
+}
+
 /// A hop under continuous measurement. Reuses [`TargetStat`], so hops get the
 /// same distribution / jitter / loss maths as ordinary targets.
 #[derive(Clone)]
 pub struct MonitoredHop {
+    /// The hop's distance, or [`MonitoredHop::DEST_TTL`] for the destination
+    /// row appended when the walk never reached it.
     pub ttl: u8,
     /// `None` for a hop that never answered discovery (a `*` in traceroute).
     pub addr: Option<IpAddr>,
     /// Live statistics, present once the hop has an address to probe.
     pub stat: Option<TargetStat>,
+}
+
+impl MonitoredHop {
+    /// Sentinel ttl for the destination when the walk did not reach it: some
+    /// edges (Fastly, for one) drop UDP probes but answer ping, and the whole
+    /// point of the view is comparing each hop's loss with the endpoint's.
+    /// Sorts after every real hop, and is pruned the moment a re-walk lands.
+    pub const DEST_TTL: u8 = u8::MAX;
+
+    pub fn is_dest_placeholder(&self) -> bool {
+        self.ttl == Self::DEST_TTL
+    }
 }
 
 /// Continuous per-hop monitoring of the path to a destination — the MTR-style
@@ -1111,6 +1168,8 @@ pub enum Overlay {
     Explainer,
     /// Every stored network location and its learned baseline.
     Locations,
+    /// Who owns the selected address (RDAP / whois).
+    Whois,
 }
 
 /// Category of a timeline event, for the overlay and the CSV export.
@@ -1202,6 +1261,13 @@ pub struct AppState {
     pub speed_total: usize,
     /// Top processes by current network throughput (highest first).
     pub processes: Vec<ProcBandwidth>,
+    /// Top remote addresses by bandwidth, from the same samples as `processes`.
+    pub remotes: Vec<RemoteBandwidth>,
+    /// Whether the talkers table lists processes or remote addresses.
+    pub bw_view: BwView,
+    /// Row cursor in the remotes list (it has addresses to act on; the process
+    /// list does not).
+    pub remote_sel: usize,
     /// Availability of per-process attribution on this platform.
     pub proc_status: ProcStatus,
     /// Column cursor over the top-talkers header (0=proc,1=down,2=up,3=total,4=retx).
@@ -1229,6 +1295,10 @@ pub struct AppState {
     pub traceroute: Option<Traceroute>,
     /// Continuous per-hop monitor, when running.
     pub hop_monitor: Option<HopMonitor>,
+    /// Registry lookup for an address (the [W] overlay), when requested.
+    pub whois: Option<Whois>,
+    /// Scroll offset into the whois overlay.
+    pub whois_scroll: usize,
     /// Which chart the panel is showing.
     pub quality_view: QualityView,
     /// Cursor location within the focused panel (cycled with 'n').
@@ -1308,6 +1378,9 @@ impl AppState {
             speed_history: Vec::new(),
             speed_total: 0,
             processes: Vec::new(),
+            remotes: Vec::new(),
+            bw_view: BwView::Processes,
+            remote_sel: 0,
             proc_status: ProcStatus::Probing,
             bw_col: 1,
             bw_sort: None,
@@ -1320,6 +1393,8 @@ impl AppState {
             q_sort: None,
             traceroute: None,
             hop_monitor: None,
+            whois: None,
+            whois_scroll: 0,
             quality_view: QualityView::Graph,
             sub_pane: SubPane::Primary,
             speed_sel: 0,
@@ -1423,6 +1498,33 @@ impl AppState {
                 .map(|m| m.selected)
                 .unwrap_or_default(),
         )
+    }
+
+    /// The address under the cursor: in the Quality panel the monitored hop
+    /// when the cursor is in the path pane, else the selected target; in the
+    /// Bandwidth panel the selected remote. `None` for an unresponsive hop,
+    /// which has no address to ask about.
+    pub fn selected_addr(&self) -> Option<IpAddr> {
+        match self.focus {
+            Panel::Quality if self.sub_pane == SubPane::Secondary => {
+                self.selected_hop().and_then(|h| h.addr)
+            }
+            Panel::Quality => self.targets.get(self.selected).map(|t| t.addr),
+            Panel::Bandwidth => self.selected_remote().map(|r| r.addr),
+            _ => None,
+        }
+    }
+
+    /// The remote address under the cursor, when the bandwidth panel is showing
+    /// remotes and the cursor is in that list.
+    pub fn selected_remote(&self) -> Option<&RemoteBandwidth> {
+        if self.focus != Panel::Bandwidth
+            || self.bw_view != BwView::Remotes
+            || self.sub_pane != SubPane::Primary
+        {
+            return None;
+        }
+        self.remotes.get(self.remote_sel)
     }
 
     /// Number of recent samples the current window covers.

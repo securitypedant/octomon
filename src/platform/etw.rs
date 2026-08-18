@@ -23,6 +23,7 @@
 //! unconditional stop-before-start in [`Session::start`].
 
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Mutex, OnceLock};
 
 use windows_sys::Win32::Foundation::{ERROR_SUCCESS, INVALID_HANDLE_VALUE};
@@ -45,11 +46,22 @@ const KERNEL_NETWORK: GUID = GUID::from_u128(0x7dd42a49_5329_4832_8dfd_43d979153
 /// crash can be found and reclaimed instead of accumulating.
 const SESSION_NAME: &str = "octomon";
 
-/// Cumulative bytes per pid, summed from the event stream.
+/// Cumulative bytes per pid and remote endpoint, summed from the event stream.
 ///
 /// Written by the ETW callback on its own thread, read by `sample`. Totals only
-/// ever grow, which is what makes the collector's diffing valid.
-static TOTALS: OnceLock<Mutex<HashMap<u32, Totals>>> = OnceLock::new();
+/// ever grow, which is what makes the collector's diffing valid. Keyed by the
+/// remote as well as the pid so the collector can attribute bytes to
+/// addresses; a pid's own total is the sum over its remotes.
+static TOTALS: OnceLock<Mutex<HashMap<Key, Totals>>> = OnceLock::new();
+
+/// A pid and the far end it was talking to. `None` once the table is full —
+/// bytes are still counted for the pid, just no longer per address.
+type Key = (u32, Option<(IpAddr, u16)>);
+
+/// Distinct pid+remote pairs kept before new ones fold into the pid alone.
+/// Totals never expire (that is what makes them diffable), so without a cap a
+/// long session on a busy machine would grow without bound.
+const MAX_KEYS: usize = 8192;
 
 #[derive(Clone, Copy, Default)]
 struct Totals {
@@ -57,7 +69,7 @@ struct Totals {
     bytes_out: u64,
 }
 
-fn totals() -> &'static Mutex<HashMap<u32, Totals>> {
+fn totals() -> &'static Mutex<HashMap<Key, Totals>> {
     TOTALS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -82,34 +94,79 @@ fn direction(id: u16) -> Option<Direction> {
     }
 }
 
+/// Whether an event's addresses are 16-byte IPv6 or 4-byte IPv4.
+fn is_v6(id: u16) -> bool {
+    matches!(id, TCP_SENT_V6 | TCP_RECV_V6 | UDP_SENT_V6 | UDP_RECV_V6)
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Direction {
     In,
     Out,
 }
 
-/// Add one event's bytes to a pid's running total.
-fn record(map: &mut HashMap<u32, Totals>, pid: u32, size: u32, dir: Direction) {
-    let e = map.entry(pid).or_default();
+/// Add one event's bytes to a pid+remote running total. Once the table is at
+/// its cap, a new remote's bytes go to the pid's remote-less bucket instead.
+fn record(
+    map: &mut HashMap<Key, Totals>,
+    pid: u32,
+    remote: Option<(IpAddr, u16)>,
+    size: u32,
+    dir: Direction,
+) {
+    let key = if remote.is_some() && map.len() >= MAX_KEYS && !map.contains_key(&(pid, remote)) {
+        (pid, None)
+    } else {
+        (pid, remote)
+    };
+    let e = map.entry(key).or_default();
     match dir {
         Direction::In => e.bytes_in = e.bytes_in.saturating_add(size as u64),
         Direction::Out => e.bytes_out = e.bytes_out.saturating_add(size as u64),
     }
 }
 
-/// The pid and byte count from an event payload.
+/// One decoded data event.
+#[derive(Debug, PartialEq)]
+struct Payload {
+    pid: u32,
+    size: u32,
+    /// The far end, when the payload was long enough to carry it.
+    remote: Option<(IpAddr, u16)>,
+}
+
+/// The pid, byte count and remote endpoint from an event payload.
 ///
-/// Every Kernel-Network data event — TCP or UDP, v4 or v6 — starts its template
-/// with `PID` then `size`, both 32-bit. The address fields that follow differ in
-/// width between v4 and v6, which is exactly why nothing past the first eight
-/// bytes is touched here.
-fn parse_payload(data: &[u8]) -> Option<(u32, u32)> {
+/// Every Kernel-Network data event — TCP or UDP, v4 or v6 — lays its template
+/// out as `PID`, `size` (both 32-bit), then `daddr`, `saddr` (4 bytes each for
+/// v4, 16 for v6), then `dport`, `sport` (16-bit, network byte order). The
+/// provider fills `daddr`/`dport` with the remote endpoint and `saddr`/`sport`
+/// with the local one for both directions — the fields describe the connection,
+/// not the packet — so `daddr` is the remote here whether sending or receiving.
+/// A payload too short for the addresses still yields its pid and size.
+fn parse_payload(data: &[u8], v6: bool) -> Option<Payload> {
     if data.len() < 8 {
         return None;
     }
     let pid = u32::from_le_bytes(data[0..4].try_into().ok()?);
     let size = u32::from_le_bytes(data[4..8].try_into().ok()?);
-    Some((pid, size))
+    let alen = if v6 { 16 } else { 4 };
+    let need = 8 + 2 * alen + 4;
+    let remote = if data.len() >= need {
+        let addr = if v6 {
+            let b: [u8; 16] = data[8..24].try_into().ok()?;
+            IpAddr::V6(Ipv6Addr::from(b))
+        } else {
+            let b: [u8; 4] = data[8..12].try_into().ok()?;
+            IpAddr::V4(Ipv4Addr::from(b))
+        };
+        let p = 8 + 2 * alen;
+        let port = u16::from_be_bytes([data[p], data[p + 1]]);
+        Some((addr, port))
+    } else {
+        None
+    };
+    Some(Payload { pid, size, remote })
 }
 
 /// ETW record callback. Runs on the trace-processing thread.
@@ -119,7 +176,8 @@ unsafe extern "system" fn on_event(event: *mut EVENT_RECORD) {
     }
     // SAFETY: ETW hands us a valid record for the duration of the callback.
     let rec = unsafe { &*event };
-    let Some(dir) = direction(rec.EventHeader.EventDescriptor.Id) else {
+    let id = rec.EventHeader.EventDescriptor.Id;
+    let Some(dir) = direction(id) else {
         return;
     };
     if rec.UserData.is_null() || rec.UserDataLength < 8 {
@@ -130,13 +188,13 @@ unsafe extern "system" fn on_event(event: *mut EVENT_RECORD) {
     let data = unsafe {
         std::slice::from_raw_parts(rec.UserData.cast::<u8>(), rec.UserDataLength as usize)
     };
-    let Some((pid, size)) = parse_payload(data) else {
+    let Some(p) = parse_payload(data, is_v6(id)) else {
         return;
     };
     // A poisoned lock would mean a panic inside this callback; dropping events
     // is better than unwinding across the FFI boundary.
     if let Ok(mut map) = totals().lock() {
-        record(&mut map, pid, size, dir);
+        record(&mut map, p.pid, p.remote, p.size, dir);
     }
 }
 
@@ -318,8 +376,8 @@ pub fn ensure_started() -> bool {
 
 /// A snapshot of the cumulative totals, in the shape the collector diffs.
 ///
-/// `key` is the pid: unlike the Linux backend, which counts per socket, these
-/// totals are already per-process and monotonic.
+/// One sample per pid+remote pair; each is monotonic, so the collector's
+/// per-key diffing holds, and a pid's rate is the sum over its remotes.
 pub fn sample() -> Option<Vec<ProcSample>> {
     if !ensure_started() {
         return None;
@@ -327,8 +385,8 @@ pub fn sample() -> Option<Vec<ProcSample>> {
     let map = totals().lock().ok()?;
     Some(
         map.iter()
-            .map(|(&pid, t)| ProcSample {
-                key: pid as u64,
+            .map(|(&(pid, remote), t)| ProcSample {
+                key: sample_key(pid, remote),
                 pid,
                 // Names come from sysinfo in the collector; ETW carries none.
                 name: String::new(),
@@ -337,9 +395,19 @@ pub fn sample() -> Option<Vec<ProcSample>> {
                 // Retransmits live in the separate Microsoft-Windows-TCPIP
                 // provider, so this stream cannot supply them.
                 retx: 0,
+                remote,
             })
             .collect(),
     )
+}
+
+/// Stable identity for a pid+remote counter across samples.
+fn sample_key(pid: u32, remote: Option<(IpAddr, u16)>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    pid.hash(&mut h);
+    remote.hash(&mut h);
+    h.finish()
 }
 
 #[cfg(test)]
@@ -358,30 +426,71 @@ mod tests {
         assert_eq!(direction(0), None);
     }
 
-    #[test]
-    fn a_payload_yields_its_pid_and_size() {
-        // pid 4660, 1500 bytes, then address fields this must not read.
+    fn v4_payload(pid: u32, size: u32, daddr: [u8; 4], dport: u16) -> Vec<u8> {
         let mut data = Vec::new();
-        data.extend_from_slice(&4660u32.to_le_bytes());
-        data.extend_from_slice(&1500u32.to_le_bytes());
-        data.extend_from_slice(&[0xff; 32]);
-        assert_eq!(parse_payload(&data), Some((4660, 1500)));
+        data.extend_from_slice(&pid.to_le_bytes());
+        data.extend_from_slice(&size.to_le_bytes());
+        data.extend_from_slice(&daddr);
+        data.extend_from_slice(&[10, 0, 0, 2]); // saddr: local
+        data.extend_from_slice(&dport.to_be_bytes());
+        data.extend_from_slice(&52000u16.to_be_bytes()); // sport
+        data.extend_from_slice(&[0; 8]); // seqnum, connid
+        data
+    }
+
+    #[test]
+    fn a_v4_payload_yields_pid_size_and_remote() {
+        let data = v4_payload(4660, 1500, [1, 1, 1, 1], 443);
+        assert_eq!(
+            parse_payload(&data, false),
+            Some(Payload {
+                pid: 4660,
+                size: 1500,
+                remote: Some((IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 443)),
+            })
+        );
+        // Ports are network byte order: 443 is 0x01BB, sent as [0x01, 0xBB].
+        assert_eq!(&data[16..18], &[0x01, 0xBB]);
+
+        // Long enough for pid and size but not the addresses: still counted,
+        // just not per remote.
+        let short = parse_payload(&data[..12], false).unwrap();
+        assert_eq!((short.pid, short.size, short.remote), (4660, 1500, None));
 
         // A truncated payload is dropped rather than read past.
-        assert_eq!(parse_payload(&data[..7]), None);
-        assert_eq!(parse_payload(&[]), None);
+        assert_eq!(parse_payload(&data[..7], false), None);
+        assert_eq!(parse_payload(&[], false), None);
+    }
+
+    #[test]
+    fn a_v6_payload_reads_sixteen_byte_addresses() {
+        let daddr = Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
+        let mut data = Vec::new();
+        data.extend_from_slice(&7u32.to_le_bytes());
+        data.extend_from_slice(&64u32.to_le_bytes());
+        data.extend_from_slice(&daddr.octets());
+        data.extend_from_slice(&Ipv6Addr::LOCALHOST.octets());
+        data.extend_from_slice(&53u16.to_be_bytes());
+        data.extend_from_slice(&40000u16.to_be_bytes());
+        let p = parse_payload(&data, true).unwrap();
+        assert_eq!(p.remote, Some((IpAddr::V6(daddr), 53)));
+        // Read as v4 by mistake, the port would land in the wrong place — the
+        // id decides the layout, so pin that too.
+        assert!(is_v6(TCP_RECV_V6) && is_v6(UDP_SENT_V6));
+        assert!(!is_v6(TCP_SENT_V4) && !is_v6(UDP_RECV_V4));
     }
 
     #[test]
     fn totals_accumulate_and_never_decrease() {
         // What makes the collector's diffing valid: successive snapshots of a
-        // pid are monotonic, so a delta is always non-negative.
+        // key are monotonic, so a delta is always non-negative.
+        let r = Some((IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 443));
         let mut map = HashMap::new();
-        record(&mut map, 100, 500, Direction::In);
-        record(&mut map, 100, 300, Direction::Out);
-        record(&mut map, 100, 200, Direction::In);
+        record(&mut map, 100, r, 500, Direction::In);
+        record(&mut map, 100, r, 300, Direction::Out);
+        record(&mut map, 100, r, 200, Direction::In);
 
-        let t = map[&100];
+        let t = map[&(100, r)];
         assert_eq!(t.bytes_in, 700);
         assert_eq!(t.bytes_out, 300);
     }
@@ -391,10 +500,46 @@ mod tests {
         // A process that appears after the session started must not inherit
         // another pid's history, or its first delta would be enormous.
         let mut map = HashMap::new();
-        record(&mut map, 1, 9_000, Direction::In);
-        record(&mut map, 2, 40, Direction::In);
-        assert_eq!(map[&2].bytes_in, 40);
-        assert_eq!(map[&2].bytes_out, 0);
+        record(&mut map, 1, None, 9_000, Direction::In);
+        record(&mut map, 2, None, 40, Direction::In);
+        assert_eq!(map[&(2, None)].bytes_in, 40);
+        assert_eq!(map[&(2, None)].bytes_out, 0);
+    }
+
+    #[test]
+    fn remotes_are_kept_apart_per_pid() {
+        let a = Some((IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 443));
+        let b = Some((IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53));
+        let mut map = HashMap::new();
+        record(&mut map, 1, a, 100, Direction::In);
+        record(&mut map, 1, b, 5, Direction::In);
+        record(&mut map, 2, a, 7, Direction::In);
+        assert_eq!(map[&(1, a)].bytes_in, 100);
+        assert_eq!(map[&(1, b)].bytes_in, 5);
+        assert_eq!(map[&(2, a)].bytes_in, 7);
+        // And the sample keys tell them apart, but are stable.
+        assert_ne!(sample_key(1, a), sample_key(1, b));
+        assert_ne!(sample_key(1, a), sample_key(2, a));
+        assert_eq!(sample_key(1, a), sample_key(1, a));
+    }
+
+    #[test]
+    fn a_full_table_folds_new_remotes_into_the_pid() {
+        let mut map = HashMap::new();
+        for i in 0..MAX_KEYS as u32 {
+            let r = Some((IpAddr::V4(Ipv4Addr::from(i)), 1));
+            record(&mut map, 1, r, 1, Direction::In);
+        }
+        assert_eq!(map.len(), MAX_KEYS);
+        // A brand-new remote no longer gets its own key…
+        let fresh = Some((IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 9));
+        record(&mut map, 1, fresh, 42, Direction::In);
+        assert!(!map.contains_key(&(1, fresh)));
+        assert_eq!(map[&(1, None)].bytes_in, 42);
+        // …but a known one keeps accumulating where it was.
+        let known = Some((IpAddr::V4(Ipv4Addr::from(3u32)), 1));
+        record(&mut map, 1, known, 1, Direction::In);
+        assert_eq!(map[&(1, known)].bytes_in, 2);
     }
 
     #[test]
@@ -403,13 +548,13 @@ mod tests {
         // negative delta and show up as a nonsense rate.
         let mut map = HashMap::new();
         map.insert(
-            7,
+            (7, None),
             Totals {
                 bytes_in: u64::MAX - 10,
                 bytes_out: 0,
             },
         );
-        record(&mut map, 7, u32::MAX, Direction::In);
-        assert_eq!(map[&7].bytes_in, u64::MAX);
+        record(&mut map, 7, None, u32::MAX, Direction::In);
+        assert_eq!(map[&(7, None)].bytes_in, u64::MAX);
     }
 }

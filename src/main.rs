@@ -23,7 +23,9 @@ use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use tokio::sync::{Notify, mpsc};
 
-use app::{AppState, InputMode, Overlay, Panel, QualityView, SpeedStatus, SubPane, TargetStat};
+use app::{
+    AppState, BwView, InputMode, Overlay, Panel, QualityView, SpeedStatus, SubPane, TargetStat,
+};
 use config::Config;
 
 /// Handles shared with the input loop for issuing side effects.
@@ -372,6 +374,7 @@ fn reset_panel(s: &mut AppState) {
             s.throughput.down_bps = 0.0;
             s.throughput.up_bps = 0.0;
             s.processes.clear();
+            s.remotes.clear();
             s.link_errors = crate::app::LinkErrors {
                 iface: s.link_errors.iface.clone(),
                 ..Default::default()
@@ -450,6 +453,8 @@ enum Side {
     AddTarget(String),
     Traceroute(IpAddr, String),
     HopMonitor(IpAddr, String),
+    /// Look up who owns an address for the [W] overlay.
+    Whois(IpAddr),
     SaveProvider(String),
     /// Persist the user's name for the current network's baseline.
     NameNetwork {
@@ -527,6 +532,10 @@ fn move_cursor(s: &mut AppState, delta: isize) {
         Panel::Bandwidth if secondary => {
             let last = s.speed_history.len().saturating_sub(1) as isize;
             s.speed_sel = (s.speed_sel as isize + delta).clamp(0, last.max(0)) as usize;
+        }
+        Panel::Bandwidth if s.bw_view == BwView::Remotes => {
+            let last = s.remotes.len().saturating_sub(1) as isize;
+            s.remote_sel = (s.remote_sel as isize + delta).clamp(0, last.max(0)) as usize;
         }
         _ => {}
     }
@@ -660,6 +669,23 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         Overlay::Locations
                     };
                 }
+                KeyCode::Char('W') => {
+                    s.overlay = if s.overlay == Overlay::Whois {
+                        Overlay::None
+                    } else if let Some(addr) = s.selected_addr() {
+                        s.whois_scroll = 0;
+                        side = Side::Whois(addr);
+                        Overlay::Whois
+                    } else {
+                        s.overlay
+                    };
+                }
+                KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Whois => {
+                    s.whois_scroll = s.whois_scroll.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') if s.overlay == Overlay::Whois => {
+                    s.whois_scroll += 1; // clamped at draw time to the content
+                }
                 // Scroll the timeline; clamped so it can't run past the oldest.
                 KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Events => {
                     s.events_scroll = (s.events_scroll + 1).min(s.events.len().saturating_sub(1));
@@ -773,7 +799,18 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.bw_col = s.bw_col.saturating_sub(1);
                 }
                 KeyCode::Right if s.focus == Panel::Bandwidth => {
-                    s.bw_col = (s.bw_col + 1).min(4);
+                    let last = if s.bw_view == BwView::Remotes { 5 } else { 4 };
+                    s.bw_col = (s.bw_col + 1).min(last);
+                }
+                // 'b' flips the talkers table between processes and the remote
+                // addresses they talk to. The sort resets: the columns differ.
+                KeyCode::Char('b') if s.focus == Panel::Bandwidth => {
+                    s.bw_view = match s.bw_view {
+                        BwView::Processes => BwView::Remotes,
+                        BwView::Remotes => BwView::Processes,
+                    };
+                    s.bw_sort = None;
+                    s.bw_col = s.bw_col.min(4);
                 }
                 KeyCode::Enter if s.focus == Panel::Bandwidth => {
                     let col = s.bw_col;
@@ -808,6 +845,12 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         .unwrap_or_default();
                     s.input_mode = InputMode::AddTarget;
                 }
+                // …and a remote address in the bandwidth panel: "what is that
+                // host and how is my path to it" is the natural next question.
+                KeyCode::Char('a') if s.selected_remote().is_some() => {
+                    s.input_buffer = s.selected_remote().map(|r| r.addr.to_string()).unwrap();
+                    s.input_mode = InputMode::AddTarget;
+                }
                 KeyCode::Up | KeyCode::Char('k') => move_cursor(&mut s, -1),
                 KeyCode::Down | KeyCode::Char('j') => move_cursor(&mut s, 1),
                 KeyCode::PageUp => move_cursor(&mut s, -10),
@@ -838,6 +881,16 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         let (addr, label) = (t.addr, t.label.clone());
                         s.quality_view = QualityView::Traceroute;
                         side = Side::Traceroute(addr, label);
+                    }
+                }
+                // Shift+W asks the registry who owns the selected address — a
+                // target, or the hop under the cursor in the path monitor. That
+                // is the question a bad hop raises: whose router is it?
+                KeyCode::Char('W') if matches!(s.focus, Panel::Quality | Panel::Bandwidth) => {
+                    if let Some(addr) = s.selected_addr() {
+                        s.whois_scroll = 0;
+                        s.overlay = Overlay::Whois;
+                        side = Side::Whois(addr);
                     }
                 }
                 // 'm' monitors every hop to the selected target, continuously.
@@ -902,6 +955,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 ctx.state.lock().unwrap().notice = Some("ICMP unavailable".to_string());
             }
         }
+        Side::Whois(addr) => collectors::whois::start(ctx.state.clone(), addr),
         Side::SaveProvider(name) => {
             tokio::task::spawn_blocking(move || config::Config::persist_provider(&name));
         }

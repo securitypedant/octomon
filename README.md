@@ -62,7 +62,9 @@ Windows each hold one thing back, covered in [Privileges](#privileges):
 - **Bandwidth** — live up/down throughput, an on-demand **speed test** with a
   choice of provider (**Cloudflare / M-Lab / LibreSpeed**), and **per-process**
   talkers showing which apps are using the network (with retransmit rate and
-  session totals). Speed-test history is kept and browsable.
+  session totals) — or, with `b`, the same traffic **by remote address**, so
+  the one host eating your link stands out, and can be whois'd (`W`) or added
+  as a ping target (`a`) on the spot. Speed-test history is kept and browsable.
 - **Network** — interface, **connection type** (Wi-Fi / Ethernet / cellular /
   VPN tunnel), IP/DHCP, gateway, DNS, Wi-Fi SSID/PHY/channel, and a link graph
   matched to the medium: a **live Wi-Fi signal graph** (RSSI / noise / tx-rate)
@@ -276,9 +278,12 @@ octomon --help
 | `g` | Graph the selected target's latency |
 | `t` | Traceroute the selected target once |
 | `m` | Continuously monitor every hop to the target (MTR-style) |
+| `W` | Who owns the selected address (target or hop) — RDAP/whois lookup |
 | **Bandwidth** | |
 | `v` | Cycle the speed-test provider (saved to config) |
-| `n` | Switch between Processes and Speed Test History (full-screen) |
+| `b` | Talkers by process ⇄ by remote address |
+| `W` / `a` | Whois the selected remote address / add it as a target |
+| `n` | Switch between the talkers table and Speed Test History (full-screen) |
 
 ## Speed-test providers
 

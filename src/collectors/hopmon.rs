@@ -152,33 +152,73 @@ async fn discover(
                     addr,
                 );
             }
+            // The first answer from the destination ends the path, as in mtr.
+            // traceroute itself only stops on port-unreachable, so a network
+            // whose edge answers time-exceeded from the destination's own
+            // address (Cloudflare's anycast does this) would otherwise show
+            // the destination twice with an internal hop between — and since
+            // hops are probed by address, both rows would be the same ping.
+            if addr == Some(dest) {
+                let _ = child.start_kill();
+                break;
+            }
         }
     }
     let _ = child.wait().await;
 
-    let mut s = state.lock().unwrap();
-    if let Some(m) = s
-        .hop_monitor
-        .as_mut()
-        .filter(|m| m.generation == generation)
-    {
+    // A walk that never reached the destination still gets an endpoint row: a
+    // hop's loss only means something next to the destination's, and edges that
+    // drop traceroute's UDP probes usually still answer ping.
+    let spawn = {
+        let mut s = state.lock().unwrap();
+        let Some(m) = s
+            .hop_monitor
+            .as_mut()
+            .filter(|m| m.generation == generation)
+        else {
+            return;
+        };
         m.discovering = false;
+        if m.hops.iter().any(|h| h.addr == Some(dest)) {
+            None
+        } else {
+            merge_hop(m, MonitoredHop::DEST_TTL, Some(dest))
+        }
+    };
+    if let Some(addr) = spawn {
+        spawn_probe(
+            state.clone(),
+            clients.clone(),
+            cfg.clone(),
+            generation,
+            MonitoredHop::DEST_TTL,
+            addr,
+        );
     }
 }
 
 /// Fold a discovered hop into the monitor. Returns the address to start probing
 /// when this hop is new or has moved; `None` when nothing changed, so an
 /// established hop keeps accumulating history across re-walks.
+///
+/// A hop that answers as the destination is the last one: anything previously
+/// known beyond it (a longer path from an earlier walk, or a duplicate of the
+/// destination) is dropped, and its probes exit on their next tick.
 fn merge_hop(m: &mut HopMonitor, ttl: u8, addr: Option<IpAddr>) -> Option<IpAddr> {
-    let label = format!("hop {ttl}");
-    match m.hops.iter_mut().find(|h| h.ttl == ttl) {
+    let label = if ttl == MonitoredHop::DEST_TTL {
+        "dest".to_string()
+    } else {
+        format!("hop {ttl}")
+    };
+    let spawn = match m.hops.iter_mut().find(|h| h.ttl == ttl) {
         Some(existing) => {
             if existing.addr == addr {
-                return None; // unchanged — keep its statistics
+                None // unchanged — keep its statistics
+            } else {
+                existing.addr = addr;
+                existing.stat = addr.map(|a| TargetStat::new(label, a));
+                addr
             }
-            existing.addr = addr;
-            existing.stat = addr.map(|a| TargetStat::new(label, a));
-            addr
         }
         None => {
             m.hops.push(MonitoredHop {
@@ -189,7 +229,11 @@ fn merge_hop(m: &mut HopMonitor, ttl: u8, addr: Option<IpAddr>) -> Option<IpAddr
             m.hops.sort_by_key(|h| h.ttl);
             addr
         }
+    };
+    if addr == Some(m.dest) {
+        m.hops.retain(|h| h.ttl <= ttl);
     }
+    spawn
 }
 
 /// Keep one hop measured until its monitor run ends or its address changes.
@@ -297,6 +341,53 @@ mod tests {
         merge_hop(&mut m, 3, Some(ip(3)));
         merge_hop(&mut m, 1, Some(ip(1)));
         merge_hop(&mut m, 2, Some(ip(2)));
+        assert_eq!(
+            m.hops.iter().map(|h| h.ttl).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    /// Cloudflare's edge answers time-exceeded from 1.1.1.1 itself, so a raw
+    /// traceroute reads `13 1.1.1.1 / 14 172.68.x.x / 15 1.1.1.1`. The path
+    /// ends at the first destination answer, and a shorter path on a re-walk
+    /// sheds the hops beyond it.
+    #[test]
+    fn the_path_ends_at_the_first_destination_answer() {
+        let mut m = monitor();
+        let dest = m.dest;
+        merge_hop(&mut m, 1, Some(ip(1)));
+        merge_hop(&mut m, 2, Some(ip(2)));
+        merge_hop(&mut m, 3, Some(dest));
+        assert_eq!(m.hops.len(), 3);
+
+        // Next walk finds the destination one hop sooner: hop 3 goes.
+        merge_hop(&mut m, 1, Some(ip(1)));
+        merge_hop(&mut m, 2, Some(dest));
+        assert_eq!(m.hops.iter().map(|h| h.ttl).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(m.hops[1].addr, Some(dest));
+    }
+
+    /// A walk that stops short still ends in the destination, and that row
+    /// gives way to the real last hop when a later walk gets there.
+    #[test]
+    fn an_unreached_destination_is_appended_then_replaced() {
+        let mut m = monitor();
+        let dest = m.dest;
+        merge_hop(&mut m, 1, Some(ip(1)));
+        merge_hop(&mut m, 2, None);
+        // What discover() does after the walk: no dest seen → placeholder.
+        assert!(!m.hops.iter().any(|h| h.addr == Some(dest)));
+        assert_eq!(
+            merge_hop(&mut m, MonitoredHop::DEST_TTL, Some(dest)),
+            Some(dest)
+        );
+        assert!(m.hops.last().unwrap().is_dest_placeholder());
+        assert_eq!(m.hops.last().unwrap().stat.as_ref().unwrap().label, "dest");
+        // Unchanged next time: its statistics survive the re-walk.
+        assert_eq!(merge_hop(&mut m, MonitoredHop::DEST_TTL, Some(dest)), None);
+
+        // The next walk reaches the destination at ttl 3: placeholder gone.
+        merge_hop(&mut m, 3, Some(dest));
         assert_eq!(
             m.hops.iter().map(|h| h.ttl).collect::<Vec<_>>(),
             vec![1, 2, 3]
