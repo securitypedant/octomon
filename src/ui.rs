@@ -941,7 +941,7 @@ fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled(format!(" {glyph} "), Style::new().fg(color).bold()),
             Span::styled(
-                format!("{:<13}", r.area.label()),
+                format!("{:<15}", r.area.label()),
                 Style::new().fg(Color::White),
             ),
             Span::styled(r.detail.clone(), Style::new().fg(Color::Gray)),
@@ -964,7 +964,7 @@ fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             };
             lines.push(Line::from(vec![
                 Span::styled(format!(" {glyph} "), Style::new().fg(color).bold()),
-                Span::styled(format!("{:<13}", c.name), Style::new().fg(Color::White)),
+                Span::styled(format!("{:<15}", c.name), Style::new().fg(Color::White)),
                 Span::styled(c.detail.clone(), Style::new().fg(Color::Gray)),
             ]));
         }

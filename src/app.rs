@@ -1548,6 +1548,8 @@ pub struct AppState {
     /// Finished incidents on every network this machine has used, loaded at
     /// startup and appended as findings clear. See [`crate::history`].
     pub history: Vec<crate::history::Episode>,
+    /// Why public-IP discovery failed, when it did (both endpoints tried).
+    pub public_ip_error: Option<String>,
     /// The system web proxy, when one is configured.
     pub proxy: Option<ProxyConfig>,
     /// The [c] egress scan, once one has been run this session.
@@ -1767,6 +1769,7 @@ impl AppState {
             http: HttpState::default(),
             clock: ClockState::default(),
             history: Vec::new(),
+            public_ip_error: None,
             proxy: None,
             egress: None,
             net_history: VecDeque::new(),

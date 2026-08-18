@@ -1868,9 +1868,11 @@ pub fn checks(s: &AppState) -> Vec<Check> {
         } else {
             RungStatus::Unknown
         },
-        public
-            .map(|t| t.addr.to_string())
-            .unwrap_or_else(|| "not discovered".to_string()),
+        match (public, &s.public_ip_error) {
+            (Some(t), _) => t.addr.to_string(),
+            (None, Some(e)) => format!("not discovered — {e}"),
+            (None, None) => "not discovered yet".to_string(),
+        },
     );
     // NAT.
     match s.nat_kind() {
@@ -2144,7 +2146,7 @@ pub fn render_text(triage: &Triage, insufficient: Option<&str>) -> String {
     for r in &triage.rungs {
         let _ = writeln!(
             out,
-            "  {} {:<13} {}",
+            "  {} {:<15} {}",
             glyph_of(r.status),
             r.area.label(),
             r.detail
@@ -2153,7 +2155,7 @@ pub fn render_text(triage: &Triage, insufficient: Option<&str>) -> String {
     if !triage.checks.is_empty() {
         let _ = writeln!(out, "  checks:");
         for c in &triage.checks {
-            let _ = writeln!(out, "  {} {:<13} {}", glyph_of(c.status), c.name, c.detail);
+            let _ = writeln!(out, "  {} {:<15} {}", glyph_of(c.status), c.name, c.detail);
         }
     }
     let _ = writeln!(out);

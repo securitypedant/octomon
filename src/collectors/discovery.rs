@@ -135,17 +135,37 @@ pub async fn public_ip(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg:
     }
     let Ok(http) = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .no_proxy()
         .build()
     else {
         return;
     };
-    // Cap the body (an IP is tiny); only accept a clean IP literal.
-    let Ok(text) = crate::util::fetch_text_capped(&http, &cfg.public_ip_url, 4096).await else {
+    // The configured endpoint first, then Cloudflare's own trace endpoint —
+    // reachable when the configured one is filtered, and the natural answer
+    // when the machine sits behind Cloudflare WARP. Cap the body (an IP is
+    // tiny) and only accept a clean IP literal.
+    let mut errors: Vec<String> = Vec::new();
+    let mut found: Option<IpAddr> = None;
+    for url in [
+        cfg.public_ip_url.trim(),
+        "https://one.one.one.one/cdn-cgi/trace",
+    ] {
+        match crate::util::fetch_text_capped(&http, url, 4096).await {
+            Ok(text) => match parse_public_ip(&text) {
+                Some(addr) => {
+                    found = Some(addr);
+                    break;
+                }
+                None => errors.push(format!("{url}: no address in the answer")),
+            },
+            Err(e) => errors.push(format!("{url}: {e}")),
+        }
+    }
+    let Some(addr) = found else {
+        state.lock().unwrap().public_ip_error = Some(errors.join("; "));
         return;
     };
-    let Ok(addr) = text.trim().parse::<IpAddr>() else {
-        return;
-    };
+    state.lock().unwrap().public_ip_error = None;
 
     let (id, added) = {
         let mut s = state.lock().unwrap();
@@ -164,9 +184,32 @@ pub async fn public_ip(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg:
     }
 }
 
+/// The address in a public-IP answer: either the bare literal most services
+/// return, or the `ip=…` line of Cloudflare's `cdn-cgi/trace` format.
+pub fn parse_public_ip(text: &str) -> Option<IpAddr> {
+    let text = text.trim();
+    if let Ok(addr) = text.parse::<IpAddr>() {
+        return Some(addr);
+    }
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix("ip="))
+        .and_then(|v| v.trim().parse().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_ip_answers_parse_in_both_shapes() {
+        assert_eq!(
+            parse_public_ip("203.0.113.9\n"),
+            Some("203.0.113.9".parse().unwrap())
+        );
+        let trace = "fl=123f45\nh=one.one.one.one\nip=2001:db8::1\nts=1.2\nwarp=on\n";
+        assert_eq!(parse_public_ip(trace), Some("2001:db8::1".parse().unwrap()));
+        assert_eq!(parse_public_ip("<html>nope</html>"), None);
+    }
 
     #[test]
     fn discovery_probe_defaults_to_cloudflare_and_can_be_disabled() {
