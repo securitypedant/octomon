@@ -1358,8 +1358,10 @@ pub fn evaluate(s: &AppState) -> Triage {
     if let Some(off) = s.clock.offset_ms()
         && off.abs() >= th::CLOCK_WARN_MS
     {
-        let bad = off.abs() >= th::CLOCK_BAD_MS;
         let ntp = s.clock.ntp_offset_ms.is_some();
+        // The Date header is a coarse reading from whatever answered the HTTP
+        // check; without NTP behind it the claim stays a note.
+        let bad = off.abs() >= th::CLOCK_BAD_MS && ntp;
         findings.push(Finding {
             cause: Cause::ClockSkew,
             severity: if bad {
@@ -2820,7 +2822,28 @@ mod tests {
         assert_eq!(f.severity, Severity::Info);
         // The HTTP-date fallback is coarser: Likely, not Strong.
         s.clock.ntp_offset_ms = None;
-        s.clock.http_offset_ms = Some(400_000.0);
+        s.clock.record_http_skew(400_000.0);
+        assert!(
+            !causes(&evaluate(&s)).contains(&Cause::ClockSkew),
+            "one HTTP Date reading alone is never believed"
+        );
+        s.clock.record_http_skew(401_000.0);
+        // Two agreeing readings: believed, but as a note — the Date header
+        // is coarse and comes from whatever answered the HTTP check.
+        let f = evaluate(&s);
+        let f = f
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::ClockSkew)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Info);
+        // Readings that disagree cancel each other out.
+        s.clock.record_http_skew(-27_000_000.0);
+        assert!(!causes(&evaluate(&s)).contains(&Cause::ClockSkew));
+        // Once the outlier has aged out of the window, agreement returns.
+        s.clock.record_http_skew(400_500.0);
+        s.clock.record_http_skew(400_800.0);
+        s.clock.record_http_skew(400_600.0);
         let t = evaluate(&s);
         let f = t
             .findings

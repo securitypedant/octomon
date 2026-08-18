@@ -1048,17 +1048,47 @@ pub struct ClockState {
     pub ntp_offset_ms: Option<f64>,
     /// Why the last NTP exchange failed (UDP 123 filtered, typically).
     pub ntp_error: Option<String>,
-    /// Coarser (±1 s) offset from the `Date` header of the HTTP reachability
-    /// probe — the fallback when NTP is blocked.
-    pub http_offset_ms: Option<f64>,
+    /// The last few coarse (±1 s) offsets from the `Date` header of the HTTP
+    /// reachability probe — the fallback when NTP is blocked. Kept as a short
+    /// series so one odd answer (a proxy or portal with its own idea of the
+    /// time, an interception during a network change) is never believed on
+    /// its own: readings must agree with each other.
+    pub http_offsets: VecDeque<f64>,
     /// True once any check has run, so "unknown" can be told from "fine".
     pub checked: bool,
 }
 
+/// How many HTTP `Date` readings are kept, and how closely they must agree.
+pub const HTTP_SKEW_KEEP: usize = 3;
+pub const HTTP_SKEW_AGREE_MS: f64 = 5_000.0;
+
 impl ClockState {
     /// The best available offset: NTP when it answered, else the HTTP reading.
     pub fn offset_ms(&self) -> Option<f64> {
-        self.ntp_offset_ms.or(self.http_offset_ms)
+        self.ntp_offset_ms.or_else(|| self.http_offset_ms())
+    }
+
+    /// The HTTP `Date` reading, when at least two recent answers agree: their
+    /// median. A single reading, or readings that disagree, say nothing.
+    pub fn http_offset_ms(&self) -> Option<f64> {
+        if self.http_offsets.len() < 2 {
+            return None;
+        }
+        let mut v: Vec<f64> = self.http_offsets.iter().copied().collect();
+        v.sort_by(f64::total_cmp);
+        let spread = v[v.len() - 1] - v[0];
+        if spread > HTTP_SKEW_AGREE_MS {
+            return None;
+        }
+        Some(v[v.len() / 2])
+    }
+
+    pub fn record_http_skew(&mut self, ms: f64) {
+        if self.http_offsets.len() == HTTP_SKEW_KEEP {
+            self.http_offsets.pop_front();
+        }
+        self.http_offsets.push_back(ms);
+        self.checked = true;
     }
     pub fn source(&self) -> &'static str {
         if self.ntp_offset_ms.is_some() {

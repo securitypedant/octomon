@@ -301,8 +301,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config, changed: Arc<Notify>)
 
         let mut s = state.lock().unwrap();
         if let Some(skew) = skew4.or(skew6) {
-            s.clock.http_offset_ms = Some(skew);
-            s.clock.checked = true;
+            s.clock.record_http_skew(skew);
         }
         // Mutate in place: the histories accumulate across probes.
         if let FamilyProbe::Ok(ms) = r4 {

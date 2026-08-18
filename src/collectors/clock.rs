@@ -44,7 +44,7 @@ pub async fn run(
     // Let the network settle before the first exchange.
     tokio::time::sleep(Duration::from_secs(4)).await;
     loop {
-        let result = query(&server).await;
+        let result = consensus(&server).await;
         {
             let mut s = state.lock().unwrap();
             match result {
@@ -67,6 +67,45 @@ pub async fn run(
             _ = tokio::time::sleep(PERIOD) => {}
         }
     }
+}
+
+/// Exchanges per check, and how closely their offsets must agree.
+const SAMPLES: usize = 3;
+const AGREE_MS: f64 = 1_000.0;
+
+/// Several exchanges, and the median — accepted only when they agree with
+/// one another. One reply is never enough to accuse the clock: a delayed
+/// datagram, a reply crossing a network change, or a server having a bad
+/// moment all produce a single wild offset, and "your clock is hours off" is
+/// not something to say on the strength of one packet.
+pub async fn consensus(server: &str) -> Result<NtpReading, String> {
+    let mut readings: Vec<NtpReading> = Vec::new();
+    let mut last_err = String::new();
+    for i in 0..SAMPLES {
+        if i > 0 {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        match query(server).await {
+            Ok(r) => readings.push(r),
+            Err(e) => last_err = e,
+        }
+    }
+    if readings.len() < 2 {
+        return Err(if last_err.is_empty() {
+            "too few replies".to_string()
+        } else {
+            last_err
+        });
+    }
+    readings.sort_by(|a, b| a.offset_ms.total_cmp(&b.offset_ms));
+    let spread = readings[readings.len() - 1].offset_ms - readings[0].offset_ms;
+    if spread > AGREE_MS {
+        return Err(format!(
+            "replies disagree by {:.0} ms — not trusted",
+            spread
+        ));
+    }
+    Ok(readings[readings.len() / 2])
 }
 
 /// One SNTP client exchange with `server` (host or address, port 123).
