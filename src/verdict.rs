@@ -40,6 +40,11 @@ pub mod thresholds {
     pub const RSSI_AWFUL_DBM: i32 = -85;
     pub const SNR_MIN_DB: i32 = 15;
     pub const LINK_ERR_BAD_PCT: f64 = 1.0;
+    /// System clock offsets: a note from here, a finding from the second —
+    /// certificate checks tolerate minutes, not much more, and time-based
+    /// logins (TOTP) far less.
+    pub const CLOCK_WARN_MS: f64 = 30_000.0;
+    pub const CLOCK_BAD_MS: f64 = 300_000.0;
     pub const CPU_HOT_PCT: f32 = 90.0;
     pub const CORE_HOT_PCT: f32 = 95.0;
     pub const MEM_HOT_PCT: f32 = 90.0;
@@ -48,6 +53,11 @@ pub mod thresholds {
     pub const RECENT: usize = 20;
     /// Below this many outcomes a probe has no opinion, only noise.
     pub const MIN_SAMPLES: usize = 5;
+    /// The same for a resolver — probed every 5 s, so three is fifteen seconds.
+    pub const DNS_MIN_SAMPLES: usize = 3;
+    /// A resolver-probe outage or hijack must persist this long before it is
+    /// a finding; see [`crate::app::DNS_RECENT`] for the window it is judged in.
+    pub const DNS_FAIL_PCT: f64 = 50.0;
     /// RTT counts as inflated above `max(factor × idle floor, this floor)`.
     /// The absolute floor carries most of the weight: Wi-Fi gateways with a
     /// 2 ms idle floor routinely drift into the 30s on a *good* network
@@ -74,18 +84,28 @@ use thresholds as th;
 /// never the sole confident answer.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Cause {
-    /// Highest-ranked: nothing else matters until the sign-in page is dealt with.
+    /// The bottom rung: no default route, no address, or no gateway. Nothing
+    /// measured beyond it means anything, so it ranks above everything.
+    NoLink,
+    /// Nothing else matters until the sign-in page is dealt with.
     CaptivePortal,
     GatewayLan,
     WifiLink,
     Dns,
+    /// A resolver answers names that don't exist — redirection, not resolution.
+    DnsHijack,
     IspHop,
     WideInternet,
     Ipv6Broken,
+    /// Full-size packets vanish and nothing says why: a path-MTU black hole.
+    PathMtu,
     HttpBlocked,
     WebTarget,
     SingleDestination,
     Bufferbloat,
+    /// The system clock disagrees with the world: HTTPS breaks while every
+    /// network measurement is fine.
+    ClockSkew,
     Machine,
     VpnCaveat,
 }
@@ -100,17 +120,21 @@ impl Cause {
     /// Stable slug for the JSON report.
     pub fn label(self) -> &'static str {
         match self {
+            Cause::NoLink => "no-link",
             Cause::CaptivePortal => "captive-portal",
             Cause::GatewayLan => "gateway",
             Cause::WifiLink => "link",
             Cause::Dns => "dns",
+            Cause::DnsHijack => "dns-hijack",
             Cause::IspHop => "isp",
             Cause::WideInternet => "internet",
             Cause::Ipv6Broken => "ipv6",
+            Cause::PathMtu => "path-mtu",
             Cause::HttpBlocked => "http-blocked",
             Cause::WebTarget => "web-target",
             Cause::SingleDestination => "destination",
             Cause::Bufferbloat => "bufferbloat",
+            Cause::ClockSkew => "clock",
             Cause::Machine => "machine",
             Cause::VpnCaveat => "vpn-caveat",
         }
@@ -174,14 +198,27 @@ pub struct Finding {
     /// Stable key detail (e.g. a target label) — hysteresis identity is
     /// `(cause, subject)`, so two bad destinations track independently.
     pub subject: String,
+    /// True when this finding is explained by one further up the ladder (DNS
+    /// failing because the gateway is dead). Still reported — nothing is
+    /// suppressed — but ranked below the cause it is a symptom of, whatever
+    /// its severity, so the headline names the cause and not the first thing
+    /// that broke.
+    pub symptom: bool,
+    /// When the finding first raised, once it has passed hysteresis. `None`
+    /// on the raw instantaneous evaluation.
+    pub since: Option<Instant>,
 }
 
-/// The rank order: severity first, confidence second, specificity third —
-/// except caveat-class causes always sort after network causes.
+/// The rank order: causes before their symptoms, then severity, then
+/// confidence, then specificity — except caveat-class causes always sort after
+/// network causes. Symptoms sorting last is what makes this a ladder: a dead
+/// gateway with DNS timing out behind it headlines the gateway, however loud
+/// the DNS failure is.
 fn rank(findings: &mut [Finding]) {
     findings.sort_by(|a, b| {
         (
             a.cause.is_caveat(),
+            a.symptom,
             b.severity,
             b.confidence,
             a.cause,
@@ -189,6 +226,7 @@ fn rank(findings: &mut [Finding]) {
         )
             .cmp(&(
                 b.cause.is_caveat(),
+                b.symptom,
                 a.severity,
                 a.confidence,
                 b.cause,
@@ -361,16 +399,96 @@ pub fn insufficient_reason(s: &AppState) -> Option<String> {
     None
 }
 
+/// The bottom rung, before any probe is consulted: is there a link with an
+/// address and a way out at all? Every failure further up is a symptom of this.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LinkState {
+    /// No default route — Wi-Fi off, cable out, or nothing configured yet.
+    NoRoute,
+    /// An interface, but only a self-assigned 169.254.x address — DHCP gave
+    /// nothing. The classic "connected, no internet".
+    SelfAssigned,
+    /// An interface with an address but no gateway to hand packets to.
+    NoGateway,
+    Up,
+}
+
+pub fn link_state(s: &AppState) -> LinkState {
+    let n = &s.netinfo;
+    // Cold start on a machine with no network: netinfo never populates. Give
+    // it the warm-up period before calling that a fault rather than "not yet".
+    let warmed = s.started.elapsed().as_secs() >= th::WARMUP_SECS;
+    if s.link_lost || (n.iface.is_empty() && warmed) {
+        return LinkState::NoRoute;
+    }
+    if n.iface.is_empty() {
+        return LinkState::Up; // not known yet; the rung reads Unknown from the data
+    }
+    let v4_self_assigned = !n.ipv4.is_empty()
+        && n.ipv4.iter().all(|a| {
+            a.split('/')
+                .next()
+                .and_then(|ip| ip.parse::<std::net::Ipv4Addr>().ok())
+                .is_some_and(|ip| ip.is_link_local())
+        });
+    let has_global_v6 = n.ipv6.iter().any(|a| {
+        a.split('/')
+            .next()
+            .and_then(|ip| ip.parse::<std::net::Ipv6Addr>().ok())
+            .is_some_and(|ip| {
+                !ip.is_loopback()
+                    && (ip.segments()[0] & 0xffc0) != 0xfe80
+                    && (ip.segments()[0] & 0xfe00) != 0xfc00
+            })
+    });
+    if v4_self_assigned && !has_global_v6 {
+        return LinkState::SelfAssigned;
+    }
+    let no_gateway = n.gateway_ip.is_empty() || n.gateway_ip == "-";
+    if no_gateway && n.tunnel.is_none() {
+        return LinkState::NoGateway;
+    }
+    LinkState::Up
+}
+
+/// One definition of confidence, so the word means the same in every rule:
+/// `contradicted` (evidence against, or the finding is a symptom of something
+/// upstream) → Weak; `contrast` (the discriminating comparison holds — ping
+/// works but names don't, gateway fine but anchors fail) with an independent
+/// `corroboration` (baseline, a second probe family, downstream persistence)
+/// → Strong; contrast alone → Likely.
+fn judge(contrast: bool, corroborated: bool, contradicted: bool) -> Confidence {
+    if contradicted {
+        Confidence::Weak
+    } else if contrast && corroborated {
+        Confidence::Strong
+    } else {
+        Confidence::Likely
+    }
+}
+
 /// Pure, instantaneous read of the whole state. No hysteresis, no I/O — doctor
 /// mode calls it once after a batch observation; the live task calls it every
 /// tick and filters through [`VerdictState`].
 pub fn evaluate(s: &AppState) -> Triage {
+    let link = link_state(s);
     let gw = gateway_target(s);
     let gw_health = gw.map(probe_health).unwrap_or(Health::NoData);
     // Anchors: the user's endpoint targets (defaults: Cloudflare/Google/Quad9).
     // Discovered mid-path hops are excluded — routers deprioritise ICMP, and a
     // lossy hop that forwards fine is not a destination problem.
-    let anchors: Vec<&TargetStat> = s.targets.iter().filter(|t| !t.discovered).collect();
+    // A target on the LAN (a printer, the NAS) says nothing about the internet
+    // and must not vote on it; it gets its own local finding below.
+    let anchors: Vec<&TargetStat> = s
+        .targets
+        .iter()
+        .filter(|t| !t.discovered && !s.is_lan_addr(t.addr))
+        .collect();
+    let lan_targets: Vec<&TargetStat> = s
+        .targets
+        .iter()
+        .filter(|t| !t.discovered && s.is_lan_addr(t.addr))
+        .collect();
     let with_data: Vec<&TargetStat> = anchors
         .iter()
         .copied()
@@ -389,6 +507,49 @@ pub fn evaluate(s: &AppState) -> Triage {
     let baseline = s.baseline.as_ref().filter(|b| b.established());
 
     let mut findings: Vec<Finding> = Vec::new();
+
+    // --- link: is there anything to measure over? ---
+    if link != LinkState::Up {
+        let n = &s.netinfo;
+        let (summary, evidence) = match link {
+            LinkState::NoRoute => (
+                match n.medium {
+                    LinkMedium::WiFi => "not connected — Wi-Fi is off or not associated".to_string(),
+                    m if m.is_wired() => "not connected — cable unplugged or link down".to_string(),
+                    _ => "not connected — no default route".to_string(),
+                },
+                vec![if n.iface.is_empty() {
+                    "no interface holds a default route".to_string()
+                } else {
+                    format!("{} lost its default route", n.iface)
+                }],
+            ),
+            LinkState::SelfAssigned => (
+                "no DHCP lease — self-assigned address, nothing beyond the machine is reachable"
+                    .to_string(),
+                vec![
+                    format!("{}: {}", n.iface, n.ipv4.join(", ")),
+                    "169.254.x.x is what the OS uses when no DHCP server answered — the router (or its DHCP) is the place to look".to_string(),
+                ],
+            ),
+            LinkState::NoGateway => (
+                format!("{} has an address but no gateway — nothing routes off the LAN", n.iface),
+                vec![format!("{}: {} · gateway none", n.iface, n.ipv4.join(", "))],
+            ),
+            LinkState::Up => unreachable!(),
+        };
+        findings.push(Finding {
+            cause: Cause::NoLink,
+            severity: Severity::Down,
+            confidence: Confidence::Strong,
+            summary,
+            evidence,
+            subject: String::new(),
+            symptom: false,
+            since: None,
+        });
+    }
+    let no_link = link != LinkState::Up;
 
     // --- gateway / LAN ---
     if let Some(g) = gw {
@@ -412,13 +573,10 @@ pub fn evaluate(s: &AppState) -> Triage {
             // Corroboration: everything behind a dead gateway fails, so bad
             // anchors make the story consistent. Fine anchors *contradict* it —
             // many gateways deprioritise ICMP while forwarding perfectly.
-            let mut confidence = if bad.len() >= 2 {
-                Confidence::Strong
-            } else if fine >= 2 {
-                Confidence::Weak
-            } else {
-                Confidence::Likely
-            };
+            // Contrast: the gateway itself is failing. Corroboration: what is
+            // behind it fails too. Contradiction: anchors fine — many gateways
+            // deprioritise ICMP while forwarding perfectly.
+            let mut confidence = judge(true, bad.len() >= 2, fine >= 2 && bad.is_empty());
             let summary = if loss >= th::LOSS_DOWN_PCT {
                 format!("gateway unresponsive ({loss:.0}% loss)")
             } else if loss >= th::LOSS_BAD_PCT {
@@ -464,6 +622,8 @@ pub fn evaluate(s: &AppState) -> Triage {
                 summary,
                 evidence,
                 subject: String::new(),
+                symptom: false,
+                since: None,
             });
         }
     }
@@ -499,18 +659,22 @@ pub fn evaluate(s: &AppState) -> Triage {
             if err_pct > th::LINK_ERR_BAD_PCT {
                 evidence.push(format!("interface errors: {err_pct:.1}% of packets"));
             }
+            // Contrast: the gateway suffers with it. Corroboration: the radio
+            // is unambiguously bad, or the baseline says this is far below
+            // this network's normal.
+            let baseline_worse = baseline
+                .and_then(|b| b.rssi_dbm)
+                .is_some_and(|normal| (rssi as f64) < normal - 10.0);
             findings.push(if hurting {
                 Finding {
                     cause: Cause::WifiLink,
                     severity: Severity::Degraded,
-                    confidence: if rssi <= th::RSSI_AWFUL_DBM {
-                        Confidence::Strong
-                    } else {
-                        Confidence::Likely
-                    },
+                    confidence: judge(true, rssi <= th::RSSI_AWFUL_DBM || baseline_worse, false),
                     summary: format!("Wi-Fi link is weak (rssi {rssi} dBm)"),
                     evidence,
                     subject: String::new(),
+                    symptom: false,
+                    since: None,
                 }
             } else {
                 Finding {
@@ -520,6 +684,8 @@ pub fn evaluate(s: &AppState) -> Triage {
                     summary: format!("Wi-Fi signal weak (rssi {rssi} dBm) — not yet hurting"),
                     evidence,
                     subject: String::new(),
+                    symptom: false,
+                    since: None,
                 }
             });
         }
@@ -534,31 +700,47 @@ pub fn evaluate(s: &AppState) -> Triage {
                 s.link_errors.iface, s.link_errors.rx_err_total, s.link_errors.tx_err_total
             )],
             subject: String::new(),
+            symptom: false,
+            since: None,
         });
     }
 
     // --- DNS ---
-    let probes: Vec<&crate::app::DnsProbe> = s.dns.iter().filter(|p| p.sent >= 3).collect();
+    // Judged on the recent window, like ICMP: a resolver that died a minute ago
+    // must read as failing now, and one that recovered must stop.
+    let probes: Vec<&crate::app::DnsProbe> = s
+        .dns
+        .iter()
+        .filter(|p| !p.reference && p.recent_len() >= th::DNS_MIN_SAMPLES)
+        .collect();
+    let reference = s
+        .dns
+        .iter()
+        .find(|p| p.reference && p.recent_len() >= th::DNS_MIN_SAMPLES);
+    let failing = |p: &crate::app::DnsProbe| p.fail_pct() >= th::DNS_FAIL_PCT;
+    let reference_ok = reference.is_some_and(|r| !failing(r));
+    let reference_dead = reference.is_some_and(failing);
     if !probes.is_empty() {
-        let failing = |p: &crate::app::DnsProbe| p.fail_pct() >= 50.0;
-        let slow = |p: &crate::app::DnsProbe| p.mean_ms().is_some_and(|m| m > th::DNS_BAD_MS);
+        let slow =
+            |p: &crate::app::DnsProbe| p.recent_mean_ms().is_some_and(|m| m > th::DNS_BAD_MS);
         let n_fail = probes.iter().filter(|p| failing(p)).count();
         let n_slow = probes.iter().filter(|p| !failing(p) && slow(p)).count();
-        // The anchors-fine contrast is the whole point: ping works, names don't.
-        let confidence = if fine >= 2 {
-            Confidence::Strong
-        } else if bad.len() >= 2 {
-            Confidence::Weak // everything is failing; DNS is a symptom
-        } else {
-            Confidence::Likely
-        };
+        // Contrast: ping works, names don't. Corroboration: the HTTP check —
+        // which resolves a hostname — is failing too. Contradiction: the
+        // gateway or the anchors are down as well, so DNS is a symptom.
+        let http_ok = matches!(s.http.v4, crate::app::FamilyProbe::Ok(_))
+            || matches!(s.http.v6, crate::app::FamilyProbe::Ok(_));
+        let http_failing = matches!(s.http.v4, crate::app::FamilyProbe::Fail(_))
+            && !matches!(s.http.v6, crate::app::FamilyProbe::Ok(_));
+        let dns_symptom = no_link || gw_health == Health::Bad || bad.len() >= 2;
+        let confidence = judge(fine >= 2, http_failing, dns_symptom);
         let mut evidence: Vec<String> = probes
             .iter()
             .map(|p| {
                 format!(
-                    "resolver {}: mean {}, {:.0}% failed{}",
+                    "resolver {}: mean {}, {:.0}% failed recently{}",
                     p.server,
-                    fmt_ms(p.mean_ms()),
+                    fmt_ms(p.recent_mean_ms()),
                     p.fail_pct(),
                     if p.status.is_empty() {
                         String::new()
@@ -573,7 +755,7 @@ pub fn evaluate(s: &AppState) -> Triage {
         {
             let worst = probes
                 .iter()
-                .filter_map(|p| p.mean_ms())
+                .filter_map(|p| p.recent_mean_ms())
                 .fold(0.0_f64, f64::max);
             if worst > normal * 3.0 && worst > th::DNS_WARN_MS {
                 evidence.push(format!(
@@ -586,8 +768,7 @@ pub fn evaluate(s: &AppState) -> Triage {
         // through the system resolver. When octomon's own resolver probes fail
         // anyway (link-local quirks, port-53 filtering on carrier networks),
         // the honest claim is "probes blocked", not "DNS down".
-        let names_resolve = matches!(s.http.v4, crate::app::FamilyProbe::Ok(_))
-            || matches!(s.http.v6, crate::app::FamilyProbe::Ok(_));
+        let names_resolve = http_ok;
         if n_fail == probes.len() && names_resolve {
             let mut evidence = evidence.clone();
             evidence.push("HTTP check fetched a hostname fine — resolution itself works".into());
@@ -607,15 +788,39 @@ pub fn evaluate(s: &AppState) -> Triage {
                 },
                 evidence,
                 subject: String::new(),
+                symptom: false,
+                since: None,
             });
         } else if n_fail == probes.len() {
+            // The reference resolver is the discriminator: it answering means
+            // DNS as such works and *these* resolvers are the fault.
+            let (summary, confidence) = if reference_ok {
+                evidence.push(format!(
+                    "reference resolver {} answers fine — the configured resolvers are the problem",
+                    reference.map(|r| r.server.to_string()).unwrap_or_default()
+                ));
+                (
+                    format!(
+                        "your DNS resolvers not answering — {} works: switch DNS to it",
+                        reference.map(|r| r.server.to_string()).unwrap_or_default()
+                    ),
+                    judge(fine >= 2, true, dns_symptom),
+                )
+            } else {
+                (
+                    format!("DNS not answering (all {} resolvers failing)", probes.len()),
+                    confidence,
+                )
+            };
             findings.push(Finding {
                 cause: Cause::Dns,
                 severity: Severity::Down,
                 confidence,
-                summary: format!("DNS not answering (all {} resolvers failing)", probes.len()),
+                summary,
                 evidence,
                 subject: String::new(),
+                symptom: dns_symptom,
+                since: None,
             });
         } else if n_fail + n_slow == probes.len() {
             findings.push(Finding {
@@ -625,6 +830,8 @@ pub fn evaluate(s: &AppState) -> Triage {
                 summary: "DNS slow on every resolver".to_string(),
                 evidence,
                 subject: String::new(),
+                symptom: dns_symptom,
+                since: None,
             });
         } else if n_fail > 0 {
             findings.push(Finding {
@@ -637,8 +844,68 @@ pub fn evaluate(s: &AppState) -> Triage {
                 ),
                 evidence,
                 subject: String::new(),
+                symptom: false,
+                since: None,
             });
         }
+    }
+
+    // Outside DNS filtered while the network's own works: a fact about this
+    // network worth knowing (apps with their own resolver settings will fail).
+    let system_ok = !probes.is_empty() && probes.iter().all(|p| !failing(p));
+    if reference_dead && system_ok && !no_link {
+        let r = reference.unwrap();
+        findings.push(Finding {
+            cause: Cause::Dns,
+            severity: Severity::Info,
+            confidence: judge(true, false, false),
+            summary: format!(
+                "outside resolvers blocked — {} unreachable while this network's DNS works",
+                r.server
+            ),
+            evidence: vec![
+                format!("{}: {:.0}% of recent queries failed ({})", r.server, r.fail_pct(), r.status),
+                "port 53 to the internet is filtered; anything configured to use its own DNS will fail here"
+                    .to_string(),
+            ],
+            subject: "reference".to_string(),
+            symptom: false,
+            since: None,
+        });
+    }
+
+    // Hijack: a name that cannot exist came back with an address.
+    let hijackers: Vec<&crate::app::DnsProbe> =
+        s.dns.iter().filter(|p| p.hijack == Some(true)).collect();
+    if !hijackers.is_empty() {
+        let names: Vec<String> = hijackers.iter().map(|p| p.server.to_string()).collect();
+        // Corroboration: the reference resolver, asked the same, said NXDOMAIN
+        // — so it is these resolvers, not the network, doing it.
+        let reference_honest = reference.is_some_and(|r| r.hijack == Some(false));
+        let all_hijack = s.dns.iter().all(|p| p.hijack != Some(false));
+        findings.push(Finding {
+            cause: Cause::DnsHijack,
+            severity: Severity::Degraded,
+            confidence: judge(true, reference_honest, false),
+            summary: if hijackers.iter().all(|p| p.reference) {
+                "DNS answers redirected on this network — even the reference resolver's misses come back with an address".to_string()
+            } else {
+                format!("resolver {} redirects non-existent names to an address", names.join(", "))
+            },
+            evidence: vec![
+                "a random name that cannot exist resolved to an address instead of NXDOMAIN".to_string(),
+                if reference_honest {
+                    "the reference resolver answered NXDOMAIN for the same kind of name".to_string()
+                } else if all_hijack {
+                    "every resolver does it, the reference included — the network intercepts DNS".to_string()
+                } else {
+                    "typo'd hostnames land on a search/ad page; software relying on a name not resolving misbehaves".to_string()
+                },
+            ],
+            subject: String::new(),
+            symptom: false,
+            since: None,
+        });
     }
 
     // --- beyond the gateway: wide internet vs a specific destination ---
@@ -669,14 +936,34 @@ pub fn evaluate(s: &AppState) -> Triage {
         }
         // Localise with the hop monitor when one is running: loss that begins
         // within the first few hops is the ISP's segment, not the wide internet.
+        // "Begins" means it persists to every later hop that answers — a lossy
+        // hop followed by clean ones is only rate-limiting its own ICMP replies
+        // while forwarding fine, the oldest false positive in path analysis.
         let early_bad_hop = s.hop_monitor.as_ref().and_then(|m| {
-            m.hops.iter().find(|h| {
-                h.ttl >= 2
-                    && h.ttl <= 4
-                    && h.stat.as_ref().is_some_and(|st| {
-                        st.window.len() >= 10 && st.recent_loss_pct(th::RECENT) >= th::LOSS_BAD_PCT
-                    })
-            })
+            let loss_of = |h: &crate::app::MonitoredHop| {
+                h.stat
+                    .as_ref()
+                    .filter(|st| st.window.len() >= 10)
+                    .map(|st| st.recent_loss_pct(th::RECENT))
+            };
+            m.hops
+                .iter()
+                .filter(|h| h.ttl >= 2 && h.ttl <= 4)
+                .find(|h| {
+                    let Some(loss) = loss_of(h) else { return false };
+                    if loss < th::LOSS_BAD_PCT {
+                        return false;
+                    }
+                    let mut later = m
+                        .hops
+                        .iter()
+                        .filter(|o| o.ttl > h.ttl)
+                        .filter_map(loss_of)
+                        .peekable();
+                    // No measured hop beyond it: the destinations are failing
+                    // (we are inside `wide`), so the loss did carry through.
+                    later.peek().is_none() || later.all(|l| l >= th::LOSS_BAD_PCT)
+                })
         });
         if let Some(h) = early_bad_hop {
             let addr = h
@@ -684,19 +971,24 @@ pub fn evaluate(s: &AppState) -> Triage {
                 .map(|a| a.to_string())
                 .unwrap_or_else(|| "?".to_string());
             evidence.push(format!("loss begins at hop {} ({})", h.ttl, addr));
+            evidence.push("loss persists on every later hop — not ICMP rate-limiting".to_string());
             findings.push(Finding {
                 cause: Cause::IspHop,
                 severity,
-                confidence: Confidence::Strong,
+                confidence: judge(true, true, false),
                 summary: format!("ISP path degraded — loss begins at hop {} ({addr})", h.ttl),
                 evidence,
                 subject: String::new(),
+                symptom: false,
+                since: None,
             });
         } else {
+            let http_failing = matches!(s.http.v4, crate::app::FamilyProbe::Fail(_))
+                && !matches!(s.http.v6, crate::app::FamilyProbe::Ok(_));
             findings.push(Finding {
                 cause: Cause::WideInternet,
                 severity,
-                confidence: Confidence::Strong,
+                confidence: judge(true, http_failing || bad.len() == with_data.len(), false),
                 summary: format!(
                     "internet {} beyond the gateway ({} of {} anchors failing)",
                     if all_down { "unreachable" } else { "degraded" },
@@ -705,6 +997,8 @@ pub fn evaluate(s: &AppState) -> Triage {
                 ),
                 evidence,
                 subject: String::new(),
+                symptom: false,
+                since: None,
             });
         }
     } else if gw_health != Health::Bad && fine >= 2 {
@@ -716,22 +1010,54 @@ pub fn evaluate(s: &AppState) -> Triage {
             } else {
                 format!("degraded ({loss:.0}% loss)")
             };
+            // Corroboration: its web service is unanswered too, or it is the
+            // only one out while several others answer.
+            let web_out = t.web.status == crate::app::WebStatus::Web && t.web.fails >= 2;
             findings.push(Finding {
                 cause: Cause::SingleDestination,
                 severity: Severity::Degraded,
-                confidence: if bad.len() == 1 {
-                    Confidence::Strong
-                } else {
-                    Confidence::Likely
-                },
+                confidence: judge(true, web_out || (bad.len() == 1 && fine >= 3), false),
                 summary: format!("{} {what} — your connection is fine", t.label),
                 evidence: vec![
                     format!("{} ({}): {loss:.0}% loss", t.label, t.addr),
                     format!("{fine} other anchors fine, gateway fine"),
                 ],
                 subject: t.label.clone(),
+                symptom: false,
+                since: None,
             });
         }
+    }
+
+    // --- devices on the LAN: never an internet question ---
+    for t in &lan_targets {
+        if probe_health(t) != Health::Bad {
+            continue;
+        }
+        let loss = t.recent_loss_pct(th::RECENT);
+        // If the whole LAN is unreachable this is the gateway's story.
+        let symptom = no_link || gw_health == Health::Bad;
+        findings.push(Finding {
+            cause: Cause::SingleDestination,
+            severity: Severity::Degraded,
+            confidence: judge(gw_fine, gw_fine && fine >= 2, symptom),
+            summary: format!("{} (on your LAN) unreachable — {loss:.0}% loss", t.label),
+            evidence: vec![
+                format!(
+                    "{} ({}) is on this network, not across the internet",
+                    t.label, t.addr
+                ),
+                if gw_fine {
+                    "gateway answers, so the LAN itself is up — that device is the place to look"
+                        .to_string()
+                } else {
+                    "gateway not answering either".to_string()
+                },
+            ],
+            subject: t.label.clone(),
+            symptom,
+            since: None,
+        });
     }
 
     // --- HTTP layer: portals, filtered web traffic, broken IPv6 ---
@@ -757,35 +1083,139 @@ pub fn evaluate(s: &AppState) -> Triage {
                 summary: "captive portal — open this network's sign-in page".to_string(),
                 evidence,
                 subject: String::new(),
+                symptom: false,
+                since: None,
             });
         } else if let (FP::Ok(v4_ms), FP::Fail(reason)) = (&http.v4, &http.v6) {
+            // Where along the way v6 breaks — the fix differs at each point.
+            let no_v6_gateway = s.netinfo.gateway_ipv6.is_empty();
+            let v6_dns: Vec<&crate::app::DnsProbe> = s
+                .dns
+                .iter()
+                .filter(|p| {
+                    !p.reference && p.server.is_ipv6() && p.recent_len() >= th::DNS_MIN_SAMPLES
+                })
+                .collect();
+            let v6_dns_dead =
+                !v6_dns.is_empty() && v6_dns.iter().all(|p| p.fail_pct() >= th::DNS_FAIL_PCT);
+            let mut evidence = vec![format!("v6 probe: {reason} · v4 probe: ok {v4_ms:.0}ms")];
+            let (where_, corroborated) = if no_v6_gateway {
+                evidence.push(
+                    "this interface has a global IPv6 address but no IPv6 default router — the router advertises addresses without a route"
+                        .to_string(),
+                );
+                ("at the router: address but no route", true)
+            } else if v6_dns_dead {
+                evidence.push(format!(
+                    "the IPv6 resolver{} ({}) not answering either",
+                    if v6_dns.len() == 1 { "" } else { "s" },
+                    v6_dns
+                        .iter()
+                        .map(|p| p.server.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                ("beyond the router: nothing over v6 answers", true)
+            } else {
+                evidence.push(format!(
+                    "IPv6 router {} is configured; the break is upstream of it",
+                    s.netinfo.gateway_ipv6
+                ));
+                ("upstream of the router", false)
+            };
+            evidence.push(
+                "browsers try v6 first and fall back, adding delay to every request".to_string(),
+            );
             findings.push(Finding {
                 cause: Cause::Ipv6Broken,
                 severity: Severity::Degraded,
-                confidence: Confidence::Likely,
-                summary: "IPv6 broken while IPv4 works — pages stall then load".to_string(),
+                confidence: judge(true, corroborated, false),
+                summary: format!("IPv6 broken while IPv4 works — {where_}"),
+                evidence,
+                subject: String::new(),
+                symptom: false,
+                since: None,
+            });
+        } else if let (FP::Fail(reason), FP::Ok(v6_ms)) = (&http.v4, &http.v6) {
+            // The mirror image is rarer but real (a v4 firewall rule, a broken
+            // NAT) and would otherwise leave the Http rung at Warn with no story.
+            findings.push(Finding {
+                cause: Cause::HttpBlocked,
+                severity: Severity::Degraded,
+                confidence: judge(true, fine >= 2, false),
+                summary: "IPv4 web broken while IPv6 works".to_string(),
                 evidence: vec![
-                    format!("v6 probe: {reason} · v4 probe: ok {v4_ms:.0}ms"),
-                    "browsers try v6 first and fall back, adding delay to every request"
-                        .to_string(),
+                    format!("v4 probe: {reason} · v6 probe: ok {v6_ms:.0}ms"),
+                    "IPv6-capable sites still load; anything IPv4-only does not".to_string(),
                 ],
                 subject: String::new(),
+                symptom: false,
+                since: None,
             });
         } else if matches!(http.v4, FP::Fail(_)) && !matches!(http.v6, FP::Ok(_)) && fine >= 2 {
             let reason = match &http.v4 {
                 FP::Fail(r) => r.clone(),
                 _ => String::new(),
             };
+            // A configured proxy that works turns this from a fault into how
+            // this network is meant to be used.
+            let proxied_ok = matches!(http.via_proxy, FP::Ok(_));
+            let proxy_desc = s.proxy.as_ref().map(|p| p.describe()).unwrap_or_default();
+            if proxied_ok {
+                findings.push(Finding {
+                    cause: Cause::HttpBlocked,
+                    severity: Severity::Info,
+                    confidence: judge(true, true, false),
+                    summary: "direct web blocked — this network requires the configured proxy, which works".to_string(),
+                    evidence: vec![
+                        format!("direct HTTP probe failed ({reason}); the same check via {proxy_desc} succeeded"),
+                        "browsers and apps that follow the system proxy are fine; anything going direct is not".to_string(),
+                    ],
+                    subject: String::new(),
+                    symptom: false,
+                    since: None,
+                });
+            } else {
+                let mut evidence = vec![
+                    format!("HTTP probe failed ({reason}) on two independent endpoints"),
+                    format!("{fine} anchors answer ICMP normally"),
+                ];
+                if let Some(p) = &s.proxy {
+                    evidence.push(match &http.via_proxy {
+                        FP::Fail(r) => format!("via the configured proxy {}: also failing ({r})", p.describe()),
+                        _ => format!("a proxy is configured ({}) — browsers use it; octomon's check is direct", p.describe()),
+                    });
+                }
+                findings.push(Finding {
+                    cause: Cause::HttpBlocked,
+                    severity: Severity::Degraded,
+                    // Contrast: ping works. Corroboration: a second, independent
+                    // provider was consulted before the failure was reported.
+                    confidence: judge(true, true, false),
+                    summary: "web traffic blocked while ping works — proxy or firewall".to_string(),
+                    evidence,
+                    subject: String::new(),
+                    symptom: false,
+                    since: None,
+                });
+            }
+        } else if let (FP::Ok(_), FP::Fail(r)) = (&http.v4, &http.via_proxy)
+            && let Some(p) = &s.proxy
+        {
+            // The mirror: direct works, the proxy every browser is pointed at
+            // does not — a stale setting from another network, or a dead proxy.
             findings.push(Finding {
                 cause: Cause::HttpBlocked,
                 severity: Severity::Degraded,
-                confidence: Confidence::Likely,
-                summary: "web traffic blocked while ping works — proxy or firewall".to_string(),
+                confidence: judge(true, false, false),
+                summary: "the configured web proxy is not answering — browsers fail while the network is fine".to_string(),
                 evidence: vec![
-                    format!("HTTP probe failed ({reason}) on two independent endpoints"),
-                    format!("{fine} anchors answer ICMP normally"),
+                    format!("via {}: {r} · direct HTTP: ok", p.describe()),
+                    "a proxy setting left over from another network is the usual cause".to_string(),
                 ],
-                subject: String::new(),
+                subject: "proxy".to_string(),
+                symptom: false,
+                since: None,
             });
         }
     }
@@ -803,11 +1233,9 @@ pub fn evaluate(s: &AppState) -> Triage {
                 findings.push(Finding {
                     cause: Cause::WebTarget,
                     severity: Severity::Degraded,
-                    confidence: if t.web.fails >= 5 {
-                        Confidence::Strong
-                    } else {
-                        Confidence::Likely
-                    },
+                    // Contrast: ping is fine while HTTP is not. Corroboration
+                    // would be a second vantage point, which there isn't.
+                    confidence: judge(true, false, false),
                     summary: format!("{} web service not answering — ping still fine", t.label),
                     evidence: vec![
                         format!(
@@ -821,17 +1249,31 @@ pub fn evaluate(s: &AppState) -> Triage {
                         ),
                     ],
                     subject: t.label.clone(),
+                    symptom: false,
+                    since: None,
                 });
             }
         }
     }
 
     // --- bufferbloat (only meaningful under load) ---
+    // "Load" is relative to the *WAN*, which is what saturates: the learned
+    // speed-test result for this network when there is one. The negotiated
+    // link speed is the fallback, and a poor one — a gigabit NIC on a 50 Mb
+    // line never looks loaded by that measure.
     let n = s.window_samples().min(60);
-    let loaded = matches!(s.speedtest.status, crate::app::SpeedStatus::Running)
-        || s.netinfo.link_speed_bps.is_some_and(|cap| {
-            (s.throughput.down_bps + s.throughput.up_bps) * 8.0 > 0.3 * cap as f64
-        });
+    let speedtest_running = matches!(s.speedtest.status, crate::app::SpeedStatus::Running);
+    let wan_loaded = baseline.is_some_and(|b| {
+        let down_cap = b.down_mbps.map(|m| m * 1e6);
+        let up_cap = b.up_mbps.map(|m| m * 1e6);
+        down_cap.is_some_and(|c| s.throughput.down_bps * 8.0 > 0.5 * c)
+            || up_cap.is_some_and(|c| s.throughput.up_bps * 8.0 > 0.5 * c)
+    });
+    let link_loaded = s
+        .netinfo
+        .link_speed_bps
+        .is_some_and(|cap| (s.throughput.down_bps + s.throughput.up_bps) * 8.0 > 0.3 * cap as f64);
+    let loaded = speedtest_running || wan_loaded || link_loaded;
     if loaded {
         let worst = anchors
             .iter()
@@ -843,14 +1285,116 @@ pub fn evaluate(s: &AppState) -> Triage {
             findings.push(Finding {
                 cause: Cause::Bufferbloat,
                 severity: Severity::Degraded,
-                confidence: Confidence::Likely,
+                // Contrast: latency up while loaded. Corroboration: the load is
+                // certain — a speed test is running, or throughput is measured
+                // against this network's own capacity rather than the NIC's.
+                confidence: judge(true, speedtest_running || wan_loaded, false),
                 summary: format!("bufferbloat: +{bloat:.0}ms latency under load"),
-                evidence: vec![format!(
-                    "{label}: mean over the last minute is {bloat:.0}ms above the idle floor"
-                )],
+                evidence: vec![
+                    format!(
+                        "{label}: mean over the last minute is {bloat:.0}ms above the idle floor"
+                    ),
+                    if speedtest_running {
+                        "load: speed test running".to_string()
+                    } else if wan_loaded {
+                        format!(
+                            "load: {:.0}/{:.0} Mb/s against ~{}/{} Mb/s learned here",
+                            s.throughput.down_bps * 8.0 / 1e6,
+                            s.throughput.up_bps * 8.0 / 1e6,
+                            baseline
+                                .and_then(|b| b.down_mbps)
+                                .map(|m| format!("{m:.0}"))
+                                .unwrap_or("?".into()),
+                            baseline
+                                .and_then(|b| b.up_mbps)
+                                .map(|m| format!("{m:.0}"))
+                                .unwrap_or("?".into()),
+                        )
+                    } else {
+                        "load: >30% of the negotiated link speed".to_string()
+                    },
+                ],
                 subject: String::new(),
+                symptom: false,
+                since: None,
             });
         }
+    }
+
+    // --- path MTU black hole: big packets vanish, small ones sail through ---
+    if let Some(p) = &s.pmtu
+        && p.blackhole
+        && !no_link
+    {
+        findings.push(Finding {
+            cause: Cause::PathMtu,
+            severity: Severity::Degraded,
+            // Contrast: full-size probes vanish while smaller ones answer.
+            // Corroboration: the kernel learned nothing between attempts —
+            // the fragmentation-needed message never came.
+            confidence: judge(true, !p.pmtud_works, false),
+            summary: format!(
+                "path MTU black hole — packets over {} bytes vanish silently",
+                p.path_mtu.map(|m| m.to_string()).unwrap_or_else(|| "~1200".into())
+            ),
+            evidence: vec![
+                format!(
+                    "DF probe to {}: {} answered, {} not — and no fragmentation-needed came back",
+                    p.target,
+                    p.path_mtu.map(|m| format!("{m} bytes")).unwrap_or_else(|| "nothing".into()),
+                    p.iface_mtu.map(|m| format!("{m} bytes")).unwrap_or_else(|| "full size".into()),
+                ),
+                "symptom: pings and small pages fine, big downloads / uploads / VPNs stall — lower the MTU or fix the firewall dropping ICMP".to_string(),
+            ],
+            subject: String::new(),
+            symptom: false,
+            since: None,
+        });
+    }
+
+    // --- system clock: nothing on the network can explain what this breaks ---
+    if let Some(off) = s.clock.offset_ms()
+        && off.abs() >= th::CLOCK_WARN_MS
+    {
+        let bad = off.abs() >= th::CLOCK_BAD_MS;
+        let ntp = s.clock.ntp_offset_ms.is_some();
+        findings.push(Finding {
+            cause: Cause::ClockSkew,
+            severity: if bad {
+                Severity::Degraded
+            } else {
+                Severity::Info
+            },
+            // Contrast: measured against an external reference. Corroboration:
+            // NTP is millisecond-precise; the HTTP Date reading is coarse.
+            confidence: judge(true, ntp, false),
+            summary: if bad {
+                format!(
+                    "{} — HTTPS certificates will be rejected until it is fixed",
+                    crate::collectors::clock::describe_offset(off)
+                )
+            } else {
+                format!(
+                    "{} — time-based logins and some TLS checks may fail",
+                    crate::collectors::clock::describe_offset(off)
+                )
+            },
+            evidence: vec![
+                format!(
+                    "offset {:+.1} s against {}",
+                    off / 1000.0,
+                    if ntp {
+                        "an NTP time server"
+                    } else {
+                        "the HTTP check's Date header (±1 s)"
+                    }
+                ),
+                "ping and DNS cannot see this — browsers show certificate-date errors".to_string(),
+            ],
+            subject: String::new(),
+            symptom: false,
+            since: None,
+        });
     }
 
     // --- machine (caveat-class: co-reported, never the sole confident answer) ---
@@ -866,6 +1410,8 @@ pub fn evaluate(s: &AppState) -> Triage {
                     .to_string(),
             ],
             subject: "thermal".to_string(),
+            symptom: false,
+            since: None,
         });
     }
     let hottest = v.hottest_core().map(|(_, pct)| pct).unwrap_or(0.0);
@@ -877,6 +1423,8 @@ pub fn evaluate(s: &AppState) -> Triage {
             summary: format!("machine under load (cpu {:.0}%)", v.cpu_pct),
             evidence: vec![format!("cpu {:.0}%, hottest core {hottest:.0}%", v.cpu_pct)],
             subject: "cpu".to_string(),
+            symptom: false,
+            since: None,
         });
     }
     if v.mem_pressure_pct >= th::MEM_HOT_PCT {
@@ -891,6 +1439,8 @@ pub fn evaluate(s: &AppState) -> Triage {
                 v.swap_used / 1_048_576
             )],
             subject: "memory".to_string(),
+            symptom: false,
+            since: None,
         });
     }
 
@@ -908,11 +1458,23 @@ pub fn evaluate(s: &AppState) -> Triage {
                 s.netinfo.tunnel_iface
             )],
             subject: String::new(),
+            symptom: false,
+            since: None,
         });
     }
 
+    // Nothing measured across a link that isn't there means anything: every
+    // network finding is then a symptom of the missing link.
+    if no_link {
+        for f in findings.iter_mut() {
+            if f.cause != Cause::NoLink && !f.cause.is_caveat() {
+                f.symptom = true;
+            }
+        }
+    }
+
     rank(&mut findings);
-    let rungs = build_rungs(s, gw, gw_health, &with_data, &bad, fine);
+    let rungs = build_rungs(s, link, gw, gw_health, &with_data, &bad, fine);
     Triage { rungs, findings }
 }
 
@@ -921,6 +1483,7 @@ pub fn evaluate(s: &AppState) -> Triage {
 /// assertion.
 fn build_rungs(
     s: &AppState,
+    link: LinkState,
     gw: Option<&TargetStat>,
     gw_health: Health,
     with_data: &[&TargetStat],
@@ -937,9 +1500,14 @@ fn build_rungs(
 
     // Machine.
     let v = &s.vitals;
+    // Warn exactly when the machine finding fires — one rulebook.
+    let hottest = v.hottest_core().map(|(_, pct)| pct).unwrap_or(0.0);
     let m_status = if v.throttled {
         RungStatus::Bad
-    } else if v.cpu_pct >= th::USAGE_BAD_PCT || v.mem_pressure_pct >= th::USAGE_BAD_PCT {
+    } else if v.cpu_pct >= th::CPU_HOT_PCT
+        || hottest >= th::CORE_HOT_PCT
+        || v.mem_pressure_pct >= th::MEM_HOT_PCT
+    {
         RungStatus::Warn
     } else if v.cores.is_empty() {
         RungStatus::Unknown
@@ -961,9 +1529,24 @@ fn build_rungs(
         },
     });
 
-    // Physical link.
+    // Link: first whether there is one at all, then its quality.
     let err_pct = s.link_errors.error_pct();
     let (l_status, l_detail) = match s.netinfo.medium {
+        _ if link == LinkState::NoRoute => (
+            RungStatus::Bad,
+            "not connected — no default route".to_string(),
+        ),
+        _ if link == LinkState::SelfAssigned => (
+            RungStatus::Bad,
+            format!(
+                "self-assigned {} — no DHCP lease",
+                s.netinfo.ipv4.join(", ")
+            ),
+        ),
+        _ if link == LinkState::NoGateway => (
+            RungStatus::Bad,
+            format!("{} has an address but no gateway", s.netinfo.iface),
+        ),
         LinkMedium::WiFi if s.signal.present => {
             let rssi = s.signal.rssi_dbm;
             let status = if rssi <= th::RSSI_BAD_DBM || err_pct > th::LINK_ERR_BAD_PCT {
@@ -997,6 +1580,11 @@ fn build_rungs(
             ),
         ),
         LinkMedium::Unknown => (RungStatus::Unknown, "no data yet".to_string()),
+        // Wi-Fi with no signal sample yet: not measured is not fine.
+        LinkMedium::WiFi => (
+            RungStatus::Unknown,
+            "Wi-Fi · no signal data yet".to_string(),
+        ),
         m => (RungStatus::Ok, m.label().to_string()),
     };
     rungs.push(Rung {
@@ -1033,8 +1621,12 @@ fn build_rungs(
         },
     });
 
-    // DNS.
-    let probes: Vec<&crate::app::DnsProbe> = s.dns.iter().filter(|p| p.sent >= 3).collect();
+    // DNS (this network's resolvers; the reference is contrast, not a rung).
+    let probes: Vec<&crate::app::DnsProbe> = s
+        .dns
+        .iter()
+        .filter(|p| !p.reference && p.recent_len() >= th::DNS_MIN_SAMPLES)
+        .collect();
     rungs.push(if probes.is_empty() {
         Rung {
             area: Area::Dns,
@@ -1044,9 +1636,12 @@ fn build_rungs(
     } else {
         let worst_mean = probes
             .iter()
-            .filter_map(|p| p.mean_ms())
+            .filter_map(|p| p.recent_mean_ms())
             .fold(0.0_f64, f64::max);
-        let n_fail = probes.iter().filter(|p| p.fail_pct() >= 50.0).count();
+        let n_fail = probes
+            .iter()
+            .filter(|p| p.fail_pct() >= th::DNS_FAIL_PCT)
+            .count();
         let status = if n_fail == probes.len() {
             RungStatus::Bad
         } else if n_fail > 0 || worst_mean > th::DNS_BAD_MS {
@@ -1191,10 +1786,23 @@ fn build_rungs(
             detail: format!("struggling: {}", names.join(", ")),
         }
     } else {
-        Rung {
-            area: Area::Destinations,
-            status: RungStatus::Ok,
-            detail: "all targets reachable".to_string(),
+        let warn: Vec<&str> = with_data
+            .iter()
+            .filter(|t| probe_health(t) == Health::Warn)
+            .map(|t| t.label.as_str())
+            .collect();
+        if warn.is_empty() {
+            Rung {
+                area: Area::Destinations,
+                status: RungStatus::Ok,
+                detail: "all targets reachable".to_string(),
+            }
+        } else {
+            Rung {
+                area: Area::Destinations,
+                status: RungStatus::Warn,
+                detail: format!("reachable · slow or lossy: {}", warn.join(", ")),
+            }
         }
     });
 
@@ -1281,9 +1889,11 @@ impl VerdictState {
                 (Some(active), None) => {
                     active.quiet += 1;
                     if active.quiet >= th::CLEAR_TICKS {
+                        let mut finding = active.last.clone();
+                        finding.since = Some(active.since);
                         transitions.push(Transition {
                             raised: false,
-                            finding: active.last.clone(),
+                            finding,
                             after: Some(now.duration_since(active.since)),
                         });
                         tr.active = None;
@@ -1312,7 +1922,13 @@ impl VerdictState {
         let mut active: Vec<Finding> = self
             .tracker
             .values()
-            .filter_map(|t| t.active.as_ref().map(|a| a.last.clone()))
+            .filter_map(|t| {
+                t.active.as_ref().map(|a| {
+                    let mut f = a.last.clone();
+                    f.since = Some(a.since);
+                    f
+                })
+            })
             .collect();
         rank(&mut active);
 
@@ -1349,7 +1965,16 @@ pub fn render_text(triage: &Triage, insufficient: Option<&str>) -> String {
         let _ = writeln!(out, "  no findings — connection looks healthy");
     } else {
         for f in &triage.findings {
-            let _ = writeln!(out, "  ▲ {}", f.summary);
+            let _ = writeln!(
+                out,
+                "  ▲ {}{}",
+                f.summary,
+                if f.symptom {
+                    "  (symptom of the above)"
+                } else {
+                    ""
+                }
+            );
             for e in &f.evidence {
                 let _ = writeln!(out, "      {e}");
             }
@@ -1406,21 +2031,39 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
         tick.tick().await;
         let now = Instant::now();
 
+        let mut episodes: Vec<crate::history::Episode> = Vec::new();
         let io = {
             let mut s = state.lock().unwrap();
             let triage = evaluate(&s);
             let insufficient = insufficient_reason(&s);
+            let network = s.baseline_key.clone();
             for t in s.verdict.ingest(triage, insufficient, now) {
                 let (severity, message) = if t.raised {
                     (t.finding.severity, format!("▲ {}", t.finding.summary))
                 } else {
                     // Clears are good news: Info regardless of how bad it was.
+                    let after = t.after.unwrap_or_default();
+                    // A finished Degraded-or-worse episode goes to the
+                    // per-network history — the "is it always like this at
+                    // 9pm" record.
+                    let started_at = chrono::Utc::now().timestamp() - after.as_secs() as i64;
+                    if let Some(ep) = crate::history::episode_from(
+                        network.as_deref(),
+                        t.finding.cause,
+                        t.finding.severity,
+                        &t.finding.summary,
+                        started_at,
+                        after,
+                    ) {
+                        s.history.push(ep.clone());
+                        episodes.push(ep);
+                    }
                     (
                         Severity::Info,
                         format!(
                             "✓ {} — ended after {}",
                             t.finding.summary,
-                            fmt_duration(t.after.unwrap_or_default())
+                            fmt_duration(after)
                         ),
                     )
                 };
@@ -1429,6 +2072,15 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
 
             baseline_step(&mut s, &mut healthy_run, &mut last_speed_total)
         };
+
+        if !episodes.is_empty() {
+            let _ = tokio::task::spawn_blocking(move || {
+                for ep in &episodes {
+                    crate::history::append(ep);
+                }
+            })
+            .await;
+        }
 
         // File I/O strictly off the lock.
         match io {
@@ -1654,8 +2306,16 @@ mod tests {
         let f = &t.findings[0];
         assert_eq!(f.cause, Cause::WideInternet);
         assert_eq!(f.severity, Severity::Down);
-        assert_eq!(f.confidence, Confidence::Strong);
+        // Two of three anchors dead behind a fine gateway is the contrast;
+        // without a second line of evidence it is Likely, not Strong.
+        assert_eq!(f.confidence, Confidence::Likely);
         assert!(!causes(&t).contains(&Cause::SingleDestination));
+
+        // The HTTP check failing too corroborates it.
+        s.http.v4 = crate::app::FamilyProbe::Fail("timeout".into());
+        let t = evaluate(&s);
+        assert_eq!(t.findings[0].cause, Cause::WideInternet);
+        assert_eq!(t.findings[0].confidence, Confidence::Strong);
     }
 
     #[test]
@@ -1675,16 +2335,311 @@ mod tests {
     fn dns_failing_while_ping_works_is_a_strong_dns_verdict() {
         let mut s = healthy_state();
         let mut p = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
-        p.sent = 10;
-        p.ok = 0;
+        for _ in 0..10 {
+            p.record(None);
+        }
         p.status = "timeout".into();
         s.dns = vec![p];
         let t = evaluate(&s);
         let f = &t.findings[0];
         assert_eq!(f.cause, Cause::Dns);
         assert_eq!(f.severity, Severity::Down);
-        // The anchors-fine contrast is the whole point.
-        assert_eq!(f.confidence, Confidence::Strong);
+        assert!(!f.symptom, "ping works, so DNS is the cause, not a symptom");
+        // The anchors-fine contrast makes it Likely; the HTTP check (which
+        // resolves a name) failing as well is the corroboration for Strong.
+        assert_eq!(f.confidence, Confidence::Likely);
+        s.http.v4 = crate::app::FamilyProbe::Fail("dns error".into());
+        let t = evaluate(&s);
+        assert_eq!(t.findings[0].confidence, Confidence::Strong);
+    }
+
+    /// A resolver that answered for an hour and then died must read as
+    /// failing within a minute — the judgement is on the recent window, not
+    /// the session totals.
+    #[test]
+    fn dns_is_judged_on_the_recent_window() {
+        let mut s = healthy_state();
+        let mut p = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        for _ in 0..500 {
+            p.record(Some(12.0));
+        }
+        for _ in 0..crate::app::DNS_RECENT {
+            p.record(None);
+        }
+        assert_eq!(p.fail_pct(), 100.0);
+        s.dns = vec![p];
+        let t = evaluate(&s);
+        assert_eq!(t.findings[0].cause, Cause::Dns);
+        assert_eq!(t.findings[0].severity, Severity::Down);
+
+        // And once it recovers, the outage stops being reported just as fast.
+        for _ in 0..crate::app::DNS_RECENT {
+            s.dns[0].record(Some(12.0));
+        }
+        assert!(!causes(&evaluate(&s)).contains(&Cause::Dns));
+    }
+
+    /// The whole point of the ladder: with the gateway dead, DNS timing out is
+    /// a symptom and must not headline — however loud it is.
+    #[test]
+    fn a_dead_gateway_outranks_the_dns_failure_behind_it() {
+        let mut s = healthy_state();
+        // Gateway at partial loss (Degraded), DNS at total loss (Down).
+        let gw = s.targets.iter_mut().find(|t| t.discovered).unwrap();
+        for _ in 0..8 {
+            gw.record_loss();
+        }
+        let mut p = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        for _ in 0..10 {
+            p.record(None);
+        }
+        s.dns = vec![p];
+        let t = evaluate(&s);
+        assert_eq!(t.findings[0].cause, Cause::GatewayLan, "{:?}", causes(&t));
+        let dns = t.findings.iter().find(|f| f.cause == Cause::Dns).unwrap();
+        assert!(dns.symptom);
+        assert_eq!(
+            dns.severity,
+            Severity::Down,
+            "still reported at its real severity"
+        );
+    }
+
+    /// Cable out: the answer is "not connected", not whatever failed first.
+    #[test]
+    fn no_default_route_is_the_bottom_rung_and_explains_everything() {
+        let mut s = healthy_state();
+        s.link_lost = true;
+        s.netinfo.medium = LinkMedium::WiFi;
+        for t in s.targets.iter_mut() {
+            for _ in 0..20 {
+                t.record_loss();
+            }
+        }
+        let mut p = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        for _ in 0..10 {
+            p.record(None);
+        }
+        s.dns = vec![p];
+        let t = evaluate(&s);
+        assert_eq!(t.findings[0].cause, Cause::NoLink);
+        assert_eq!(t.findings[0].severity, Severity::Down);
+        assert!(t.findings[0].summary.contains("Wi-Fi"));
+        assert!(
+            t.findings
+                .iter()
+                .skip(1)
+                .all(|f| f.symptom || f.cause.is_caveat())
+        );
+        let link = t.rungs.iter().find(|r| r.area == Area::Link).unwrap();
+        assert_eq!(link.status, RungStatus::Bad);
+    }
+
+    #[test]
+    fn a_self_assigned_address_means_no_dhcp() {
+        let mut s = healthy_state();
+        s.netinfo.iface = "en0".into();
+        s.netinfo.ipv4 = vec!["169.254.12.7/16".into()];
+        s.netinfo.gateway_ip = "-".into();
+        assert_eq!(link_state(&s), LinkState::SelfAssigned);
+        let t = evaluate(&s);
+        assert_eq!(t.findings[0].cause, Cause::NoLink);
+        assert!(t.findings[0].summary.contains("no DHCP lease"));
+
+        // A real address but no gateway is the other flavour.
+        s.netinfo.ipv4 = vec!["192.168.1.20/24".into()];
+        assert_eq!(link_state(&s), LinkState::NoGateway);
+        s.netinfo.gateway_ip = "192.168.1.1".into();
+        assert_eq!(link_state(&s), LinkState::Up);
+    }
+
+    /// A printer on the LAN being off is not an internet finding and must not
+    /// vote against the anchors' consensus.
+    #[test]
+    fn a_lan_target_is_judged_locally() {
+        let mut s = healthy_state();
+        s.netinfo.iface = "en0".into();
+        s.netinfo.ipv4 = vec!["192.168.1.20/24".into()];
+        s.targets.push(probe("printer", [192, 168, 1, 50], 0, 20));
+        let t = evaluate(&s);
+        let f = t.findings.iter().find(|f| f.subject == "printer").unwrap();
+        assert!(f.summary.contains("on your LAN"));
+        assert!(!causes(&t).contains(&Cause::WideInternet));
+        let internet = t.rungs.iter().find(|r| r.area == Area::Internet).unwrap();
+        assert_eq!(
+            internet.status,
+            RungStatus::Ok,
+            "the LAN device did not vote"
+        );
+    }
+
+    /// The MTR rule: loss at hop 3 that the later hops don't show is hop 3
+    /// rate-limiting its own ICMP replies, not the ISP path failing.
+    #[test]
+    fn hop_loss_that_does_not_persist_is_not_the_isp() {
+        let mut s = healthy_state();
+        for t in s.targets.iter_mut().filter(|t| !t.discovered).take(2) {
+            for _ in 0..15 {
+                t.record_loss();
+            }
+        }
+        let hop = |ttl: u8, ok: usize, lost: usize| crate::app::MonitoredHop {
+            ttl,
+            addr: Some(IpAddr::V4(Ipv4Addr::new(10, 0, ttl, 1))),
+            stat: Some(probe("hop", [10, 0, ttl, 1], ok, lost)),
+        };
+        let mut m = crate::app::HopMonitor {
+            target: "Cloudflare".into(),
+            dest: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            hops: vec![
+                hop(1, 20, 0),
+                hop(2, 20, 0),
+                hop(3, 8, 12),
+                hop(4, 20, 0),
+                hop(5, 20, 0),
+            ],
+            discovering: false,
+            generation: 1,
+            selected: 0,
+        };
+        s.hop_monitor = Some(m.clone());
+        let t = evaluate(&s);
+        assert_eq!(t.findings[0].cause, Cause::WideInternet, "{:?}", causes(&t));
+
+        // Loss from hop 3 onward, carried by every later hop: that *is* the ISP.
+        m.hops = vec![
+            hop(1, 20, 0),
+            hop(2, 20, 0),
+            hop(3, 8, 12),
+            hop(4, 6, 14),
+            hop(5, 5, 15),
+        ];
+        s.hop_monitor = Some(m);
+        let t = evaluate(&s);
+        assert_eq!(t.findings[0].cause, Cause::IspHop, "{:?}", causes(&t));
+        assert!(t.findings[0].summary.contains("hop 3"));
+    }
+
+    #[test]
+    fn a_working_reference_resolver_turns_dns_down_into_switch_dns() {
+        let mut s = healthy_state();
+        let mut mine = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        for _ in 0..10 {
+            mine.record(None);
+        }
+        let mut reference = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
+        reference.reference = true;
+        for _ in 0..10 {
+            reference.record(Some(9.0));
+        }
+        s.dns = vec![mine, reference];
+        let t = evaluate(&s);
+        let f = &t.findings[0];
+        assert_eq!(f.cause, Cause::Dns);
+        assert!(f.summary.contains("switch DNS"), "{}", f.summary);
+        assert_eq!(
+            f.confidence,
+            Confidence::Strong,
+            "the reference corroborates"
+        );
+        // The reference is not a rung of *this network's* DNS.
+        let rung = t.rungs.iter().find(|r| r.area == Area::Dns).unwrap();
+        assert_eq!(rung.status, RungStatus::Bad);
+    }
+
+    #[test]
+    fn a_dead_reference_while_own_dns_works_is_a_filtered_network_note() {
+        let mut s = healthy_state();
+        let mut mine = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        for _ in 0..10 {
+            mine.record(Some(8.0));
+        }
+        let mut reference = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
+        reference.reference = true;
+        for _ in 0..10 {
+            reference.record(None);
+        }
+        reference.status = "timeout".into();
+        s.dns = vec![mine, reference];
+        let t = evaluate(&s);
+        let f = t.findings.iter().find(|f| f.cause == Cause::Dns).unwrap();
+        assert_eq!(f.severity, Severity::Info);
+        assert!(
+            f.summary.contains("outside resolvers blocked"),
+            "{}",
+            f.summary
+        );
+    }
+
+    #[test]
+    fn a_resolver_answering_nonexistent_names_is_a_hijack() {
+        let mut s = healthy_state();
+        let mut mine = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        for _ in 0..10 {
+            mine.record(Some(8.0));
+        }
+        mine.hijack = Some(true);
+        let mut reference = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
+        reference.reference = true;
+        reference.hijack = Some(false);
+        for _ in 0..10 {
+            reference.record(Some(9.0));
+        }
+        s.dns = vec![mine, reference];
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::DnsHijack)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Degraded);
+        assert_eq!(f.confidence, Confidence::Strong, "reference said NXDOMAIN");
+        assert!(f.summary.contains("192.168.1.1"));
+    }
+
+    #[test]
+    fn a_skewed_clock_is_a_finding_of_its_own() {
+        let mut s = healthy_state();
+        s.clock.ntp_offset_ms = Some(-400_000.0);
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::ClockSkew)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Degraded);
+        assert!(f.summary.contains("6m 40s slow"), "{}", f.summary);
+        // Half a minute is a note, not a problem.
+        s.clock.ntp_offset_ms = Some(45_000.0);
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::ClockSkew)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Info);
+        // The HTTP-date fallback is coarser: Likely, not Strong.
+        s.clock.ntp_offset_ms = None;
+        s.clock.http_offset_ms = Some(400_000.0);
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::ClockSkew)
+            .unwrap();
+        assert_eq!(f.confidence, Confidence::Likely);
+    }
+
+    /// Wi-Fi with no signal sample yet is not measured, so it is not "ok".
+    #[test]
+    fn wifi_without_signal_data_reads_unknown_not_ok() {
+        let mut s = healthy_state();
+        s.netinfo.iface = "en0".into();
+        s.netinfo.medium = LinkMedium::WiFi;
+        s.signal.present = false;
+        let t = evaluate(&s);
+        let link = t.rungs.iter().find(|r| r.area == Area::Link).unwrap();
+        assert_eq!(link.status, RungStatus::Unknown);
     }
 
     /// The Windows DNS-filter lesson: loopback resolvers (127.0.2.x) that
@@ -1693,8 +2648,9 @@ mod tests {
     fn loopback_resolvers_are_named_a_local_proxy() {
         let mut s = healthy_state();
         let mut p = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(127, 0, 2, 2)));
-        p.sent = 10;
-        p.ok = 0;
+        for _ in 0..10 {
+            p.record(None);
+        }
         p.status = "connection reset".into();
         s.dns = vec![p];
         s.http.v4 = crate::app::FamilyProbe::Ok(30.0);
@@ -1711,8 +2667,9 @@ mod tests {
     fn dns_probe_failures_defer_to_a_working_http_check() {
         let mut s = healthy_state();
         let mut p = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
-        p.sent = 10;
-        p.ok = 0;
+        for _ in 0..10 {
+            p.record(None);
+        }
         p.status = "No route to host".into();
         s.dns = vec![p];
         s.http.v4 = crate::app::FamilyProbe::Ok(30.0);
@@ -2074,6 +3031,8 @@ mod tests {
             summary: "x".into(),
             evidence: vec![],
             subject: String::new(),
+            symptom: false,
+            since: None,
         }
     }
 

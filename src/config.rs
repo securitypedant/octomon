@@ -59,7 +59,13 @@ pub struct Config {
     pub dns_timeout_ms: u64,
     /// Name looked up when probing resolvers. A widely cached name measures what
     /// applications actually experience; something obscure measures recursion.
+    /// Once a minute a random name *under* it is also queried; an address back
+    /// for a name that cannot exist means the resolver redirects misses.
     pub dns_probe_name: String,
+    /// A public resolver probed alongside the system ones for contrast: yours
+    /// failing while it works means "change DNS"; it failing while yours work
+    /// means this network forces its own DNS. Set to "" to disable.
+    pub dns_reference_resolver: String,
     /// HTTP connectivity-check endpoint: "auto" uses this OS's own (Apple /
     /// Microsoft / Ubuntu — the machine already polls it, so octomon adds no
     /// new party learning it is online); or name one of "apple", "microsoft",
@@ -68,6 +74,18 @@ pub struct Config {
     pub http_probe_provider: String,
     /// How often the HTTP reachability probe runs, in milliseconds.
     pub http_probe_interval_ms: u64,
+    /// Time server asked (once at startup, then every 15 min) whether the
+    /// system clock is right — a wrong clock breaks every HTTPS site while
+    /// ping and DNS look perfect. Set to "" to disable.
+    pub ntp_server: String,
+    /// Host whose QUIC port answers the path-MTU probe's version-negotiation
+    /// packets — must speak QUIC on 443 (Cloudflare and Google resolvers do).
+    /// Set to "" to disable the probe.
+    pub pmtu_probe_host: String,
+    /// The [c] egress scan: which ports/protocols to try, each against a host
+    /// that reliably answers. Edit to add your own (a VPN endpoint, a work
+    /// server); `proto` is "tcp", or "dns" / "ntp" / "quic" for a UDP exchange.
+    pub egress_checks: Vec<crate::collectors::egress::EgressCheck>,
     /// Whether the first-run explainer has been shown (set automatically).
     pub explainer_seen: bool,
     /// Glyphs used to plot chart lines: "braille", "halfblock" or "dot".
@@ -106,8 +124,12 @@ impl Default for Config {
             dns_interval_ms: 5000,
             dns_timeout_ms: 2000,
             dns_probe_name: "example.com".to_string(),
+            dns_reference_resolver: "1.1.1.1".to_string(),
             http_probe_provider: "auto".to_string(),
             http_probe_interval_ms: 12_000,
+            ntp_server: "time.cloudflare.com".to_string(),
+            pmtu_probe_host: "1.1.1.1".to_string(),
+            egress_checks: crate::collectors::egress::default_checks(),
             explainer_seen: false,
             graph_marker: "braille".to_string(),
         }
@@ -161,6 +183,13 @@ impl Config {
     /// The config file path.
     pub fn path() -> Option<PathBuf> {
         Some(Self::dir()?.join("config.toml"))
+    }
+
+    /// Where an exported event timeline goes: beside the config, named for the
+    /// moment of export, so repeated exports never overwrite one another.
+    pub fn events_export_path() -> Option<PathBuf> {
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        Some(Self::dir()?.join(format!("events-{stamp}.csv")))
     }
 
     /// octomon's config directory.

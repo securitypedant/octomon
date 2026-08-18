@@ -101,19 +101,14 @@ async fn ripestat_asn(addr: IpAddr) -> Result<Vec<(String, String)>, String> {
         .user_agent(concat!("octomon/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())?;
-    let body = client
+    let resp = client
         .get(format!("{RIPESTAT_URL}{addr}"))
         .send()
         .await
         .map_err(|e| e.to_string())?
         .error_for_status()
-        .map_err(|e| e.to_string())?
-        .bytes()
-        .await
         .map_err(|e| e.to_string())?;
-    if body.len() > MAX_BODY {
-        return Err("response exceeded size limit".to_string());
-    }
+    let body = crate::util::read_capped(resp, MAX_BODY).await?;
     let json: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     Ok(fields_from_ripestat(&json))
 }
@@ -180,10 +175,7 @@ async fn rdap(addr: IpAddr) -> Result<(Vec<(String, String)>, String), String> {
     // The registry that finally answered, after rdap.org's redirect.
     let source = resp.url().host_str().unwrap_or("rdap.org").to_string();
     let resp = resp.error_for_status().map_err(|e| e.to_string())?;
-    let body = resp.bytes().await.map_err(|e| e.to_string())?;
-    if body.len() > MAX_BODY {
-        return Err("response exceeded size limit".to_string());
-    }
+    let body = crate::util::read_capped(resp, MAX_BODY).await?;
     let json: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     Ok((fields_from_rdap(&json), source))
 }

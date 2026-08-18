@@ -59,6 +59,7 @@ pub fn render(f: &mut Frame, s: &AppState) {
         Overlay::Explainer => explainer_overlay(f, f.area()),
         Overlay::Locations => locations_overlay(f, s, f.area()),
         Overlay::Whois => whois_overlay(f, s, f.area()),
+        Overlay::Egress => egress_overlay(f, s, f.area()),
         Overlay::None => {}
     }
 }
@@ -66,6 +67,99 @@ pub fn render(f: &mut Frame, s: &AppState) {
 /// Who owns the selected address: the registry's answer, so a bad hop can be
 /// pinned on an organisation. Structured fields from RDAP; raw text when the
 /// system `whois` had to answer instead.
+/// The [c] scan: which protocols this network lets out, one row per check.
+fn egress_overlay(f: &mut Frame, s: &AppState, area: Rect) {
+    use crate::collectors::egress::Outcome;
+    let width = 88u16.min(area.width);
+    let mut lines: Vec<Line> = Vec::new();
+    match &s.egress {
+        None => lines.push(Line::from(Span::styled(
+            " starting scan…",
+            Style::new().fg(Color::DarkGray),
+        ))),
+        Some(scan) => {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {:<16}", "check"),
+                    Style::new().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("{:<28}", "reference"),
+                    Style::new().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("{:<20}", "result"),
+                    Style::new().fg(Color::DarkGray),
+                ),
+                Span::styled("why it matters", Style::new().fg(Color::DarkGray)),
+            ]));
+            for r in &scan.results {
+                let color = match r.outcome {
+                    Outcome::Pending => Color::DarkGray,
+                    Outcome::Open(_) => Color::Green,
+                    Outcome::Refused => Color::Yellow,
+                    Outcome::Blocked => Color::Red,
+                    Outcome::Error(_) => Color::Yellow,
+                };
+                let target = format!("{}:{}/{}", r.check.host, r.check.port, r.check.proto);
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(" {:<16}", r.check.name),
+                        Style::new().fg(Color::White),
+                    ),
+                    Span::styled(format!("{:<28}", target), Style::new().fg(Color::Gray)),
+                    Span::styled(
+                        format!("{:<20}", r.outcome.label()),
+                        Style::new().fg(color).bold(),
+                    ),
+                    Span::styled(r.check.note.clone(), Style::new().fg(Color::DarkGray)),
+                ]));
+            }
+            lines.push(Line::from(""));
+            let summary = if scan.running {
+                "scanning… each row updates as it answers".to_string()
+            } else {
+                match scan.blocked() {
+                    0 => "nothing filtered — every protocol tried gets out".to_string(),
+                    n => format!(
+                        "{n} blocked — this network filters some outbound traffic (SMTP 25 alone is normal on home lines)"
+                    ),
+                }
+            };
+            lines.push(Line::from(Span::styled(
+                format!(" {summary}"),
+                Style::new().fg(if scan.running {
+                    Color::DarkGray
+                } else {
+                    Color::White
+                }),
+            )));
+        }
+    }
+    let h = ((lines.len() as u16) + 2).clamp(5, area.height);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width,
+        height: h,
+    };
+    f.render_widget(Clear, rect);
+    let outer = Block::bordered()
+        .padding(Padding::new(1, 1, 0, 0))
+        .title(Span::styled(
+            " octomon · outbound reachability ",
+            Style::new().bold(),
+        ))
+        .title_bottom(Span::styled(
+            " r rescan · press c or Esc to close ",
+            Style::new().fg(Color::DarkGray),
+        ))
+        .border_style(Style::new().fg(Color::Cyan));
+    let inner = outer.inner(rect);
+    f.render_widget(outer, rect);
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 fn whois_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     let Some(w) = s.whois.as_ref() else {
         return;
@@ -183,7 +277,7 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         width: w,
         height: h,
     };
-    // Three lines per location (name, stats, spacer).
+    // Three lines per location (name, stats, history).
     let visible = (rect.height.saturating_sub(2) as usize) / 3;
 
     let mut lines: Vec<Line> = Vec::new();
@@ -244,7 +338,16 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                     ),
                     Style::new().fg(Color::Gray),
                 )));
-                lines.push(Line::from(""));
+                // What has gone wrong here lately, if anything has.
+                let h = crate::history::summarise(&s.history, key, crate::history::WINDOW_DAYS);
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", h.line()),
+                    Style::new().fg(if h.outages > 0 {
+                        Color::Yellow
+                    } else {
+                        Color::DarkGray
+                    }),
+                )));
             }
         }
     }
@@ -384,7 +487,7 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         .padding(Padding::new(1, 1, 0, 0))
         .title(Span::styled(title, Style::new().bold()))
         .title_bottom(Span::styled(
-            " ↑↓ scroll · press e or Esc to close ",
+            " ↑↓ scroll · x export · press e or Esc to close ",
             Style::new().fg(Color::DarkGray),
         ))
         .border_style(Style::new().fg(Color::Cyan));
@@ -739,6 +842,13 @@ fn verdict_line(s: &AppState) -> Line<'static> {
                 format!(" ▲ {}", top.summary),
                 Style::new().fg(color).bold(),
             )];
+            // How long: the difference between a blip and an outage.
+            if let Some(d) = active_for(top) {
+                spans.push(Span::styled(
+                    format!(" · {d}"),
+                    Style::new().fg(Color::Gray),
+                ));
+            }
             if findings.len() > 1 {
                 spans.push(Span::styled(
                     format!("  (+{} more)", findings.len() - 1),
@@ -749,6 +859,17 @@ fn verdict_line(s: &AppState) -> Line<'static> {
             Line::from(spans)
         }
     }
+}
+
+/// "3m 12s" for a finding that has been active that long; `None` for the raw
+/// (un-hysteresised) evaluation, which carries no start time.
+fn active_for(f: &crate::verdict::Finding) -> Option<String> {
+    let since = f.since?;
+    let d = since.elapsed();
+    if d.as_secs() < 5 {
+        return None; // just raised — "0s" adds nothing
+    }
+    Some(crate::verdict::fmt_duration(d))
 }
 
 fn severity_color(sev: Severity) -> Color {
@@ -783,6 +904,16 @@ fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     }
 
     lines.push(Line::from(""));
+    // The record: is it always like this on this network?
+    if let Some(h) = s.history_summary()
+        && h.episodes > 0
+    {
+        lines.push(Line::from(vec![
+            Span::styled(" history ", Style::new().fg(Color::White).bold()),
+            Span::styled(h.line(), Style::new().fg(Color::Gray)),
+        ]));
+        lines.push(Line::from(""));
+    }
     match &s.verdict.current {
         Verdict::Insufficient(reason) => {
             lines.push(Line::from(Span::styled(
@@ -804,10 +935,23 @@ fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             for finding in findings {
                 // Confidence stays internal (it drives the ranking); the
                 // evidence lines below make the case in words instead.
-                lines.push(Line::from(Span::styled(
+                let mut head = vec![Span::styled(
                     format!(" ▲ {}", finding.summary),
                     Style::new().fg(severity_color(finding.severity)).bold(),
-                )));
+                )];
+                if let Some(d) = active_for(finding) {
+                    head.push(Span::styled(
+                        format!("  · for {d}"),
+                        Style::new().fg(Color::Gray),
+                    ));
+                }
+                if finding.symptom {
+                    head.push(Span::styled(
+                        "  · symptom of the above",
+                        Style::new().fg(Color::DarkGray),
+                    ));
+                }
+                lines.push(Line::from(head));
                 for e in &finding.evidence {
                     lines.push(Line::from(Span::styled(
                         format!("     {e}"),
@@ -2272,7 +2416,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("w", "stats window 1m/5m/15m"),
         row("l", "start / stop CSV recording"),
         row("y", "connection analysis"),
-        row("e", "event timeline"),
+        row("e / c", "event timeline / port scan"),
         row("?", "toggle this help"),
         row("q / Ctrl+C", "quit"),
         Line::from(""),
@@ -2303,7 +2447,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("r", "re-probe"),
         row("N", "name this network"),
         row("L", "saved network locations"),
-        row("f", "full-screen for DNS graphs"),
+        row("f", "full-screen: DNS + history"),
     ];
 
     // Only shown when something is actually absent, with the package that
@@ -2374,6 +2518,112 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
 }
 
 fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
+    // Full-screen: the network history sits to the right of the details, and
+    // 'n' moves the cursor over to it. It needs width to be readable; below
+    // that the panel stays as it is in the split view.
+    if s.fullscreen && area.width >= 100 {
+        let cols = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(area);
+        let on_history = s.focus == Panel::NetInfo && s.sub_pane == SubPane::Secondary;
+        netinfo_details(f, s, cols[0], s.focus == Panel::NetInfo && !on_history);
+        net_history_pane(f, s, cols[1], on_history);
+        return;
+    }
+    netinfo_details(f, s, area, s.focus == Panel::NetInfo);
+}
+
+/// The interface / network history: every change to how this machine is
+/// attached, newest first, with the selected entry's before/after underneath.
+fn net_history_pane(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
+    let title = format!(
+        "Network history ({}){}",
+        s.net_history.len(),
+        if focused { "" } else { " · n to browse" }
+    );
+    let b = block(&title, focused);
+    let inner = b.inner(area);
+    f.render_widget(b, area);
+    if inner.height == 0 {
+        return;
+    }
+    if s.net_history.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                " no changes yet — joins, roams, address and route changes land here",
+                Style::new().fg(Color::DarkGray),
+            )),
+            inner,
+        );
+        return;
+    }
+    // List on top, detail of the selected entry below; the detail gets what
+    // it needs (its lines + a header), the list the rest.
+    let sel = s.selected_net_change();
+    let detail_h = sel
+        .map(|c| c.detail.len() as u16 + 1)
+        .unwrap_or(0)
+        .min(inner.height / 2);
+    let parts = Layout::vertical([Constraint::Min(1), Constraint::Length(detail_h)]).split(inner);
+    let list_area = parts[0];
+    let visible = list_area.height as usize;
+    // Keep the cursor on screen.
+    let first = s.net_history_sel.saturating_sub(visible.saturating_sub(1));
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, c) in s
+        .net_history
+        .iter()
+        .rev()
+        .enumerate()
+        .skip(first)
+        .take(visible)
+    {
+        let selected = focused && i == s.net_history_sel;
+        use chrono::TimeZone as _;
+        let when = chrono::Local
+            .timestamp_opt(c.at, 0)
+            .single()
+            .map(|dt| dt.format("%H:%M:%S").to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let style = if selected {
+            Style::new().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::new()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {when} "),
+                style.fg(if selected {
+                    Color::Black
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+            Span::styled(
+                format!("{:<10} ", c.kind.label()),
+                style.fg(if selected { Color::Black } else { Color::Cyan }),
+            ),
+            Span::styled(c.summary.clone(), style),
+        ]));
+    }
+    f.render_widget(Paragraph::new(lines), list_area);
+    if let Some(c) = sel
+        && detail_h > 0
+    {
+        let mut d = vec![Line::from(Span::styled(
+            format!(" {} · {}", c.kind.label(), c.iface),
+            Style::new().fg(Color::White).bold(),
+        ))];
+        for l in &c.detail {
+            d.push(Line::from(Span::styled(
+                format!("  {l}"),
+                Style::new().fg(Color::Gray),
+            )));
+        }
+        f.render_widget(Paragraph::new(d), parts[1]);
+    }
+}
+
+fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
     let n = &s.netinfo;
     // The location name rides in the title, like the Bandwidth panel's iface:
     // "Network · Home". Until a baseline exists there is nothing to say.
@@ -2381,7 +2631,7 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
         Some(b) => format!("Network · {}", b.display_name()),
         None => "Network".to_string(),
     };
-    let b = block(&title, s.focus == Panel::NetInfo);
+    let b = block(&title, focused);
     let inner = b.inner(area);
     f.render_widget(b, area);
 
@@ -2491,10 +2741,96 @@ fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
             Style::new().fg(Color::DarkGray),
         )));
     } else {
-        lines.push(kv(
-            "gateway",
-            format!("{}  ({})", dash(&n.gateway_ip), dash(&n.gateway_mac)),
-        ));
+        let mut row = format!("{}  ({})", dash(&n.gateway_ip), dash(&n.gateway_mac));
+        // Both families: name the v6 router too, so "IPv6 broken" has an
+        // address to be checked against.
+        if !n.gateway_ipv6.is_empty() && n.gateway_ipv6 != n.gateway_ip {
+            row.push_str(&format!("  · v6 {}", n.gateway_ipv6));
+        }
+        lines.push(kv("gateway", row));
+    }
+
+    // The clock, only when it is wrong: right is the expected state.
+    if let Some(off) = s.clock.offset_ms()
+        && off.abs() >= crate::verdict::thresholds::CLOCK_WARN_MS
+    {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<9}", "clock"), Style::new().fg(Color::DarkGray)),
+            Span::styled(
+                crate::collectors::clock::describe_offset(off),
+                Style::new().fg(if off.abs() >= crate::verdict::thresholds::CLOCK_BAD_MS {
+                    Color::Red
+                } else {
+                    Color::Yellow
+                }),
+            ),
+            Span::styled(
+                format!(" · via {}", s.clock.source()),
+                Style::new().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+
+    // A system proxy is worth knowing about whenever one is set: browsers take
+    // it, octomon's checks don't.
+    if let Some(p) = &s.proxy {
+        use crate::app::FamilyProbe as FP;
+        let mut row = vec![
+            Span::styled(format!("{:<9}", "proxy"), Style::new().fg(Color::DarkGray)),
+            Span::styled(p.describe(), Style::new().fg(Color::Yellow)),
+        ];
+        match &s.http.via_proxy {
+            FP::Ok(ms) => row.push(Span::styled(
+                format!(" · web via proxy ok {ms:.0}ms"),
+                Style::new().fg(Color::Green),
+            )),
+            FP::Fail(r) => row.push(Span::styled(
+                format!(" · web via proxy FAILED ({r})"),
+                Style::new().fg(Color::Red),
+            )),
+            _ => {}
+        }
+        lines.push(Line::from(row));
+    }
+
+    // Path MTU, only when it is narrower than the interface or broken.
+    if let Some(p) = &s.pmtu
+        && (p.blackhole
+            || p.path_mtu
+                .zip(p.iface_mtu)
+                .is_some_and(|(path, iface)| path < iface))
+    {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<9}", "mtu"), Style::new().fg(Color::DarkGray)),
+            Span::styled(
+                crate::collectors::pmtu::describe(p),
+                Style::new().fg(if p.blackhole {
+                    Color::Red
+                } else {
+                    Color::Yellow
+                }),
+            ),
+        ]));
+    }
+
+    // Only when there is something to say: ordinary NAT is not news.
+    if let Some((kind, via)) = s.nat_kind() {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<9}", "nat"), Style::new().fg(Color::DarkGray)),
+            Span::styled(kind.label(), Style::new().fg(Color::Yellow)),
+            Span::styled(
+                format!(
+                    " · hop 2 is {via} — {}",
+                    match kind {
+                        crate::app::NatKind::Cgnat =>
+                            "ISP shares your public IP; inbound ports won't work",
+                        crate::app::NatKind::DoubleNat =>
+                            "two routers translating; consider bridge mode",
+                    }
+                ),
+                Style::new().fg(Color::Gray),
+            ),
+        ]));
     }
 
     lines.push(dns_line(s));
@@ -2675,7 +3011,11 @@ fn dns_graphs(f: &mut Frame, s: &AppState, area: Rect) {
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
-                    probe.server.to_string(),
+                    if probe.reference {
+                        format!("{} (reference)", probe.server)
+                    } else {
+                        probe.server.to_string()
+                    },
                     Style::new().fg(Color::Gray),
                 )),
                 Line::from(vec![
@@ -2749,6 +3089,34 @@ fn dns_line(s: &AppState) -> Line<'static> {
                 None => spans.push(Span::styled(" (…)", Style::new().fg(Color::DarkGray))),
             },
             None => spans.push(Span::styled(" (…)", Style::new().fg(Color::DarkGray))),
+        }
+        if probe.is_some_and(|p| p.hijack == Some(true)) {
+            spans.push(Span::styled(
+                " ⚠ redirects",
+                Style::new().fg(Color::Red).bold(),
+            ));
+        }
+    }
+    // The public reference resolver, for contrast — dimmed, it isn't ours.
+    if let Some(r) = s.dns.iter().find(|p| p.reference) {
+        let reading = match r.last_ms {
+            Some(ms) => format!("{ms:.0}ms"),
+            None if !r.status.is_empty() => r.status.clone(),
+            None => "…".to_string(),
+        };
+        spans.push(Span::styled(
+            format!("  ref {} ({reading})", r.server),
+            Style::new().fg(if r.last_ms.is_none() && !r.status.is_empty() {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            }),
+        ));
+        if r.hijack == Some(true) {
+            spans.push(Span::styled(
+                " ⚠ redirects",
+                Style::new().fg(Color::Red).bold(),
+            ));
         }
     }
     Line::from(spans)
@@ -3370,6 +3738,8 @@ mod tests {
             summary: "gateway unresponsive (100% loss)".into(),
             evidence: vec!["gateway 192.168.1.1: 100% loss".into()],
             subject: String::new(),
+            symptom: false,
+            since: None,
         }
     }
 
@@ -3534,6 +3904,133 @@ mod tests {
     }
 
     #[test]
+    fn egress_overlay_lists_checks_and_summarises() {
+        use crate::collectors::egress::{CheckResult, EgressCheck, Outcome, Scan};
+        let mut s = AppState::new(vec![]);
+        s.overlay = Overlay::Egress;
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("starting scan"));
+
+        let check = |name: &str, port: u16, o: Outcome| CheckResult {
+            check: EgressCheck {
+                name: name.into(),
+                host: "example.org".into(),
+                port,
+                proto: "tcp".into(),
+                note: "why".into(),
+            },
+            outcome: o,
+        };
+        s.egress = Some(Scan {
+            started: std::time::Instant::now(),
+            running: false,
+            results: vec![
+                check("SSH", 22, Outcome::Open(12.0)),
+                check("SMTP", 25, Outcome::Blocked),
+                check("IMAPS", 993, Outcome::Refused),
+            ],
+        });
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("outbound reachability"));
+        assert!(out.contains("open 12ms"));
+        assert!(out.contains("BLOCKED"));
+        assert!(out.contains("refused (reachable)"));
+        assert!(out.contains("1 blocked"));
+        assert!(out.contains("r rescan"));
+    }
+
+    #[test]
+    fn fullscreen_network_shows_the_history_pane_with_detail() {
+        let mut s = AppState::new(vec![]);
+        s.focus = Panel::NetInfo;
+        s.fullscreen = true;
+        s.netinfo.iface = "en0".into();
+        s.netinfo.medium = crate::app::LinkMedium::WiFi;
+        let out = draw(&s, 140, 40);
+        assert!(out.contains("Network history (0)"));
+        assert!(out.contains("no changes yet"));
+
+        s.push_net_change(
+            crate::app::NetChangeKind::WifiRoamed,
+            "en0".into(),
+            "Wi-Fi roamed — Home ch 36 → 149".into(),
+            vec!["before: ch 36".into(), "after:  ch 149 · -58 dBm".into()],
+        );
+        s.push_net_change(
+            crate::app::NetChangeKind::VpnUp,
+            "utun4".into(),
+            "VPN up — Tailscale".into(),
+            vec!["before:".into(), "after:".into()],
+        );
+        // Cursor into the history pane: newest first, detail of the selection.
+        s.sub_pane = SubPane::Secondary;
+        let out = draw(&s, 140, 40);
+        assert!(out.contains("Network history (2)"));
+        assert!(out.contains("wifi roam"));
+        assert!(out.contains("vpn up"));
+        assert!(
+            out.find("VPN up").unwrap() < out.find("Wi-Fi roamed").unwrap(),
+            "newest first"
+        );
+        assert!(
+            out.contains("vpn up · utun4"),
+            "detail header for the selected (newest) entry"
+        );
+        s.net_history_sel = 1;
+        let out = draw(&s, 140, 40);
+        assert!(out.contains("wifi roam · en0"));
+        assert!(out.contains("after:  ch 149"));
+    }
+
+    #[test]
+    fn network_panel_flags_proxy_clock_mtu_and_nat_only_when_notable() {
+        use crate::app::TargetStat;
+        use std::net::{IpAddr, Ipv4Addr};
+        let mut s = AppState::new(vec![]);
+        s.netinfo.iface = "en0".into();
+        s.netinfo.medium = crate::app::LinkMedium::Ethernet;
+        s.focus = Panel::NetInfo;
+        s.fullscreen = true;
+        let quiet = draw(&s, 90, 40);
+        for k in ["proxy", "clock", "mtu", "nat"] {
+            assert!(
+                !quiet.contains(&format!("{k:<9}")),
+                "{k} row shown with nothing to say"
+            );
+        }
+        s.proxy = Some(crate::app::ProxyConfig {
+            kind: crate::app::ProxyKind::Manual {
+                http: "proxy.corp:8080".into(),
+                https: "proxy.corp:8080".into(),
+            },
+            source: "System Settings".into(),
+            bypass: String::new(),
+        });
+        s.clock.ntp_offset_ms = Some(400_000.0);
+        s.pmtu = Some(crate::app::PmtuResult {
+            target: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            iface_mtu: Some(1500),
+            path_mtu: Some(1400),
+            blackhole: true,
+            pmtud_works: false,
+        });
+        let mut gw = TargetStat::new("gateway".into(), IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        gw.discovered = true;
+        let mut h2 = TargetStat::new(
+            "hop 2→1.1.1.1".into(),
+            IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)),
+        );
+        h2.discovered = true;
+        s.targets.push(gw);
+        s.targets.push(h2);
+        let loud = draw(&s, 90, 40);
+        assert!(loud.contains("proxy.corp:8080"));
+        assert!(loud.contains("clock 6m 40s fast"));
+        assert!(loud.contains("BLACK HOLE"));
+        assert!(loud.contains("CGNAT"));
+    }
+
+    #[test]
     fn events_overlay_lists_newest_first_with_times() {
         let mut s = AppState::new(vec![]);
         s.overlay = Overlay::Events;
@@ -3562,6 +4059,7 @@ mod tests {
         assert!(out.contains("network"));
         // Newest (VPN down) renders above the older analysis event.
         assert!(out.find("VPN down").unwrap() < out.find("▲ gateway unresponsive").unwrap());
+        assert!(out.contains("x export"), "the export key is advertised");
         assert!(out.contains("press e or Esc to close"));
     }
 
@@ -4427,7 +4925,8 @@ mod tests {
             "whois: who owns address",
             "cycle speed-test provider",
             "procs → remotes → history",
-            "full-screen for DNS graphs",
+            "full-screen: DNS + history",
+            "event timeline / port scan",
         ] {
             assert!(
                 out.contains(desc),

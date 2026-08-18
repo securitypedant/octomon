@@ -7,6 +7,20 @@
 //!
 //! Queries are built by hand (a DNS question is ~30 bytes) to avoid pulling in a
 //! full resolver stack for a latency measurement.
+//!
+//! Two things beyond latency, because "the resolver answers" is not the same as
+//! "the resolver is honest":
+//!
+//! - **Reference resolver.** A public resolver (`dns_reference_resolver`,
+//!   default 1.1.1.1) is probed alongside the system ones. When yours fail and
+//!   it works, the fix is "change DNS"; when it fails and yours work, this
+//!   network is forcing its own DNS (port 53 to the outside is filtered) —
+//!   two different situations that plain resolver latency cannot tell apart.
+//! - **Hijack check.** Once a minute each resolver is asked for a name that
+//!   cannot exist (`<random>.<probe name>`). The honest answer is NXDOMAIN; an
+//!   IP address back means the resolver is redirecting misses to a search or
+//!   ad page — ISP "assistance", or a captive network. That silently breaks
+//!   anything that relies on a name *not* resolving.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -17,17 +31,25 @@ use tokio::net::UdpSocket;
 use crate::app::{AppState, DnsProbe};
 use crate::config::Config;
 
+/// Ticks between hijack checks per resolver: at the default 5 s interval, a
+/// minute. The check is a second query on that tick, so it never displaces a
+/// latency sample.
+const HIJACK_EVERY: u32 = 12;
+
 pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
     let mut ticker = tokio::time::interval(cfg.dns_interval());
     let name = sanitise_name(&cfg.dns_probe_name);
+    let reference = cfg.dns_reference_resolver.trim().parse::<IpAddr>().ok();
     let mut id: u16 = 0;
+    let mut tick: u32 = 0;
 
     loop {
         ticker.tick().await;
+        tick = tick.wrapping_add(1);
 
         // Follow whatever resolvers the current interface reports; these change
         // when the network does, or when a VPN installs its own proxy.
-        let (servers, scope): (Vec<IpAddr>, u32) = {
+        let (mut servers, scope): (Vec<IpAddr>, u32) = {
             let s = state.lock().unwrap();
             (canonical_servers(&s.netinfo.dns), s.netinfo.iface_index)
         };
@@ -35,12 +57,36 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
             state.lock().unwrap().dns.clear();
             continue;
         }
+        // The reference rides along unless it *is* one of the system resolvers,
+        // in which case that row already answers the question.
+        if let Some(r) = reference
+            && !servers.contains(&r)
+        {
+            servers.push(r);
+        }
 
-        for server in servers {
+        for server in servers.iter().copied() {
             id = id.wrapping_add(1);
             let started = Instant::now();
             let outcome = query(server, scope, &name, id, cfg.dns_timeout()).await;
             let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+
+            // Once a minute — and straight away for a resolver with no verdict
+            // yet — the name that must not exist.
+            let unjudged = state
+                .lock()
+                .unwrap()
+                .dns
+                .iter()
+                .find(|p| p.server == server)
+                .is_none_or(|p| p.hijack.is_none());
+            let hijack = if tick % HIJACK_EVERY == 1 || unjudged {
+                id = id.wrapping_add(1);
+                let nx = nonexistent_name(&name, id);
+                Some(query(server, scope, &nx, id, cfg.dns_timeout()).await)
+            } else {
+                None
+            };
 
             let mut s = state.lock().unwrap();
             // Keep history across ticks, and drop probes for resolvers that are
@@ -48,17 +94,16 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
             let idx = match s.dns.iter().position(|p| p.server == server) {
                 Some(i) => i,
                 None => {
-                    s.dns.push(DnsProbe::new(server));
+                    let mut p = DnsProbe::new(server);
+                    p.reference = reference == Some(server);
+                    s.dns.push(p);
                     s.dns.len() - 1
                 }
             };
             let probe = &mut s.dns[idx];
-            probe.sent += 1;
             match outcome {
                 Ok(answers) => {
-                    probe.ok += 1;
-                    probe.last_ms = Some(elapsed);
-                    probe.hist.push(elapsed);
+                    probe.record(Some(elapsed));
                     // An empty answer still proves the resolver is alive, but it
                     // is worth distinguishing from a real result.
                     probe.status = if answers == 0 {
@@ -68,16 +113,44 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
                     };
                 }
                 Err(reason) => {
-                    probe.last_ms = None;
+                    probe.record(None);
                     probe.status = reason;
                 }
+            }
+            if let Some(verdict) = hijack.and_then(|r| classify_hijack(&r)) {
+                probe.hijack = Some(verdict);
             }
         }
 
         // Forget resolvers that dropped out of the configuration.
         let mut s = state.lock().unwrap();
-        let live = canonical_servers(&s.netinfo.dns);
+        let mut live = canonical_servers(&s.netinfo.dns);
+        if let Some(r) = reference {
+            live.push(r);
+        }
         s.dns.retain(|p| live.contains(&p.server));
+    }
+}
+
+/// A name under the probe domain that cannot exist. The label mixes the query
+/// id with the clock so a resolver cannot have it cached from an earlier run.
+fn nonexistent_name(base: &str, id: u16) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    format!("octomon-nx-{id:04x}{nanos:08x}.{base}")
+}
+
+/// What an answer to the nonexistent name means. `Some(true)` is a hijack:
+/// an address for a name that has none. `Some(false)` is honest (NXDOMAIN, or
+/// an empty answer). `None` when the query itself failed — no opinion.
+pub fn classify_hijack(outcome: &Result<u16, String>) -> Option<bool> {
+    match outcome {
+        Ok(answers) if *answers > 0 => Some(true),
+        Ok(_) => Some(false),
+        Err(e) if e == "NXDOMAIN" => Some(false),
+        Err(_) => None,
     }
 }
 
@@ -288,6 +361,18 @@ mod tests {
             "address not usable"
         );
         assert_eq!(short(&Error::from(ErrorKind::ConnectionRefused)), "refused");
+    }
+
+    #[test]
+    fn hijack_is_an_address_for_a_name_that_has_none() {
+        assert_eq!(classify_hijack(&Ok(1)), Some(true));
+        assert_eq!(classify_hijack(&Ok(0)), Some(false));
+        assert_eq!(classify_hijack(&Err("NXDOMAIN".into())), Some(false));
+        assert_eq!(classify_hijack(&Err("timeout".into())), None);
+        // The probe name is fresh every time and sits under the base name.
+        let a = nonexistent_name("example.com", 1);
+        let b = nonexistent_name("example.com", 2);
+        assert!(a.ends_with(".example.com") && a != b);
     }
 
     #[test]

@@ -8,6 +8,7 @@ mod app;
 mod baseline;
 mod collectors;
 mod config;
+mod history;
 mod platform;
 mod store;
 mod ui;
@@ -136,6 +137,7 @@ async fn main() -> Result<()> {
         let (history, total) = store::load_recent(500);
         s.speed_history = history;
         s.speed_total = total;
+        s.history = history::load();
         s.logging_requested = cli.log;
         // Which tools ship by default varies sharply by distribution, so a
         // missing binary is a normal condition. Say so up front rather than
@@ -214,6 +216,20 @@ async fn main() -> Result<()> {
     tokio::spawn(collectors::http::run(
         state.clone(),
         cfg.clone(),
+        network_changed.clone(),
+    ));
+    tokio::spawn(collectors::clock::run(
+        state.clone(),
+        cfg.clone(),
+        network_changed.clone(),
+    ));
+    tokio::spawn(collectors::pmtu::run(
+        state.clone(),
+        cfg.clone(),
+        network_changed.clone(),
+    ));
+    tokio::spawn(collectors::proxy::run(
+        state.clone(),
         network_changed.clone(),
     ));
     tokio::spawn(collectors::throughput::run(state.clone(), cfg.clone()));
@@ -477,6 +493,11 @@ enum Side {
     },
     /// Read every stored baseline off disk for the locations overlay.
     LoadLocations,
+    /// Write the event timeline to a CSV in the config folder ([x] in the
+    /// events overlay). Carries a snapshot so the file I/O runs off the lock.
+    ExportEvents(Vec<app::EventItem>),
+    /// Run the outbound port scan for the [c] overlay.
+    EgressScan,
 }
 
 /// Remove the selected target, pulling the dependent cursors back into range.
@@ -546,6 +567,11 @@ fn move_cursor(s: &mut AppState, delta: isize) {
         Panel::Bandwidth if secondary => {
             let last = s.speed_history.len().saturating_sub(1) as isize;
             s.speed_sel = (s.speed_sel as isize + delta).clamp(0, last.max(0)) as usize;
+        }
+        // The network history list, newest first: "up" is toward the newest.
+        Panel::NetInfo if secondary => {
+            let last = s.net_history.len().saturating_sub(1) as isize;
+            s.net_history_sel = (s.net_history_sel as isize + delta).clamp(0, last.max(0)) as usize;
         }
         // The talkers cursors walk the rows as drawn, whatever the sort.
         Panel::Bandwidth if s.bw_view == BwView::Remotes => {
@@ -686,6 +712,29 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         Overlay::Locations
                     };
                 }
+                KeyCode::Char('c') => {
+                    s.overlay = if s.overlay == Overlay::Egress {
+                        Overlay::None
+                    } else {
+                        // A fresh scan each time it is opened unless one is
+                        // still running or is under a minute old — the answer
+                        // is about this network, and networks change.
+                        let stale = s
+                            .egress
+                            .as_ref()
+                            .is_none_or(|e| !e.running && e.started.elapsed().as_secs() > 60);
+                        if stale {
+                            side = Side::EgressScan;
+                        }
+                        Overlay::Egress
+                    };
+                }
+                // Re-run the scan from inside the overlay.
+                KeyCode::Char('r') if s.overlay == Overlay::Egress => {
+                    if s.egress.as_ref().is_none_or(|e| !e.running) {
+                        side = Side::EgressScan;
+                    }
+                }
                 KeyCode::Char('W') => {
                     s.overlay = if s.overlay == Overlay::Whois {
                         Overlay::None
@@ -703,6 +752,12 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 KeyCode::Down | KeyCode::Char('j') if s.overlay == Overlay::Whois => {
                     s.whois_scroll += 1; // clamped at draw time to the content
                 }
+                KeyCode::PageUp if s.overlay == Overlay::Whois => {
+                    s.whois_scroll = s.whois_scroll.saturating_sub(10);
+                }
+                KeyCode::PageDown if s.overlay == Overlay::Whois => {
+                    s.whois_scroll += 10; // clamped at draw time to the content
+                }
                 // Scroll the timeline; clamped so it can't run past the oldest.
                 KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Events => {
                     s.events_scroll = (s.events_scroll + 1).min(s.events.len().saturating_sub(1));
@@ -716,17 +771,31 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 KeyCode::PageDown if s.overlay == Overlay::Events => {
                     s.events_scroll = s.events_scroll.saturating_sub(10);
                 }
+                // Export the timeline. An empty one is not worth a file.
+                KeyCode::Char('x') if s.overlay == Overlay::Events => {
+                    if s.events.is_empty() {
+                        s.notice = Some("no events to export yet".to_string());
+                    } else {
+                        side = Side::ExportEvents(s.events.iter().cloned().collect());
+                    }
+                }
                 // Scroll the locations list.
                 KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Locations => {
                     s.locations_sel = s.locations_sel.saturating_sub(1);
                 }
-                KeyCode::Down | KeyCode::Char('j') if s.overlay == Overlay::Locations => {
+                KeyCode::PageUp if s.overlay == Overlay::Locations => {
+                    s.locations_sel = s.locations_sel.saturating_sub(10);
+                }
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::PageDown
+                    if s.overlay == Overlay::Locations =>
+                {
+                    let step = if key.code == KeyCode::PageDown { 10 } else { 1 };
                     let last = s
                         .locations
                         .as_ref()
                         .map(|l| l.len().saturating_sub(1))
                         .unwrap_or(0);
-                    s.locations_sel = (s.locations_sel + 1).min(last);
+                    s.locations_sel = (s.locations_sel + step).min(last);
                 }
                 _ => {}
             },
@@ -747,6 +816,17 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 KeyCode::Char('?') => s.overlay = Overlay::Help,
                 // 'y' answers "why does the verdict say that": the triage ladder.
                 KeyCode::Char('y') => s.overlay = Overlay::Triage,
+                // 'c' scans outbound ports and shows the table.
+                KeyCode::Char('c') => {
+                    let stale = s
+                        .egress
+                        .as_ref()
+                        .is_none_or(|e| !e.running && e.started.elapsed().as_secs() > 60);
+                    if stale {
+                        side = Side::EgressScan;
+                    }
+                    s.overlay = Overlay::Egress;
+                }
                 // 'e' opens the session timeline.
                 KeyCode::Char('e') => {
                     s.events_scroll = 0;
@@ -1009,6 +1089,34 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 state.lock().unwrap().locations = Some(all);
             });
         }
+        Side::EgressScan => {
+            collectors::egress::start(ctx.state.clone(), ctx.cfg.egress_checks.clone());
+        }
+        Side::ExportEvents(events) => {
+            let state = ctx.state.clone();
+            tokio::spawn(async move {
+                let n = events.len();
+                let result =
+                    tokio::task::spawn_blocking(move || collectors::logger::export_events(events))
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()));
+                let mut s = state.lock().unwrap();
+                // Lands on the timeline as well as the notice, so the file's
+                // location is still findable after the notice has gone.
+                match result {
+                    Ok(path) => s.notice_event(
+                        verdict::Severity::Info,
+                        app::EventCategory::Logging,
+                        format!("exported {n} events → {}", path.display()),
+                    ),
+                    Err(e) => s.notice_event(
+                        verdict::Severity::Info,
+                        app::EventCategory::Logging,
+                        format!("could not export events: {e}"),
+                    ),
+                }
+            });
+        }
     }
 }
 
@@ -1057,7 +1165,19 @@ async fn add_target(
 
 /// Text dump of the current state for `--check` / debugging.
 fn print_snapshot(s: &AppState) {
-    print!("{}", snapshot_text(s));
+    print!("{}", strip_control(snapshot_text(s)));
+}
+
+/// Drop control characters (other than newline) so an SSID, interface or
+/// process name from the environment cannot inject terminal escapes into
+/// stdout. The TUI is already protected — ratatui skips control characters
+/// when it fills a cell — so this covers only the non-TUI paths, whose output
+/// is printed raw and meant to be pasted elsewhere. `--json` needs nothing:
+/// serde escapes them.
+fn strip_control(text: String) -> String {
+    text.chars()
+        .filter(|c| *c == '\n' || !c.is_control())
+        .collect()
 }
 
 /// The measurement report as a string, so `--doctor` can embed and redact it.
@@ -1181,6 +1301,34 @@ fn snapshot_text(s: &AppState) -> String {
             }
         );
     }
+    if let Some((kind, via)) = s.nat_kind() {
+        println!("  nat={} (hop 2 is {via})", kind.label());
+    }
+    if let Some(p) = &s.proxy {
+        println!(
+            "  proxy={} via-proxy={}",
+            p.describe(),
+            match &s.http.via_proxy {
+                app::FamilyProbe::Ok(ms) => format!("ok {ms:.0}ms"),
+                app::FamilyProbe::Fail(r) => format!("fail ({r})"),
+                _ => "not probed".to_string(),
+            }
+        );
+    }
+    match (&s.pmtu, &s.pmtu_error) {
+        (Some(p), _) => println!("  mtu: {}", collectors::pmtu::describe(p)),
+        (None, Some(e)) => println!("  mtu: not measured ({e})"),
+        (None, None) => {}
+    }
+    match (s.clock.offset_ms(), &s.clock.ntp_error) {
+        (Some(off), _) => println!(
+            "  clock offset={:+.3}s via {}",
+            off / 1000.0,
+            s.clock.source()
+        ),
+        (None, Some(e)) => println!("  clock: ntp failed ({e}), no http date yet"),
+        (None, None) => {}
+    }
     println!("  dns={:?}", n.dns);
     for p in &s.dns {
         let rtt = p
@@ -1192,12 +1340,18 @@ fn snapshot_text(s: &AppState) -> String {
             .map(|v| format!("{v:.1}ms"))
             .unwrap_or_else(|| "—".into());
         println!(
-            "    resolver {:<16} last={rtt:<8} avg={mean:<8} fail={:.0}% ({}/{}) {}",
+            "    resolver {:<16} last={rtt:<8} avg={mean:<8} fail={:.0}% ({}/{}) {}{}{}",
             p.server.to_string(),
             p.fail_pct(),
             p.ok,
             p.sent,
-            p.status
+            p.status,
+            if p.reference { " [reference]" } else { "" },
+            match p.hijack {
+                Some(true) => " [REDIRECTS non-existent names]",
+                Some(false) => " [nxdomain honest]",
+                None => "",
+            }
         );
     }
     if let Some(w) = &n.wifi {
@@ -1327,6 +1481,18 @@ fn doctor_report(s: &AppState, full: bool) -> (String, i32) {
                 " — still learning, comparisons not yet trusted"
             }
         );
+        // The record across sessions: is it always like this here?
+        if let Some(h) = s.history_summary() {
+            let _ = writeln!(out, "  history {}", h.line());
+            if !h.by_cause.is_empty() {
+                let causes: Vec<String> = h
+                    .by_cause
+                    .iter()
+                    .map(|(c, n)| format!("{c} ×{n}"))
+                    .collect();
+                let _ = writeln!(out, "  incidents by cause: {}", causes.join(", "));
+            }
+        }
     }
 
     let _ = writeln!(out);
@@ -1355,7 +1521,7 @@ fn doctor_report(s: &AppState, full: bool) -> (String, i32) {
 
     let code = verdict::exit_code(&triage, insufficient.is_some());
     let out = if full { out } else { redact_report(out, s) };
-    (out, code)
+    (strip_control(out), code)
 }
 
 /// The `--doctor --json` report: same content and redaction rules as the text
@@ -1398,10 +1564,22 @@ fn doctor_json(s: &AppState, full: bool) -> (String, i32) {
                 "cause": f.cause.label(),
                 "severity": f.severity.label(),
                 "confidence": f.confidence.word(),
+                "symptom": f.symptom,
                 "summary": f.summary,
                 "evidence": f.evidence,
             })).collect::<Vec<_>>(),
         },
+        "history": s.history_summary().map(|h| json!({
+            "days": h.days,
+            "episodes": h.episodes,
+            "outages": h.outages,
+            "down_secs": h.down_secs,
+            "degraded_secs": h.degraded_secs,
+            "cluster_start_hour": h.cluster.map(|c| c.0),
+            "cluster_episodes": h.cluster.map(|c| c.1),
+            "by_cause": h.by_cause.iter().map(|(c, n)| json!({"cause": c, "count": n})).collect::<Vec<_>>(),
+            "summary": h.line(),
+        })),
         "location": s.baseline.as_ref().map(|b| json!({
             "name": b.name,
             "label": b.label,
@@ -1439,7 +1617,34 @@ fn doctor_json(s: &AppState, full: bool) -> (String, i32) {
             "last_ms": p.last_ms,
             "mean_ms": p.mean_ms(),
             "fail_pct": p.fail_pct(),
+            "reference": p.reference,
+            "hijack": p.hijack,
         })).collect::<Vec<_>>(),
+        "network": {
+            "iface": s.netinfo.iface,
+            "medium": s.netinfo.medium.label(),
+            "gateway": s.netinfo.gateway_ip,
+            "tunnel": s.netinfo.tunnel_label(),
+            "nat": s.nat_kind().map(|(k, via)| json!({"kind": k.label(), "hop2": via.to_string()})),
+            "proxy": s.proxy.as_ref().map(|p| json!({
+                "config": p.describe(),
+                "bypass": p.bypass,
+                "web_via_proxy": family(&s.http.via_proxy),
+            })),
+            "path_mtu": s.pmtu.as_ref().map(|p| json!({
+                "target": p.target.to_string(),
+                "iface_mtu": p.iface_mtu,
+                "path_mtu": p.path_mtu,
+                "blackhole": p.blackhole,
+                "pmtud_works": p.pmtud_works,
+            })),
+            "path_mtu_error": s.pmtu_error,
+            "clock": json!({
+                "offset_ms": s.clock.offset_ms(),
+                "source": s.clock.offset_ms().map(|_| s.clock.source()),
+                "ntp_error": s.clock.ntp_error,
+            }),
+        },
         "http": {
             "provider": s.http.provider,
             "v4": family(&s.http.v4),
@@ -1759,6 +1964,39 @@ mod tests {
         let (full, _code) = doctor_report(&s, true);
         assert!(full.contains("MySecretWifi"));
         assert!(full.contains("192.168.1.1"));
+    }
+
+    /// An SSID is 32 arbitrary bytes chosen by whoever runs the access point.
+    /// One carrying escape sequences must not reach stdout intact, where it
+    /// could retitle the terminal or forge report lines; the TUI is guarded by
+    /// ratatui, so this is the non-TUI paths' guard.
+    #[test]
+    fn doctor_and_check_output_carry_no_control_characters() {
+        let mut s = AppState::new(vec![TargetStat::new(
+            "Cloudflare".into(),
+            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+        )]);
+        s.netinfo.iface = "en0".into();
+        s.netinfo.medium = crate::app::LinkMedium::WiFi;
+        s.netinfo.wifi = Some(crate::app::WifiInfo {
+            ssid: "evil\x1b]0;pwned\x07net\r".into(),
+            ..Default::default()
+        });
+
+        // `--full` so redaction cannot be what removed the SSID.
+        let (out, _code) = doctor_report(&s, true);
+        assert!(!out.contains('\x1b'), "ESC leaked into the report");
+        assert!(!out.contains('\x07'), "BEL leaked into the report");
+        assert!(!out.contains('\r'));
+        assert!(
+            out.contains("evil]0;pwnednet"),
+            "printable remainder is kept"
+        );
+        assert!(out.contains('\n'), "line structure survives");
+
+        let snap = strip_control(snapshot_text(&s));
+        assert!(!snap.contains('\x1b'));
+        assert!(snap.contains("evil]0;pwnednet"));
     }
 
     /// A user-chosen location name was picked to be shareable; the automatic

@@ -1,6 +1,6 @@
 [package]
 name = "octomon"
-version = "0.5.3"
+version = "0.6.0"
 edition = "2024"
 description = "Btop-style terminal network monitor: latency, bandwidth, and Wi-Fi signal"
 repository = "https://github.com/securitypedant/octomon"
@@ -45,9 +45,10 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 
 [target.'cfg(unix)'.dependencies]
-# One call, in tools::is_privileged(). Kept off the Windows build so the
-# manifest says what is actually used there.
+# tools::is_privileged(), and the DF-bit socket options of the path-MTU probe.
 libc = "0.2"
+# The path-MTU probe's ICMP socket (already in the tree via tokio/surge-ping).
+socket2 = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"

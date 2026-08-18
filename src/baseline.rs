@@ -86,7 +86,13 @@ impl Sample {
             .filter(|t| !t.discovered)
             .filter_map(|t| t.stats(n).mean)
             .min_by(f64::total_cmp);
-        let dns: Vec<f64> = s.dns.iter().filter_map(|p| p.mean_ms()).collect();
+        // This network's own resolvers; the reference resolver is contrast.
+        let dns: Vec<f64> = s
+            .dns
+            .iter()
+            .filter(|p| !p.reference)
+            .filter_map(|p| p.mean_ms())
+            .collect();
         let dns_ms = (!dns.is_empty()).then(|| dns.iter().sum::<f64>() / dns.len() as f64);
         let rssi_dbm = s.signal.present.then_some(s.signal.rssi_dbm as f64);
         Sample {

@@ -40,11 +40,28 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
             let messages = iface_changes(prev, &current, &default_name);
             if !messages.is_empty() {
                 let mut s = state.lock().unwrap();
-                for m in messages {
+                for (name, up, m) in messages {
                     s.push_event(
                         crate::verdict::Severity::Info,
                         crate::app::EventCategory::Network,
+                        m.clone(),
+                    );
+                    s.push_net_change(
+                        if up {
+                            crate::app::NetChangeKind::IfaceUp
+                        } else {
+                            crate::app::NetChangeKind::IfaceDown
+                        },
+                        name,
                         m,
+                        vec![format!(
+                            "default route: {}",
+                            if default_name.is_empty() {
+                                "none"
+                            } else {
+                                &default_name
+                            }
+                        )],
                     );
                 }
             }
@@ -53,18 +70,23 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
 
         if netdev::get_default_interface().is_err() {
             let mut s = state.lock().unwrap();
+            s.link_lost = true;
             if !link_lost && !s.netinfo.iface.is_empty() {
                 link_lost = true;
                 let medium = s.netinfo.medium;
+                let message = match medium {
+                    LinkMedium::WiFi => "link lost — Wi-Fi is off or disconnected".to_string(),
+                    m if m.is_wired() => "link lost — cable unplugged?".to_string(),
+                    _ => "link lost — no default route".to_string(),
+                };
                 s.notice_event(
                     crate::verdict::Severity::Down,
                     crate::app::EventCategory::Network,
-                    match medium {
-                        LinkMedium::WiFi => "link lost — Wi-Fi is off or disconnected".to_string(),
-                        m if m.is_wired() => "link lost — cable unplugged?".to_string(),
-                        _ => "link lost — no default route".to_string(),
-                    },
+                    message.clone(),
                 );
+                let detail = describe_attachment(&s.netinfo);
+                let iface = s.netinfo.iface.clone();
+                s.push_net_change(crate::app::NetChangeKind::LinkLost, iface, message, detail);
             }
             continue;
         }
@@ -103,6 +125,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
             let mut s = state.lock().unwrap();
             let was = s.netinfo.identity();
             let now = info.identity();
+            let before = describe_attachment(&s.netinfo);
             let prev_wifi = s.netinfo.wifi.take();
             let prev_dns = s.netinfo.dns.clone();
             let had_tunnel = s.netinfo.tunnel.is_some();
@@ -111,6 +134,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
             s.netinfo = info;
             s.netinfo.wifi = if moved { None } else { prev_wifi };
             let restored = std::mem::take(&mut link_lost);
+            s.link_lost = false;
             if restored {
                 // The link is back (same network or not): stats accumulated
                 // while it was down describe the outage, not the path — left
@@ -123,7 +147,15 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
                 s.push_event(
                     crate::verdict::Severity::Info,
                     crate::app::EventCategory::Network,
+                    message.clone(),
+                );
+                let detail = describe_attachment(&s.netinfo);
+                let iface = s.netinfo.iface.clone();
+                s.push_net_change(
+                    crate::app::NetChangeKind::LinkRestored,
+                    iface,
                     message,
+                    detail,
                 );
             }
             if moved {
@@ -155,8 +187,23 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
                 s.notice_event(
                     crate::verdict::Severity::Info,
                     crate::app::EventCategory::Network,
-                    message,
+                    message.clone(),
                 );
+                let kind = match (had_tunnel, s.netinfo.tunnel.is_some()) {
+                    (false, true) => crate::app::NetChangeKind::VpnUp,
+                    (true, false) => crate::app::NetChangeKind::VpnDown,
+                    _ => crate::app::NetChangeKind::NetworkChanged,
+                };
+                let mut detail = vec!["before:".to_string()];
+                detail.extend(before.iter().map(|l| format!("  {l}")));
+                detail.push("after:".to_string());
+                detail.extend(
+                    describe_attachment(&s.netinfo)
+                        .iter()
+                        .map(|l| format!("  {l}")),
+                );
+                let iface = s.netinfo.iface.clone();
+                s.push_net_change(kind, iface, message, detail);
                 changed.notify_waiters();
             } else if had_info && s.netinfo.dns != prev_dns {
                 // Same network, new resolvers (DHCP renewal, profile change) —
@@ -165,7 +212,18 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
                 s.push_event(
                     crate::verdict::Severity::Info,
                     crate::app::EventCategory::Network,
+                    message.clone(),
+                );
+                let detail = vec![
+                    format!("before: {}", prev_dns.join(", ")),
+                    format!("after:  {}", s.netinfo.dns.join(", ")),
+                ];
+                let iface = s.netinfo.iface.clone();
+                s.push_net_change(
+                    crate::app::NetChangeKind::AddressChanged,
+                    iface,
                     message,
+                    detail,
                 );
             }
         }
@@ -188,7 +246,7 @@ fn build(iface: &netdev::Interface) -> NetInfo {
         .map(|m| m.to_string())
         .unwrap_or_else(|| "-".to_string());
 
-    let (gateway_ip, gateway_mac) = match &iface.gateway {
+    let (gateway_ip, gateway_mac, gateway_ipv6) = match &iface.gateway {
         Some(gw) => {
             let ip = gw
                 .ipv4
@@ -196,9 +254,10 @@ fn build(iface: &netdev::Interface) -> NetInfo {
                 .map(|i| i.to_string())
                 .or_else(|| gw.ipv6.first().map(|i| i.to_string()))
                 .unwrap_or_else(|| "-".to_string());
-            (ip, gw.mac_addr.to_string())
+            let v6 = gw.ipv6.first().map(|i| i.to_string()).unwrap_or_default();
+            (ip, gw.mac_addr.to_string(), v6)
         }
-        None => ("-".to_string(), "-".to_string()),
+        None => ("-".to_string(), "-".to_string(), String::new()),
     };
 
     // Extra link facts beyond the medium: negotiated speed when the OS exposes
@@ -228,6 +287,8 @@ fn build(iface: &netdev::Interface) -> NetInfo {
         link_detail: detail.join(" · "),
         medium,
         link_speed_bps,
+        mtu: iface.mtu,
+        gateway_ipv6,
         // Vendor is filled in by the caller (it needs a process scan).
         tunnel: (medium == LinkMedium::Tunnel).then(String::new),
         tunnel_iface: if medium == LinkMedium::Tunnel {
@@ -259,11 +320,44 @@ fn physical_interfaces() -> Vec<(String, LinkMedium)> {
 /// Messages for the diff between two interface snapshots. Pure, so the wording
 /// rules are testable: an arriving interface that is NOT the default route
 /// says so — that is the whole warning.
+/// The facts about the current attachment, one per line — what the network
+/// history keeps as "before" and "after".
+fn describe_attachment(n: &NetInfo) -> Vec<String> {
+    let mut out = Vec::new();
+    if n.iface.is_empty() {
+        out.push("no interface".to_string());
+        return out;
+    }
+    out.push(format!("{} · {}", n.iface, n.medium.label()));
+    if !n.ipv4.is_empty() {
+        out.push(format!("ipv4 {}", n.ipv4.join(", ")));
+    }
+    if !n.ipv6.is_empty() {
+        out.push(format!("ipv6 {}", n.ipv6.join(", ")));
+    }
+    out.push(format!("gateway {} ({})", n.gateway_ip, n.gateway_mac));
+    if !n.dns.is_empty() {
+        out.push(format!("dns {}", n.dns.join(", ")));
+    }
+    if let Some(v) = n.tunnel_label() {
+        out.push(format!("tunnel {v} ({})", n.tunnel_iface));
+    }
+    if let Some(w) = &n.wifi {
+        out.push(format!(
+            "wifi {} · {} · ch {} · {}",
+            w.ssid, w.phy, w.channel, w.rssi
+        ));
+    }
+    out
+}
+
+/// (interface, came up?, message) for every physical interface that appeared
+/// or vanished since the previous pass.
 fn iface_changes(
     prev: &std::collections::HashMap<String, LinkMedium>,
     current: &std::collections::HashMap<String, LinkMedium>,
     default_name: &str,
-) -> Vec<String> {
+) -> Vec<(String, bool, String)> {
     let mut out = Vec::new();
     for (name, medium) in current {
         if !prev.contains_key(name) {
@@ -272,17 +366,19 @@ fn iface_changes(
             } else {
                 String::new()
             };
-            out.push(format!(
-                "interface connected: {name} ({}){note}",
-                medium.label()
+            out.push((
+                name.clone(),
+                true,
+                format!("interface connected: {name} ({}){note}", medium.label()),
             ));
         }
     }
     for (name, medium) in prev {
         if !current.contains_key(name) {
-            out.push(format!(
-                "interface disconnected: {name} ({})",
-                medium.label()
+            out.push((
+                name.clone(),
+                false,
+                format!("interface disconnected: {name} ({})", medium.label()),
             ));
         }
     }
@@ -550,17 +646,19 @@ mod tests {
         // Plugged in, route still on Wi-Fi: say so.
         let msgs = iface_changes(&wifi_only, &both, "wlp2s0");
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].contains("interface connected: enx00e04c"));
-        assert!(msgs[0].contains("default route still wlp2s0"));
+        assert!(msgs[0].2.contains("interface connected: enx00e04c"));
+        assert!(msgs[0].2.contains("default route still wlp2s0"));
+        assert!(msgs[0].1, "came up");
 
         // Plugged in and it IS the default: no warning clause.
         let msgs = iface_changes(&wifi_only, &both, "enx00e04c");
-        assert!(!msgs[0].contains("default route still"));
+        assert!(!msgs[0].2.contains("default route still"));
 
         // Unplugged: announced too.
         let msgs = iface_changes(&both, &wifi_only, "wlp2s0");
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].contains("interface disconnected: enx00e04c"));
+        assert!(msgs[0].2.contains("interface disconnected: enx00e04c"));
+        assert!(!msgs[0].1, "went down");
 
         // No change, no chatter.
         assert!(iface_changes(&both, &both, "wlp2s0").is_empty());

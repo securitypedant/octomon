@@ -140,15 +140,22 @@ pub fn has_global_v6(addrs: &[String]) -> bool {
     })
 }
 
-/// One probe over one family-pinned client.
-async fn probe(client: &reqwest::Client, p: &Provider) -> FamilyProbe {
+/// One probe over one family-pinned client. Also returns the local clock's
+/// offset from the server's `Date` header when the answer carried one — the
+/// coarse fallback for the clock check when NTP is filtered.
+async fn probe(client: &reqwest::Client, p: &Provider) -> (FamilyProbe, Option<f64>) {
     let start = Instant::now();
     let resp = match client.get(p.url).send().await {
         Ok(r) => r,
-        Err(e) => return FamilyProbe::Fail(short_reason(&e)),
+        Err(e) => return (FamilyProbe::Fail(short_reason(&e)), None),
     };
     let rtt_ms = start.elapsed().as_secs_f64() * 1000.0;
     let status = resp.status().as_u16();
+    let date_skew = resp
+        .headers()
+        .get(reqwest::header::DATE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(date_skew_ms);
     let location = resp
         .headers()
         .get(reqwest::header::LOCATION)
@@ -165,7 +172,23 @@ async fn probe(client: &reqwest::Client, p: &Provider) -> FamilyProbe {
         }
     }
     let body = String::from_utf8_lossy(&body);
-    classify(p.expects, status, location, &body, rtt_ms)
+    let result = classify(p.expects, status, location, &body, rtt_ms);
+    // Only a genuine answer from the provider dates the world; a portal's
+    // page carries the portal's clock.
+    let skew = match result {
+        FamilyProbe::Ok(_) => date_skew,
+        _ => None,
+    };
+    (result, skew)
+}
+
+/// Local clock minus the server's `Date` (RFC 7231 / RFC 2822 form), in ms;
+/// positive = local clock ahead. `Date` has one-second resolution, so this is
+/// coarse by design.
+pub fn date_skew_ms(date: &str) -> Option<f64> {
+    let server = chrono::DateTime::parse_from_rfc2822(date).ok()?;
+    let now = chrono::Utc::now();
+    Some((now.timestamp_millis() - server.timestamp_millis()) as f64)
 }
 
 /// Compress reqwest's error chains into something a status line can carry.
@@ -179,34 +202,53 @@ fn short_reason(e: &reqwest::Error) -> String {
     }
 }
 
-/// Probe, and on a bad answer let an independent provider arbitrate.
+/// Probe, and on a bad answer let an independent provider arbitrate. The third
+/// element is the `Date`-header clock skew, when an answer carried one.
 async fn probe_verified(
     client: &reqwest::Client,
     p: &'static Provider,
-) -> (FamilyProbe, Option<String>) {
-    let first = probe(client, p).await;
+) -> (FamilyProbe, Option<String>, Option<f64>) {
+    let (first, skew) = probe(client, p).await;
     match first {
-        FamilyProbe::Ok(_) => (first, None),
+        FamilyProbe::Ok(_) => (first, None, skew),
         _ => {
             let sec = second_opinion(p);
             match probe(client, sec).await {
-                FamilyProbe::Ok(ms) => (
+                (FamilyProbe::Ok(ms), skew2) => (
                     FamilyProbe::Ok(ms),
                     Some(format!(
                         "{} endpoint misbehaving — verified ok via {}",
                         p.name, sec.name
                     )),
+                    skew2,
                 ),
                 // Two independent operators agree: the finding stands.
-                _ => (first, None),
+                _ => (first, None, None),
             }
         }
     }
 }
 
+/// A client that sends everything through `proxy` (an `http://host:port` or
+/// `socks5://` URL). Direct clients are built with reqwest's proxy support
+/// off, so the environment cannot silently route them; this one is the
+/// deliberate exception.
+fn proxy_client(proxy: &str) -> Option<reqwest::Client> {
+    let proxy = reqwest::Proxy::all(proxy).ok()?;
+    reqwest::Client::builder()
+        .proxy(proxy)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+        .ok()
+}
+
 fn family_client(local: IpAddr) -> Option<reqwest::Client> {
     reqwest::Client::builder()
         .local_address(local)
+        // Direct by definition: the probe measures the network, not whatever
+        // `https_proxy` happens to be set to in this shell.
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(4))
         .build()
@@ -229,25 +271,39 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config, changed: Arc<Notify>)
             _ = changed.notified() => {}
         }
 
-        let v6_applicable = {
+        let (v6_applicable, proxy_url) = {
             let s = state.lock().unwrap();
-            has_global_v6(&s.netinfo.ipv6)
+            (
+                has_global_v6(&s.netinfo.ipv6),
+                s.proxy.as_ref().and_then(|p| p.https_url()),
+            )
+        };
+        // Through the system's fixed proxy as well, when there is one: that is
+        // the path a browser takes, and it can be up while direct is blocked
+        // (a corporate network) or dead while direct works (a stale setting).
+        let via_proxy = match proxy_url.as_deref().and_then(proxy_client) {
+            Some(c) => probe(&c, p).await.0,
+            None => FamilyProbe::NotRun,
         };
 
-        let (r4, note4) = match &v4 {
+        let (r4, note4, skew4) = match &v4 {
             Some(c) => probe_verified(c, p).await,
-            None => (FamilyProbe::Fail("no v4 client".into()), None),
+            None => (FamilyProbe::Fail("no v4 client".into()), None, None),
         };
-        let (r6, note6) = if !v6_applicable {
-            (FamilyProbe::NotApplicable, None)
+        let (r6, note6, skew6) = if !v6_applicable {
+            (FamilyProbe::NotApplicable, None, None)
         } else {
             match &v6 {
                 Some(c) => probe_verified(c, p).await,
-                None => (FamilyProbe::Fail("no v6 client".into()), None),
+                None => (FamilyProbe::Fail("no v6 client".into()), None, None),
             }
         };
 
         let mut s = state.lock().unwrap();
+        if let Some(skew) = skew4.or(skew6) {
+            s.clock.http_offset_ms = Some(skew);
+            s.clock.checked = true;
+        }
         // Mutate in place: the histories accumulate across probes.
         if let FamilyProbe::Ok(ms) = r4 {
             s.http.v4_hist.push(ms);
@@ -258,6 +314,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config, changed: Arc<Notify>)
         s.http.provider = p.name.to_string();
         s.http.v4 = r4;
         s.http.v6 = r6;
+        s.http.via_proxy = via_proxy;
         s.http.note = note4.or(note6);
     }
 }

@@ -1608,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "octomon"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1625,6 +1625,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "socket2",
  "surge-ping",
  "sysinfo",
  "tokio",
