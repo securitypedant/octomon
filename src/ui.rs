@@ -70,49 +70,86 @@ pub fn render(f: &mut Frame, s: &AppState) {
 /// The [c] scan: which protocols this network lets out, one row per check.
 fn egress_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     use crate::collectors::egress::Outcome;
-    let width = 88u16.min(area.width);
     let mut lines: Vec<Line> = Vec::new();
+    // Column widths follow the content, so a long note is not clipped and a
+    // short list does not sprawl; the box then takes what the columns need,
+    // up to the terminal.
+    let (name_w, ref_w, res_w) = match &s.egress {
+        Some(scan) => (
+            scan.results
+                .iter()
+                .map(|r| r.check.name.len())
+                .max()
+                .unwrap_or(5)
+                .max(5),
+            scan.results
+                .iter()
+                .map(|r| format!("{}:{}/{}", r.check.host, r.check.port, r.check.proto).len())
+                .max()
+                .unwrap_or(9)
+                .max(9),
+            "FILTERED (host answers on other ports)".len(),
+        ),
+        None => (5, 9, 6),
+    };
+    let note_w = match &s.egress {
+        Some(scan) => scan
+            .results
+            .iter()
+            .map(|r| r.check.note.len())
+            .max()
+            .unwrap_or(0),
+        None => 0,
+    }
+    .max("why it matters".len());
     match &s.egress {
         None => lines.push(Line::from(Span::styled(
             " starting scan…",
             Style::new().fg(Color::DarkGray),
         ))),
         Some(scan) => {
+            let dim = Style::new().fg(Color::DarkGray);
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {:<16}", "check"),
-                    Style::new().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!("{:<28}", "reference"),
-                    Style::new().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!("{:<20}", "result"),
-                    Style::new().fg(Color::DarkGray),
-                ),
-                Span::styled("why it matters", Style::new().fg(Color::DarkGray)),
+                Span::styled(format!(" {:<name_w$}  ", "check"), dim),
+                Span::styled(format!("{:<ref_w$}  ", "reference"), dim),
+                Span::styled(format!("{:<res_w$}  ", "result"), dim),
+                Span::styled("why it matters", dim),
             ]));
             for r in &scan.results {
-                let color = match r.outcome {
-                    Outcome::Pending => Color::DarkGray,
-                    Outcome::Open(_) => Color::Green,
-                    Outcome::Refused => Color::Yellow,
-                    Outcome::Blocked => Color::Red,
-                    Outcome::Error(_) => Color::Yellow,
+                // A timeout to a host that answers on some other port is the
+                // network filtering that port, not the host being down.
+                let host_up = matches!(r.outcome, Outcome::Blocked)
+                    && scan.results.iter().any(|o| {
+                        o.check.host == r.check.host
+                            && o.check.port != r.check.port
+                            && matches!(o.outcome, Outcome::Open(_) | Outcome::Refused)
+                    });
+                let (label, color) = match &r.outcome {
+                    Outcome::Pending => (r.outcome.label(), Color::DarkGray),
+                    Outcome::Open(_) => (r.outcome.label(), Color::Green),
+                    Outcome::Refused => (r.outcome.label(), Color::Yellow),
+                    Outcome::Blocked if host_up => (
+                        "FILTERED (host answers on other ports)".to_string(),
+                        Color::Red,
+                    ),
+                    Outcome::Blocked => (r.outcome.label(), Color::Red),
+                    Outcome::Error(_) => (r.outcome.label(), Color::Yellow),
                 };
                 let target = format!("{}:{}/{}", r.check.host, r.check.port, r.check.proto);
                 lines.push(Line::from(vec![
                     Span::styled(
-                        format!(" {:<16}", r.check.name),
+                        format!(" {:<name_w$}  ", r.check.name),
                         Style::new().fg(Color::White),
                     ),
-                    Span::styled(format!("{:<28}", target), Style::new().fg(Color::Gray)),
                     Span::styled(
-                        format!("{:<20}", r.outcome.label()),
+                        format!("{:<ref_w$}  ", target),
+                        Style::new().fg(Color::Gray),
+                    ),
+                    Span::styled(
+                        format!("{:<res_w$}  ", label),
                         Style::new().fg(color).bold(),
                     ),
-                    Span::styled(r.check.note.clone(), Style::new().fg(Color::DarkGray)),
+                    Span::styled(r.check.note.clone(), dim),
                 ]));
             }
             lines.push(Line::from(""));
@@ -122,7 +159,7 @@ fn egress_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                 match scan.blocked() {
                     0 => "nothing filtered — every protocol tried gets out".to_string(),
                     n => format!(
-                        "{n} blocked — this network filters some outbound traffic (SMTP 25 alone is normal on home lines)"
+                        "{n} filtered — this network blocks some outbound traffic (port 25 alone is normal on home ISPs)"
                     ),
                 }
             };
@@ -136,6 +173,12 @@ fn egress_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             )));
         }
     }
+    // Border + padding = 4 columns; the widest line decides the rest.
+    let widest = lines.iter().map(|l| l.width()).max().unwrap_or(40) as u16;
+    let width = (widest + 4)
+        .max((1 + name_w + 2 + ref_w + 2 + res_w + 2 + note_w + 4) as u16)
+        .min(area.width.saturating_sub(2))
+        .max(40.min(area.width));
     let h = ((lines.len() as u16) + 2).clamp(5, area.height);
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -157,7 +200,7 @@ fn egress_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         .border_style(Style::new().fg(Color::Cyan));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
-    f.render_widget(Paragraph::new(lines), inner);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn whois_overlay(f: &mut Frame, s: &AppState, area: Rect) {
@@ -493,7 +536,9 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         .border_style(Style::new().fg(Color::Cyan));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
-    f.render_widget(Paragraph::new(lines), inner);
+    // The list is newest-first; the cue runs the same way (top = newest).
+    let content = scroll_cue(f, inner, s.events.len(), s.events_scroll, visible);
+    f.render_widget(Paragraph::new(lines), content);
 }
 
 /// Modal shown once at startup when something will visibly not work. Dismissed
@@ -901,6 +946,28 @@ fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             ),
             Span::styled(r.detail.clone(), Style::new().fg(Color::Gray)),
         ]));
+    }
+
+    // The background checks: things that are not a rung but a person wants
+    // to see were done — clock, proxy, path MTU, NAT, DNS honesty.
+    if !s.verdict.triage.checks.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " checks",
+            Style::new().fg(Color::White).bold(),
+        )));
+        for c in &s.verdict.triage.checks {
+            let (glyph, color) = match c.status {
+                RungStatus::Ok => ("✓", Color::Green),
+                RungStatus::Warn => ("~", Color::Yellow),
+                RungStatus::Bad => ("✗", Color::Red),
+                RungStatus::Unknown => ("?", Color::DarkGray),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {glyph} "), Style::new().fg(color).bold()),
+                Span::styled(format!("{:<13}", c.name), Style::new().fg(Color::White)),
+                Span::styled(c.detail.clone(), Style::new().fg(Color::Gray)),
+            ]));
+        }
     }
 
     lines.push(Line::from(""));
@@ -2605,7 +2672,8 @@ fn net_history_pane(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
             Span::styled(c.summary.clone(), style),
         ]));
     }
-    f.render_widget(Paragraph::new(lines), list_area);
+    let content = scroll_cue(f, list_area, s.net_history.len(), first, visible);
+    f.render_widget(Paragraph::new(lines), content);
     if let Some(c) = sel
         && detail_h > 0
     {
@@ -3933,9 +4001,12 @@ mod tests {
         let out = draw(&s, 120, 30);
         assert!(out.contains("outbound reachability"));
         assert!(out.contains("open 12ms"));
-        assert!(out.contains("BLOCKED"));
         assert!(out.contains("refused (reachable)"));
-        assert!(out.contains("1 blocked"));
+        assert!(out.contains("1 filtered"));
+        assert!(
+            out.contains("FILTERED (host answers on other ports)"),
+            "25 timing out while 22/993 to the same host answer is filtering, not a dead host"
+        );
         assert!(out.contains("r rescan"));
     }
 

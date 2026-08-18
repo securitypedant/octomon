@@ -1560,6 +1560,11 @@ fn doctor_json(s: &AppState, full: bool) -> (String, i32) {
                 "status": r.status.label(),
                 "detail": r.detail,
             })).collect::<Vec<_>>(),
+            "checks": triage.checks.iter().map(|c| json!({
+                "name": c.name,
+                "status": c.status.label(),
+                "detail": c.detail,
+            })).collect::<Vec<_>>(),
             "findings": triage.findings.iter().map(|f| json!({
                 "cause": f.cause.label(),
                 "severity": f.severity.label(),

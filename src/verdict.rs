@@ -314,6 +314,8 @@ pub struct Rung {
 #[derive(Clone, Default, Debug)]
 pub struct Triage {
     pub rungs: Vec<Rung>,
+    /// The one-shot / background checks (clock, proxy, MTU, NAT, DNS honesty…).
+    pub checks: Vec<Check>,
     /// Instantaneous (no hysteresis) — what the rules say *right now*. The
     /// footer shows the hysteresis-filtered set from [`VerdictState`] instead.
     pub findings: Vec<Finding>,
@@ -1475,7 +1477,12 @@ pub fn evaluate(s: &AppState) -> Triage {
 
     rank(&mut findings);
     let rungs = build_rungs(s, link, gw, gw_health, &with_data, &bad, fine);
-    Triage { rungs, findings }
+    let checks = checks(s);
+    Triage {
+        rungs,
+        checks,
+        findings,
+    }
 }
 
 /// The ladder itself: every area, always present, in blame order. Healthy rungs
@@ -1809,6 +1816,185 @@ fn build_rungs(
     rungs
 }
 
+/// One of the slow or one-shot checks that are not a rung of the ladder but
+/// whose result a person wants to see: clock, proxy, path MTU, NAT, DNS
+/// honesty, the reference resolver, path discovery, public IP.
+#[derive(Clone, Debug)]
+pub struct Check {
+    pub name: &'static str,
+    pub status: RungStatus,
+    pub detail: String,
+}
+
+/// The startup / background checks and where they stand right now.
+pub fn checks(s: &AppState) -> Vec<Check> {
+    use crate::app::FamilyProbe as FP;
+    let mut out = Vec::new();
+    let mut push = |name: &'static str, status: RungStatus, detail: String| {
+        out.push(Check {
+            name,
+            status,
+            detail,
+        })
+    };
+
+    // Path discovery + public IP.
+    let hops = s.targets.iter().filter(|t| t.is_path_hop()).count();
+    let gw = s.targets.iter().any(|t| t.hop_ttl() == Some(1));
+    push(
+        "discovery",
+        if gw {
+            RungStatus::Ok
+        } else {
+            RungStatus::Unknown
+        },
+        if gw {
+            format!(
+                "gateway + {hops} hop{} traced",
+                if hops == 1 { "" } else { "s" }
+            )
+        } else {
+            "gateway not found yet".to_string()
+        },
+    );
+    let public = s
+        .targets
+        .iter()
+        .find(|t| t.discovered && t.label.contains("public"));
+    push(
+        "public IP",
+        if public.is_some() {
+            RungStatus::Ok
+        } else {
+            RungStatus::Unknown
+        },
+        public
+            .map(|t| t.addr.to_string())
+            .unwrap_or_else(|| "not discovered".to_string()),
+    );
+    // NAT.
+    match s.nat_kind() {
+        Some((kind, via)) => push(
+            "nat",
+            RungStatus::Warn,
+            format!("{} — hop 2 is {via}", kind.label()),
+        ),
+        None if gw && hops > 0 => push("nat", RungStatus::Ok, "ordinary NAT at the gateway".into()),
+        None => push("nat", RungStatus::Unknown, "path not known yet".into()),
+    }
+    // Clock.
+    match (s.clock.offset_ms(), &s.clock.ntp_error, s.clock.checked) {
+        (Some(off), _, _) => {
+            let status = if off.abs() >= th::CLOCK_BAD_MS {
+                RungStatus::Bad
+            } else if off.abs() >= th::CLOCK_WARN_MS {
+                RungStatus::Warn
+            } else {
+                RungStatus::Ok
+            };
+            push(
+                "clock",
+                status,
+                format!("offset {:+.0} ms via {}", off, s.clock.source()),
+            );
+        }
+        (None, Some(e), _) => push(
+            "clock",
+            RungStatus::Unknown,
+            format!("ntp failed ({e}); waiting for an http date"),
+        ),
+        (None, None, _) => push("clock", RungStatus::Unknown, "not checked yet".into()),
+    }
+    // Proxy.
+    match &s.proxy {
+        Some(p) => push(
+            "proxy",
+            match &s.http.via_proxy {
+                FP::Fail(_) => RungStatus::Bad,
+                _ => RungStatus::Warn,
+            },
+            format!(
+                "{}{}",
+                p.describe(),
+                match &s.http.via_proxy {
+                    FP::Ok(ms) => format!(" · web via proxy ok {ms:.0}ms"),
+                    FP::Fail(r) => format!(" · web via proxy FAILED ({r})"),
+                    _ => String::new(),
+                }
+            ),
+        ),
+        None => push("proxy", RungStatus::Ok, "none configured".into()),
+    }
+    // Path MTU.
+    match (&s.pmtu, &s.pmtu_error) {
+        (Some(p), _) => push(
+            "path MTU",
+            if p.blackhole {
+                RungStatus::Bad
+            } else if p.path_mtu.zip(p.iface_mtu).is_some_and(|(a, b)| a < b) {
+                RungStatus::Warn
+            } else {
+                RungStatus::Ok
+            },
+            crate::collectors::pmtu::describe(p),
+        ),
+        (None, Some(e)) => push(
+            "path MTU",
+            RungStatus::Unknown,
+            format!("not measured — {e}"),
+        ),
+        (None, None) => push("path MTU", RungStatus::Unknown, "not measured yet".into()),
+    }
+    // DNS honesty + reference.
+    let judged: Vec<&crate::app::DnsProbe> = s.dns.iter().filter(|p| p.hijack.is_some()).collect();
+    if judged.is_empty() {
+        push("DNS honesty", RungStatus::Unknown, "not checked yet".into());
+    } else {
+        let bad: Vec<String> = judged
+            .iter()
+            .filter(|p| p.hijack == Some(true))
+            .map(|p| p.server.to_string())
+            .collect();
+        if bad.is_empty() {
+            push(
+                "DNS honesty",
+                RungStatus::Ok,
+                format!(
+                    "{} resolver{} answer NXDOMAIN for names that don't exist",
+                    judged.len(),
+                    if judged.len() == 1 { "" } else { "s" }
+                ),
+            );
+        } else {
+            push(
+                "DNS honesty",
+                RungStatus::Bad,
+                format!("{} redirect non-existent names", bad.join(", ")),
+            );
+        }
+    }
+    if let Some(r) = s.dns.iter().find(|p| p.reference) {
+        let (status, detail) = if r.recent_len() < th::DNS_MIN_SAMPLES {
+            (RungStatus::Unknown, format!("{} — probing", r.server))
+        } else if r.fail_pct() >= th::DNS_FAIL_PCT {
+            (
+                RungStatus::Warn,
+                format!(
+                    "{} unreachable ({}) — outside DNS filtered here",
+                    r.server, r.status
+                ),
+            )
+        } else {
+            (
+                RungStatus::Ok,
+                format!("{} answers ({})", r.server, fmt_ms(r.recent_mean_ms())),
+            )
+        };
+        push("reference DNS", status, detail);
+    }
+    out
+}
+
 /// A finding raise or clear, for the event timeline.
 #[derive(Clone, Debug)]
 pub struct Transition {
@@ -1949,14 +2135,26 @@ pub fn render_text(triage: &Triage, insufficient: Option<&str>) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     let _ = writeln!(out, "== ANALYSIS ==");
+    let glyph_of = |st: RungStatus| match st {
+        RungStatus::Ok => "✓",
+        RungStatus::Warn => "~",
+        RungStatus::Bad => "✗",
+        RungStatus::Unknown => "?",
+    };
     for r in &triage.rungs {
-        let glyph = match r.status {
-            RungStatus::Ok => "✓",
-            RungStatus::Warn => "~",
-            RungStatus::Bad => "✗",
-            RungStatus::Unknown => "?",
-        };
-        let _ = writeln!(out, "  {glyph} {:<13} {}", r.area.label(), r.detail);
+        let _ = writeln!(
+            out,
+            "  {} {:<13} {}",
+            glyph_of(r.status),
+            r.area.label(),
+            r.detail
+        );
+    }
+    if !triage.checks.is_empty() {
+        let _ = writeln!(out, "  checks:");
+        for c in &triage.checks {
+            let _ = writeln!(out, "  {} {:<13} {}", glyph_of(c.status), c.name, c.detail);
+        }
     }
     let _ = writeln!(out);
     if let Some(reason) = insufficient {
@@ -3042,6 +3240,7 @@ mod tests {
         let now = Instant::now();
         let with = Triage {
             rungs: vec![],
+            checks: vec![],
             findings: vec![fake(Cause::GatewayLan)],
         };
         let without = Triage::default();
@@ -3083,6 +3282,7 @@ mod tests {
         let now = Instant::now();
         let degraded = Triage {
             rungs: vec![],
+            checks: vec![],
             findings: vec![fake(Cause::GatewayLan)],
         };
         for _ in 0..4 {
@@ -3096,6 +3296,7 @@ mod tests {
         let t = vs.ingest(
             Triage {
                 rungs: vec![],
+                checks: vec![],
                 findings: vec![worse.clone()],
             },
             None,
@@ -3109,6 +3310,7 @@ mod tests {
         let t = vs.ingest(
             Triage {
                 rungs: vec![],
+                checks: vec![],
                 findings: vec![worse],
             },
             None,
@@ -3123,6 +3325,7 @@ mod tests {
         let now = Instant::now();
         let with = Triage {
             rungs: vec![],
+            checks: vec![],
             findings: vec![fake(Cause::WideInternet)],
         };
         for _ in 0..3 {
