@@ -73,6 +73,11 @@ pub mod thresholds {
     pub const RAISE_HITS: usize = 4;
     pub const RAISE_WINDOW: usize = 6;
     pub const CLEAR_TICKS: u32 = 8;
+    /// After a finding clears, its clear is held back this long: if it raises
+    /// again within the window it is the same episode continuing (intermittent
+    /// loss), not a fresh raise — one timeline entry each way instead of a
+    /// ▲/✓ pair every half minute. The footer stops showing it at once.
+    pub const FLAP_GRACE_SECS: u64 = 90;
     /// No verdict at all until this much uptime — early probes are still queued.
     pub const WARMUP_SECS: u64 = 10;
 }
@@ -2028,6 +2033,9 @@ pub struct Transition {
 struct Track {
     hits: VecDeque<bool>,
     active: Option<Active>,
+    /// A clear waiting out the flap grace: (when it cleared, the finding as
+    /// it last stood, when it originally raised).
+    cleared: Option<(Instant, Finding, Instant)>,
 }
 
 #[derive(Clone)]
@@ -2065,6 +2073,7 @@ impl VerdictState {
             self.tracker.entry(key.clone()).or_insert_with(|| Track {
                 hits: VecDeque::with_capacity(th::RAISE_WINDOW),
                 active: None,
+                cleared: None,
             });
         }
 
@@ -2095,26 +2104,30 @@ impl VerdictState {
                 (Some(active), None) => {
                     active.quiet += 1;
                     if active.quiet >= th::CLEAR_TICKS {
-                        let mut finding = active.last.clone();
-                        finding.since = Some(active.since);
-                        transitions.push(Transition {
-                            raised: false,
-                            finding,
-                            after: Some(now.duration_since(active.since)),
-                        });
+                        // Off the footer now; onto the timeline only once the
+                        // grace has passed without it coming back.
+                        tr.cleared = Some((now, active.last.clone(), active.since));
                         tr.active = None;
                     }
                 }
                 (None, Some(f)) => {
                     let hits = tr.hits.iter().filter(|h| **h).count();
                     if hits >= th::RAISE_HITS {
-                        transitions.push(Transition {
-                            raised: true,
-                            finding: f.clone(),
-                            after: None,
+                        // Back within the grace: the same episode, resumed —
+                        // no new raise entry, and the original start stands.
+                        let resumed = tr.cleared.take().and_then(|(at, _, since)| {
+                            (now.duration_since(at).as_secs() < th::FLAP_GRACE_SECS)
+                                .then_some(since)
                         });
+                        if resumed.is_none() {
+                            transitions.push(Transition {
+                                raised: true,
+                                finding: f.clone(),
+                                after: None,
+                            });
+                        }
                         tr.active = Some(Active {
-                            since: now,
+                            since: resumed.unwrap_or(now),
                             quiet: 0,
                             last: f,
                         });
@@ -2122,7 +2135,21 @@ impl VerdictState {
                 }
                 (None, None) => {}
             }
-            tr.active.is_some() || tr.hits.iter().any(|h| *h)
+            // A held clear whose grace has run out is final: say so, with the
+            // duration up to when it actually cleared.
+            if tr.active.is_none()
+                && let Some((at, _, _)) = tr.cleared
+                && now.duration_since(at).as_secs() >= th::FLAP_GRACE_SECS
+            {
+                let (at, mut finding, since) = tr.cleared.take().unwrap();
+                finding.since = Some(since);
+                transitions.push(Transition {
+                    raised: false,
+                    finding,
+                    after: Some(at.duration_since(since)),
+                });
+            }
+            tr.active.is_some() || tr.cleared.is_some() || tr.hits.iter().any(|h| *h)
         });
 
         let mut active: Vec<Finding> = self
@@ -3336,8 +3363,63 @@ mod tests {
             matches!(vs.current, Verdict::Healthy),
             "8th quiet tick clears"
         );
+        // Off the footer at once, but the timeline entry waits out the flap
+        // grace in case it comes straight back.
+        assert!(
+            transitions.iter().all(|t| t.raised),
+            "clear is held, not emitted yet"
+        );
+        let later = now + Duration::from_secs(th::FLAP_GRACE_SECS + 1);
+        let transitions = vs.ingest(without.clone(), None, later);
         let cleared = transitions.iter().find(|t| !t.raised).unwrap();
         assert!(cleared.after.is_some(), "clears carry the active duration");
+    }
+
+    /// The Quad9 lesson: 10% loss to one anchor flapped every half minute,
+    /// filling the timeline with ▲/✓ pairs. A finding that comes back within
+    /// the grace is the same episode — one raise entry, one clear entry, with
+    /// the duration spanning the whole thing.
+    #[test]
+    fn a_finding_that_flaps_within_the_grace_is_one_episode() {
+        let mut vs = VerdictState::default();
+        let t0 = Instant::now();
+        let with = Triage {
+            rungs: vec![],
+            checks: vec![],
+            findings: vec![fake(Cause::SingleDestination)],
+        };
+        let without = Triage::default();
+        let mut raises = 0;
+        let mut clears = 0;
+        let mut count = |ts: Vec<Transition>| {
+            for t in ts {
+                if t.raised { raises += 1 } else { clears += 1 }
+            }
+        };
+        let mut now = t0;
+        // Three cycles of: present 6 ticks, absent 12 ticks (past CLEAR_TICKS),
+        // 30 s apart in wall time.
+        for _ in 0..3 {
+            for _ in 0..6 {
+                count(vs.ingest(with.clone(), None, now));
+            }
+            for _ in 0..12 {
+                now += Duration::from_secs(1);
+                count(vs.ingest(without.clone(), None, now));
+            }
+            now += Duration::from_secs(12);
+        }
+        assert_eq!(raises, 1, "one raise for the whole flapping episode");
+        assert_eq!(clears, 0, "no clear while it keeps coming back");
+        // Silence beyond the grace: the one clear, spanning the episode.
+        now += Duration::from_secs(th::FLAP_GRACE_SECS + 1);
+        let ts = vs.ingest(without.clone(), None, now);
+        let cleared = ts.iter().find(|t| !t.raised).expect("the final clear");
+        assert!(
+            cleared.after.unwrap() >= Duration::from_secs(60),
+            "{:?}",
+            cleared.after
+        );
     }
 
     /// The bug from live testing: Wi-Fi off showed "25% loss" on the timeline
