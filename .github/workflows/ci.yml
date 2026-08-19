@@ -8,6 +8,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# A newer push to the same branch supersedes a run still in flight.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     name: fmt · clippy · build · test (${{ matrix.os }})
@@ -62,11 +67,18 @@ jobs:
         run: choco install llvm --no-progress -y
 
       # The static Linux build: the musl target plus musl-gcc for ring's C.
+      # apt on a fresh ubuntu-latest image can sit behind the dpkg lock held
+      # by the boot-time unattended-upgrades run — silently, for the whole
+      # job — so that is stopped first, the lock is given a bounded wait, and
+      # the step as a whole cannot hang the matrix.
       - name: Install musl target (Linux)
         if: matrix.target != ''
+        timeout-minutes: 8
         run: |
           rustup target add ${{ matrix.target }}
-          sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+          sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+          install() { sudo apt-get -o DPkg::Lock::Timeout=240 install -y -q --no-install-recommends musl-tools; }
+          install || (sudo apt-get -o DPkg::Lock::Timeout=240 update -q && install)
 
       # Formatting is platform-independent; checking it four times would only
       # multiply the noise when it fails.
