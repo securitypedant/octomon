@@ -1634,6 +1634,10 @@ pub struct AppState {
     pub bw_col: usize,
     /// Active sort of top talkers: (column, descending). None = default order.
     pub bw_sort: Option<(usize, bool)>,
+    /// The other talkers table's sort and column cursor, parked while this
+    /// one is shown — so each table keeps the order you gave it across `n`.
+    pub bw_sort_other: Option<(usize, bool)>,
+    pub bw_col_other: usize,
 
     // --- Connection Quality interaction ---
     /// Cursor over the target list (Quality panel).
@@ -1835,6 +1839,8 @@ impl AppState {
             proc_status: ProcStatus::Probing,
             bw_col: 1,
             bw_sort: None,
+            bw_sort_other: None,
+            bw_col_other: 1,
             selected: 0,
             graph_target: 0,
             window_secs: 60,
