@@ -22,7 +22,12 @@ use crate::app::AppState;
 
 const PERIODIC: Duration = Duration::from_secs(60);
 
-pub async fn run(state: Arc<Mutex<AppState>>, changed: Arc<Notify>) {
+pub async fn run(
+    state: Arc<Mutex<AppState>>,
+    clients: crate::collectors::ping::Clients,
+    cfg: crate::config::Config,
+    changed: Arc<Notify>,
+) {
     let mut ticker = tokio::time::interval(PERIODIC);
     ticker.tick().await; // the interval fires immediately; targets don't exist yet
     loop {
@@ -63,18 +68,36 @@ pub async fn run(state: Arc<Mutex<AppState>>, changed: Arc<Notify>) {
                 continue;
             }
 
-            let mut s = state.lock().unwrap();
-            let Some(t) = s.targets.iter_mut().find(|t| t.id == id) else {
-                continue;
+            let monitored = {
+                let mut s = state.lock().unwrap();
+                let Some(t) = s.targets.iter_mut().find(|t| t.id == id) else {
+                    continue;
+                };
+                t.addr = new; // the ping task notices and rebinds
+                t.reset();
+                let message = format!("{host} → {new} (was {current}) — stats reset");
+                s.push_event(
+                    crate::verdict::Severity::Info,
+                    crate::app::EventCategory::Network,
+                    message,
+                );
+                // A path monitor on the old address would quietly keep probing
+                // a host the target no longer points at — two different hosts
+                // under one name on screen.
+                s.hop_monitor
+                    .as_ref()
+                    .filter(|m| m.dest == current)
+                    .map(|m| m.target.split(" (").next().unwrap_or(&m.target).to_string())
             };
-            t.addr = new; // the ping task notices and rebinds
-            t.reset();
-            let message = format!("{host} → {new} (was {current}) — stats reset");
-            s.push_event(
-                crate::verdict::Severity::Info,
-                crate::app::EventCategory::Network,
-                message,
-            );
+            if let Some(label) = monitored {
+                crate::collectors::hopmon::start(
+                    state.clone(),
+                    clients.clone(),
+                    cfg.clone(),
+                    new,
+                    label,
+                );
+            }
         }
     }
 }

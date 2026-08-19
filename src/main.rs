@@ -259,6 +259,8 @@ async fn main() -> Result<()> {
     tokio::spawn(collectors::web::run(state.clone()));
     tokio::spawn(collectors::resolve::run(
         state.clone(),
+        ping_clients.clone(),
+        cfg.clone(),
         network_changed.clone(),
     ));
     if !cli.no_speedtest {
@@ -680,6 +682,39 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
             },
 
             // --- modal text entry: naming the current network ---
+            InputMode::RenameLocation => match key.code {
+                KeyCode::Enter => {
+                    let name = s.input_buffer.trim().to_string();
+                    s.input_mode = InputMode::Normal;
+                    s.input_buffer.clear();
+                    if let Some((key, label)) = s.rename_target.take() {
+                        let new_name = (!name.is_empty()).then(|| name.clone());
+                        // Update what is on screen at once; the file write
+                        // happens off the key path.
+                        if let Some(all) = s.locations.as_mut()
+                            && let Some((_, b)) = all.iter_mut().find(|(k, _)| *k == key)
+                        {
+                            b.name = new_name.clone();
+                        }
+                        if s.baseline_key.as_deref() == Some(key.as_str())
+                            && let Some(b) = s.baseline.as_mut()
+                        {
+                            b.name = new_name;
+                        }
+                        side = Side::NameNetwork { key, label, name };
+                    }
+                }
+                KeyCode::Esc => {
+                    s.input_mode = InputMode::Normal;
+                    s.input_buffer.clear();
+                    s.rename_target = None;
+                }
+                KeyCode::Backspace => {
+                    s.input_buffer.pop();
+                }
+                KeyCode::Char(c) if s.input_buffer.len() < 40 => s.input_buffer.push(c),
+                _ => {}
+            },
             InputMode::NameNetwork => match key.code {
                 KeyCode::Enter => {
                     let name = s.input_buffer.trim().to_string();
@@ -815,6 +850,19 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     }
                 }
                 // Scroll the locations list.
+                // Rename the selected location — any of them, not just the
+                // current network; a name given on the wrong day is common.
+                KeyCode::Enter | KeyCode::Char('N') if s.overlay == Overlay::Locations => {
+                    let picked = s
+                        .locations_view()
+                        .and_then(|all| all.get(s.locations_sel).cloned())
+                        .map(|(key, b)| (key, b.label.clone(), b.name.clone()));
+                    if let Some((key, label, name)) = picked {
+                        s.rename_target = Some((key, label));
+                        s.input_buffer = name.unwrap_or_default();
+                        s.input_mode = InputMode::RenameLocation;
+                    }
+                }
                 KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Locations => {
                     s.locations_sel = s.locations_sel.saturating_sub(1);
                 }
@@ -826,8 +874,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 {
                     let step = if key.code == KeyCode::PageDown { 10 } else { 1 };
                     let last = s
-                        .locations
-                        .as_ref()
+                        .locations_view()
                         .map(|l| l.len().saturating_sub(1))
                         .unwrap_or(0);
                     s.locations_sel = (s.locations_sel + step).min(last);
@@ -1491,7 +1538,16 @@ fn doctor_report(s: &AppState, full: bool) -> (String, i32) {
     // The location always prints, named or not — knowing WHERE the report was
     // taken (and how established its baseline is) is part of the diagnosis.
     if let Some(b) = s.baseline.as_ref() {
-        let _ = writeln!(out, "\n== NORMAL AT \"{}\" ==", b.display_name());
+        let _ = writeln!(
+            out,
+            "\n== NORMAL AT \"{}\"{} ==",
+            b.display_name(),
+            if b.medium.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", b.medium)
+            }
+        );
         let ms = |v: Option<f64>| {
             v.map(|x| format!("~{x:.0}ms"))
                 .unwrap_or_else(|| "—".into())
@@ -1627,6 +1683,7 @@ fn doctor_json(s: &AppState, full: bool) -> (String, i32) {
         "location": s.baseline.as_ref().map(|b| json!({
             "name": b.name,
             "label": b.label,
+            "medium": b.medium,
             "healthy_minutes": b.samples,
             "established": b.established(),
             "normal": {

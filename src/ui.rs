@@ -313,19 +313,17 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
 /// Every stored network location with its learned baseline: what "normal"
 /// means at each place this machine has been.
 fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
-    let w = 84u16.min(area.width);
     let h = (area.height * 4 / 5).max(8.min(area.height));
-    let rect = Rect {
-        x: area.x + (area.width.saturating_sub(w)) / 2,
-        y: area.y + (area.height.saturating_sub(h)) / 2,
-        width: w,
-        height: h,
-    };
     // Three lines per location (name, stats, history).
-    let visible = (rect.height.saturating_sub(2) as usize) / 3;
+    let visible = (h.saturating_sub(2) as usize) / 3;
 
     let mut lines: Vec<Line> = Vec::new();
-    match &s.locations {
+    // The list is what is on disk when the overlay opened, plus the network
+    // we are on *now* if it isn't there yet — a baseline is only written
+    // after its first healthy minute, and the overlay may be open across a
+    // network change. Shown first, as "learning", rather than missing.
+    let merged = s.locations_view();
+    match &merged {
         None => lines.push(Line::from(Span::styled(
             "loading…",
             Style::new().fg(Color::DarkGray),
@@ -337,24 +335,48 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             )));
         }
         Some(all) => {
-            // Scroll only when there is somewhere to scroll to: with the list
-            // fully visible the offset stays pinned at zero.
+            // `locations_sel` is the cursor; scroll just enough to keep it on
+            // screen, and only when there is somewhere to scroll to.
+            let sel = s.locations_sel.min(all.len().saturating_sub(1));
             let max_first = all.len().saturating_sub(visible.max(1));
-            let first = s.locations_sel.min(max_first);
+            let first = sel.saturating_sub(visible.max(1) - 1).min(max_first);
             let ms = |v: Option<f64>| {
                 v.map(|x| format!("~{x:.0}ms"))
                     .unwrap_or_else(|| "—".into())
             };
-            for (key, b) in all.iter().skip(first).take(visible.max(1)) {
+            for (i, (key, b)) in all.iter().enumerate().skip(first).take(visible.max(1)) {
                 let current = s.baseline_key.as_deref() == Some(key.as_str());
+                let selected = i == sel;
+                let name_style = if selected {
+                    Style::new().fg(Color::Black).bg(Color::Cyan).bold()
+                } else {
+                    Style::new().fg(Color::White).bold()
+                };
                 let mut name_row = vec![Span::styled(
-                    b.display_name().to_string(),
-                    Style::new().fg(Color::White).bold(),
+                    format!("{}{}", if selected { "▶ " } else { "  " }, b.display_name()),
+                    name_style,
                 )];
                 if b.name.is_some() && b.name.as_deref() != Some(&b.label) {
                     name_row.push(Span::styled(
                         format!("  ({})", b.label),
                         Style::new().fg(Color::DarkGray),
+                    ));
+                }
+                // The same LAN over Wi-Fi and over a cable is two entries;
+                // the medium is what tells them apart. The current network's
+                // entry may not have folded a minute yet — use the live
+                // medium for it rather than show nothing.
+                let medium = if !b.medium.is_empty() {
+                    b.medium.clone()
+                } else if current && s.netinfo.medium != LinkMedium::Unknown {
+                    s.netinfo.medium.label().to_string()
+                } else {
+                    String::new()
+                };
+                if !medium.is_empty() {
+                    name_row.push(Span::styled(
+                        format!("  · {medium}"),
+                        Style::new().fg(Color::Gray),
                     ));
                 }
                 if current {
@@ -396,7 +418,18 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         }
     }
 
-    let total = s.locations.as_ref().map(Vec::len).unwrap_or(0);
+    // As wide as the widest line wants (the stats line carries a lot), up to
+    // nearly the terminal; never narrower than the footer hint needs.
+    let widest = lines.iter().map(|l| l.width()).max().unwrap_or(60) as u16;
+    let w = (widest + 4).clamp(84.min(area.width), area.width.saturating_sub(2).max(1));
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+
+    let total = merged.as_ref().map(Vec::len).unwrap_or(0);
     f.render_widget(Clear, rect);
     let outer = Block::bordered()
         .padding(Padding::new(1, 1, 0, 0))
@@ -405,7 +438,7 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             Style::new().bold(),
         ))
         .title_bottom(Span::styled(
-            " ↑↓ scroll · [N] names the current network · press L or Esc to close ",
+            " ↑↓ select · Enter renames the selected location · press L or Esc to close ",
             Style::new().fg(Color::DarkGray),
         ))
         .border_style(Style::new().fg(Color::Cyan));
@@ -811,6 +844,12 @@ fn footer(f: &mut Frame, s: &AppState, area: Rect) {
             &s.input_buffer,
             "[Enter] save  [Esc] cancel",
         )
+    } else if s.input_mode == InputMode::RenameLocation {
+        input_line(
+            "rename location (blank clears): ",
+            &s.input_buffer,
+            "[Enter] save  [Esc] cancel",
+        )
     } else if let Some(n) = &s.notice {
         Line::from(Span::styled(
             format!(" {n}"),
@@ -1159,7 +1198,13 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         let t = &s.targets[i];
         let loss = t.loss_pct();
         let st = t.stats(n);
-        let color = latency_color(t.last_rtt_ms, loss);
+        // A mid-path router that never answers ICMP is not a fault — the
+        // analysis already treats it that way — so it reads dim, not red.
+        let color = if t.is_path_hop() && loss >= th::LOSS_DOWN_PCT {
+            Color::DarkGray
+        } else {
+            latency_color(t.last_rtt_ms, loss, crate::verdict::rtt_reference(t, s))
+        };
         let marker = if i == s.graph_target { "►" } else { "" };
         let mut style = Style::new().fg(color);
         if focused && i == s.selected {
@@ -1305,7 +1350,7 @@ fn web_graph(f: &mut Frame, s: &AppState, area: Rect) {
             Style::new().fg(Color::Green),
         ),
         WebStatus::NoService => Span::styled(
-            "no web service (connection refused)".to_string(),
+            "no web check — port 443 refused".to_string(),
             Style::new().fg(Color::DarkGray),
         ),
         WebStatus::Filtered => Span::styled(
@@ -1486,7 +1531,8 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
             };
             let loss = stat.loss_pct();
             let st = stat.stats(n);
-            let mut style = Style::new().fg(latency_color(stat.last_rtt_ms, loss));
+            let mut style =
+                Style::new().fg(latency_color(stat.last_rtt_ms, loss, stat.min_ever_ms));
             if selected {
                 style = style
                     .bg(Color::Rgb(40, 40, 55))
@@ -1570,7 +1616,8 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                     .iter()
                     .zip(data.iter())
                     .map(|(&h, &raw)| {
-                        SparklineBar::from(h).style(Style::new().fg(rtt_color(raw as f64)))
+                        SparklineBar::from(h)
+                            .style(Style::new().fg(rtt_color(raw as f64, stat.min_ever_ms)))
                     })
                     .collect();
                 f.render_widget(
@@ -2217,9 +2264,6 @@ fn top_talkers_view(f: &mut Frame, s: &AppState, area: Rect, view: BwView) {
     if view == BwView::Remotes {
         return top_remotes(f, s, inner);
     }
-    // Only the active table (of the two shown side by side in full screen)
-    // carries the column cursor and sort.
-    let active = s.bw_view == BwView::Processes;
 
     // Session totals lead (that is what the table ranks by); the live rate and
     // health columns follow, and go first when the panel is narrow.
@@ -2227,7 +2271,7 @@ fn top_talkers_view(f: &mut Frame, s: &AppState, area: Rect, view: BwView) {
     const WIDTHS: [u16; 7] = [21, 7, 7, 7, 10, 5, 5];
     let ncols = fitting_columns(&WIDTHS, inner.width);
     let labels = ["name", "total", "↓", "↑", "now", "share", "retx"];
-    let header = talkers_header(s, &labels[..ncols], active);
+    let header = talkers_header(s, &labels[..ncols], BwView::Processes);
 
     // Rows as drawn (the sort, when one is active), scrolled to keep the
     // cursor in view, with a cue beside them when there is more.
@@ -2354,12 +2398,16 @@ fn fmt_now(bps: f64) -> Cell<'static> {
 
 /// Sortable header row for a talkers table: the column under the cursor is
 /// highlighted, the sorted column carries a direction arrow.
-fn talkers_header<'a>(s: &AppState, labels: &[&'a str], active: bool) -> Row<'a> {
-    let focused = active && s.focus == Panel::Bandwidth;
+fn talkers_header<'a>(s: &AppState, labels: &[&'a str], view: BwView) -> Row<'a> {
+    let active = s.bw_view == view;
+    // The column cursor belongs to the table that holds the row cursor —
+    // not while the speed-test history pane has it.
+    let focused = active && s.focus == Panel::Bandwidth && s.sub_pane == SubPane::Primary;
     Row::new(labels.iter().enumerate().map(|(i, l)| {
         let mut txt = (*l).to_string();
-        if let Some((c, desc)) = s.bw_sort
-            && active
+        // The arrow shows whichever sort this table is drawn in — the parked
+        // one too, when the other table is the active one.
+        if let Some((c, desc)) = s.sort_for(view)
             && c == i
         {
             txt.push(if desc { '▼' } else { '▲' });
@@ -2403,8 +2451,7 @@ fn top_remotes(f: &mut Frame, s: &AppState, area: Rect) {
     const WIDTHS: [u16; 7] = [24, 12, 7, 7, 7, 10, 5];
     let ncols = fitting_columns(&WIDTHS, area.width);
     let labels = ["remote", "process", "total", "↓", "↑", "now", "share"];
-    let active = s.bw_view == BwView::Remotes;
-    let header = talkers_header(s, &labels[..ncols], active);
+    let header = talkers_header(s, &labels[..ncols], BwView::Remotes);
 
     let order = s.remote_order();
     let cursor_on = s.selected_remote().is_some();
@@ -3718,13 +3765,14 @@ fn fmt_bytes(n: u64) -> String {
     }
 }
 
-/// Colour a single round-trip sample. Unlike [`latency_color`] this judges one
+/// Colour a single round-trip sample against the path's reference floor (see
+/// [`crate::verdict::rtt_grade`]). Unlike [`latency_color`] this judges one
 /// measurement in isolation, so a trace can show what each moment looked like.
-fn rtt_color(ms: f64) -> Color {
-    match ms {
-        v if v < th::RTT_WARN_MS => Color::Green,
-        v if v < th::RTT_BAD_MS => Color::Yellow,
-        _ => Color::Red,
+fn rtt_color(ms: f64, reference_ms: Option<f64>) -> Color {
+    match crate::verdict::rtt_grade(ms, reference_ms) {
+        crate::verdict::RttGrade::Good => Color::Green,
+        crate::verdict::RttGrade::Warn => Color::Yellow,
+        crate::verdict::RttGrade::Bad => Color::Red,
     }
 }
 
@@ -3735,7 +3783,9 @@ const SERIES_COLOR: Color = Color::Cyan;
 const P95_COLOR: Color = Color::Magenta;
 const JITTER_COLOR: Color = Color::LightBlue;
 
-fn latency_color(last: Option<f64>, loss: f64) -> Color {
+/// A target row's colour: loss first (absolute — packets have no "normal"),
+/// then the latest round trip against the path's own reference floor.
+fn latency_color(last: Option<f64>, loss: f64, reference_ms: Option<f64>) -> Color {
     if loss >= th::LOSS_BAD_PCT || last.is_none() {
         return Color::Red;
     }
@@ -3743,7 +3793,7 @@ fn latency_color(last: Option<f64>, loss: f64) -> Color {
         return Color::Yellow;
     }
     match last {
-        Some(ms) => rtt_color(ms),
+        Some(ms) => rtt_color(ms, reference_ms),
         None => Color::Red,
     }
 }
@@ -4509,8 +4559,13 @@ mod tests {
         // The spike still tops out, and colour comes from the raw value so a
         // floored-up sample is not miscoloured as slow.
         assert_eq!(heights.iter().copied().max().unwrap(), 240);
-        assert_eq!(rtt_color(14.0), Color::Green);
-        assert_eq!(rtt_color(240.0), Color::Red);
+        assert_eq!(rtt_color(14.0, None), Color::Green);
+        assert_eq!(rtt_color(240.0, None), Color::Red);
+        // Against a 160 ms floor (a VPN exit on another continent) the same
+        // 240 ms is within normal, and 600 ms is the problem.
+        assert_eq!(rtt_color(240.0, Some(160.0)), Color::Green);
+        assert_eq!(rtt_color(400.0, Some(160.0)), Color::Yellow);
+        assert_eq!(rtt_color(600.0, Some(160.0)), Color::Red);
     }
 
     /// A long target list must stay navigable when the path monitor squeezes it.

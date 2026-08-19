@@ -1477,6 +1477,8 @@ pub enum InputMode {
     AddTarget,
     /// Typing a name for the current network ("Home", "Office").
     NameNetwork,
+    /// Typing a name for the location selected in the [L] overlay.
+    RenameLocation,
 }
 
 /// Which full-screen overlay is up, if any. One at a time; the order here is
@@ -1698,6 +1700,8 @@ pub struct AppState {
     /// Stored locations for the [L] overlay: (fingerprint key, baseline),
     /// loaded from disk when the overlay opens. `None` = still loading.
     pub locations: Option<Vec<(String, crate::baseline::Baseline)>>,
+    /// (key, auto label) of the location being renamed from the overlay.
+    pub rename_target: Option<(String, String)>,
     /// Scroll offset into the locations list.
     pub locations_sel: usize,
     /// Session timeline of state transitions (oldest → newest), capped.
@@ -1868,6 +1872,7 @@ impl AppState {
             baseline_key: None,
             explainer_pending: false,
             locations: None,
+            rename_target: None,
             locations_sel: 0,
             events: VecDeque::new(),
             events_total: 0,
@@ -2022,6 +2027,22 @@ impl AppState {
         });
     }
 
+    /// The locations as the overlay lists them: what was on disk when it
+    /// opened, plus the network we are on *now* if it isn't there yet — a
+    /// baseline is only written after its first healthy minute, and the
+    /// overlay may be open across a network change. The live one goes first.
+    /// The cursor and rename use the same list, so indices agree.
+    pub fn locations_view(&self) -> Option<Vec<(String, crate::baseline::Baseline)>> {
+        let all = self.locations.as_ref()?;
+        let mut v = all.clone();
+        if let (Some(key), Some(b)) = (&self.baseline_key, &self.baseline)
+            && !v.iter().any(|(k, _)| k == key)
+        {
+            v.insert(0, (key.clone(), b.clone()));
+        }
+        Some(v)
+    }
+
     /// This network's incident summary over the standard window, when the
     /// network is known.
     pub fn history_summary(&self) -> Option<crate::history::Summary> {
@@ -2085,12 +2106,23 @@ impl AppState {
             && self.sub_pane == SubPane::Primary
     }
 
+    /// The sort that applies to `view`: the live one when it is the shown
+    /// table, the parked one otherwise — so when both tables are drawn side
+    /// by side, each keeps the order it was given.
+    pub fn sort_for(&self, view: BwView) -> Option<(usize, bool)> {
+        if self.bw_view == view {
+            self.bw_sort
+        } else {
+            self.bw_sort_other
+        }
+    }
+
     /// Indices into `processes` in display order: the collector's ranking by
     /// session total unless a column sort is active. Shared by the renderer
     /// and the cursor, so ↑/↓ walk the rows as drawn.
     pub fn process_order(&self) -> Vec<usize> {
         let mut order: Vec<usize> = (0..self.processes.len()).collect();
-        let Some((col, desc)) = self.bw_sort.filter(|_| self.bw_view == BwView::Processes) else {
+        let Some((col, desc)) = self.sort_for(BwView::Processes) else {
             return order;
         };
         order.sort_by(|&i, &j| {
@@ -2112,7 +2144,7 @@ impl AppState {
     /// Indices into `remotes` in display order; see [`Self::process_order`].
     pub fn remote_order(&self) -> Vec<usize> {
         let mut order: Vec<usize> = (0..self.remotes.len()).collect();
-        let Some((col, desc)) = self.bw_sort.filter(|_| self.bw_view == BwView::Remotes) else {
+        let Some((col, desc)) = self.sort_for(BwView::Remotes) else {
             return order;
         };
         order.sort_by(|&i, &j| {
