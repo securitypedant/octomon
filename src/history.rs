@@ -154,7 +154,7 @@ impl Summary {
         if self.episodes == 0 {
             return format!("{}d: no connectivity incidents recorded", self.days);
         }
-        let mut parts = vec![format!("{}d:", self.days)];
+        let mut parts: Vec<String> = Vec::new();
         if self.outages > 0 {
             parts.push(format!(
                 "{} outage{} · {} down",
@@ -183,7 +183,7 @@ impl Summary {
         if let Some((cause, n)) = self.by_cause.first() {
             parts.push(format!("mostly {cause} ({n})"));
         }
-        parts.join(" · ")
+        format!("{}d: {}", self.days, parts.join(" · "))
     }
 }
 

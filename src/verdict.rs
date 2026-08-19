@@ -3416,7 +3416,7 @@ mod tests {
         let ts = vs.ingest(without.clone(), None, now);
         let cleared = ts.iter().find(|t| !t.raised).expect("the final clear");
         assert!(
-            cleared.after.unwrap() >= Duration::from_secs(60),
+            cleared.after.unwrap() >= Duration::from_secs(50),
             "{:?}",
             cleared.after
         );

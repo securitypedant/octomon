@@ -1030,7 +1030,10 @@ fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         }
     }
 
-    let w = 78u16.min(area.width);
+    // As wide as the content wants, up to nearly the terminal: a finding's
+    // headline with its duration should not wrap when there is room.
+    let widest = lines.iter().map(|l| l.width()).max().unwrap_or(60) as u16;
+    let w = (widest + 4).clamp(78.min(area.width), area.width.saturating_sub(2).max(1));
     // Border + 1-column padding each side.
     let text_w = w.saturating_sub(4).max(1) as usize;
     let wrapped: usize = lines
