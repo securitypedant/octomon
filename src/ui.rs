@@ -221,10 +221,11 @@ fn whois_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             Style::new().fg(Color::DarkGray),
         )));
     } else if let Some(e) = &w.error {
-        lines.push(Line::from(Span::styled(
-            format!("lookup failed — {e}"),
-            Style::new().fg(Color::Red),
-        )));
+        // Wrapped: the reason is the useful part and it can be long.
+        let text_w = (width as usize).saturating_sub(4).max(20);
+        for chunk in wrap_words(&format!("lookup failed — {e}"), text_w) {
+            lines.push(Line::from(Span::styled(chunk, Style::new().fg(Color::Red))));
+        }
     } else if !w.fields.is_empty() {
         // Wrap long values (remarks, ranges) under the key column rather than
         // letting the paragraph wrap them back to column zero.

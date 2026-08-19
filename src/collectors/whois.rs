@@ -57,9 +57,21 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr) {
         });
     }
 
+    // Through the system's fixed proxy when there is one — on a network that
+    // requires it, that is the only way out, and a browser on the same
+    // machine would use it.
+    let proxy = state
+        .lock()
+        .unwrap()
+        .proxy
+        .as_ref()
+        .and_then(|p| p.https_url());
     tokio::spawn(async move {
         // Registration and routing are independent lookups; ask both at once.
-        let (reg, asn) = tokio::join!(rdap(addr), ripestat_asn(addr));
+        let (reg, asn) = tokio::join!(
+            rdap(addr, proxy.as_deref()),
+            ripestat_asn(addr, proxy.as_deref())
+        );
         let outcome = match reg {
             Ok((fields, source)) => Ok((fields, Vec::new(), source)),
             Err(rdap_err) => match system_whois(addr).await {
@@ -95,19 +107,15 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr) {
 
 /// The announcing ASN for `addr` from RIPEstat: `asn` and `prefix` rows, or
 /// nothing when the address is not announced.
-async fn ripestat_asn(addr: IpAddr) -> Result<Vec<(String, String)>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(TIMEOUT)
-        .user_agent(concat!("octomon/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| e.to_string())?;
+async fn ripestat_asn(addr: IpAddr, proxy: Option<&str>) -> Result<Vec<(String, String)>, String> {
+    let client = client(proxy)?;
     let resp = client
         .get(format!("{RIPESTAT_URL}{addr}"))
         .send()
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| crate::util::describe_error(&e))?
         .error_for_status()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::util::describe_error(&e))?;
     let body = crate::util::read_capped(resp, MAX_BODY).await?;
     let json: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     Ok(fields_from_ripestat(&json))
@@ -159,25 +167,39 @@ pub fn fields_from_ripestat(json: &Value) -> Vec<(String, String)> {
 }
 
 /// RDAP lookup: the structured fields and the registry that answered.
-async fn rdap(addr: IpAddr) -> Result<(Vec<(String, String)>, String), String> {
-    let client = reqwest::Client::builder()
-        .timeout(TIMEOUT)
-        .user_agent(concat!("octomon/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| e.to_string())?;
+async fn rdap(
+    addr: IpAddr,
+    proxy: Option<&str>,
+) -> Result<(Vec<(String, String)>, String), String> {
+    let client = client(proxy)?;
     let url = format!("{RDAP_URL}{addr}");
     let resp = client
         .get(&url)
         .header("accept", "application/rdap+json, application/json")
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::util::describe_error(&e))?;
     // The registry that finally answered, after rdap.org's redirect.
     let source = resp.url().host_str().unwrap_or("rdap.org").to_string();
-    let resp = resp.error_for_status().map_err(|e| e.to_string())?;
+    let resp = resp
+        .error_for_status()
+        .map_err(|e| crate::util::describe_error(&e))?;
     let body = crate::util::read_capped(resp, MAX_BODY).await?;
     let json: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     Ok((fields_from_rdap(&json), source))
+}
+
+/// The HTTP client for the registry lookups: direct, or via the system's
+/// fixed proxy when one is configured.
+fn client(proxy: Option<&str>) -> Result<reqwest::Client, String> {
+    let mut b = reqwest::Client::builder()
+        .timeout(TIMEOUT)
+        .user_agent(concat!("octomon/", env!("CARGO_PKG_VERSION")));
+    b = match proxy {
+        Some(url) => b.proxy(reqwest::Proxy::all(url).map_err(|e| e.to_string())?),
+        None => b.no_proxy(),
+    };
+    b.build().map_err(|e| e.to_string())
 }
 
 /// Pull the fields a person actually reads out of an RDAP IP-network object.
@@ -423,13 +445,13 @@ mod tests {
     async fn live_rdap() {
         for a in ["75.101.33.185", "1.1.1.1", "2606:4700:4700::1111"] {
             let addr: IpAddr = a.parse().unwrap();
-            let (fields, source) = rdap(addr).await.expect("rdap answers");
+            let (fields, source) = rdap(addr, None).await.expect("rdap answers");
             println!("{addr} via {source}");
             for (k, v) in &fields {
                 println!("  {k:<12}{v}");
             }
             assert!(!fields.is_empty(), "{addr}: no fields");
-            let asn = ripestat_asn(addr).await.expect("ripestat answers");
+            let asn = ripestat_asn(addr, None).await.expect("ripestat answers");
             for (k, v) in &asn {
                 println!("  {k:<12}{v}");
             }
