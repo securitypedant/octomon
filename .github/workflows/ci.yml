@@ -24,17 +24,28 @@ jobs:
         # is the one an ARM64 VM (UTM on Apple silicon, Raspberry Pi) can run.
         # `artifact` names the uploaded binary by architecture and OS, which is
         # what a tester picking one from the run page needs to know.
+        # Linux binaries are built for the musl target, statically linked, as
+        # the release is: a glibc build from this runner would refuse to start
+        # on any distribution with an older glibc (RHEL 8, Ubuntu 20.04…).
+        # Tests still run against the native toolchain.
         include:
           - os: macos-latest
             artifact: octomon-arm64-macos
+            bin: target/release/octomon
           - os: ubuntu-latest
             artifact: octomon-x86-linux
+            target: x86_64-unknown-linux-musl
+            bin: target/x86_64-unknown-linux-musl/release/octomon
           - os: ubuntu-24.04-arm
             artifact: octomon-arm64-linux
+            target: aarch64-unknown-linux-musl
+            bin: target/aarch64-unknown-linux-musl/release/octomon
           - os: windows-latest
             artifact: octomon-x64-windows
+            bin: target/release/octomon.exe
           - os: windows-11-arm
             artifact: octomon-arm64-windows
+            bin: target/release/octomon.exe
     steps:
       - uses: actions/checkout@v4
 
@@ -50,6 +61,13 @@ jobs:
         if: matrix.os == 'windows-11-arm'
         run: choco install llvm --no-progress -y
 
+      # The static Linux build: the musl target plus musl-gcc for ring's C.
+      - name: Install musl target (Linux)
+        if: matrix.target != ''
+        run: |
+          rustup target add ${{ matrix.target }}
+          sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+
       # Formatting is platform-independent; checking it four times would only
       # multiply the noise when it fails.
       - name: Format
@@ -60,7 +78,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
 
       - name: Test
         run: cargo test
@@ -74,10 +92,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          # Whichever of the two exists on this runner (.exe on Windows).
-          path: |
-            target/release/octomon
-            target/release/octomon.exe
+          path: ${{ matrix.bin }}
           retention-days: 14
           if-no-files-found: error
 
