@@ -18,6 +18,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>) {
     // Tracked here rather than in state: a network change clears the state's
     // wifi details, and it's exactly across such changes that "which SSID did
     // we land on" is worth an event.
+    let mut last_channel: Option<String> = None;
     let mut last_ssid: Option<String> = None;
 
     let mut ticker = tokio::time::interval(Duration::from_secs(60));
@@ -40,13 +41,59 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>) {
                 if let Some(prev) = last_ssid.as_deref()
                     && prev != w.ssid
                 {
+                    let message = format!("Wi-Fi network → {}", w.ssid);
                     s.push_event(
                         crate::verdict::Severity::Info,
                         crate::app::EventCategory::Wifi,
-                        format!("Wi-Fi network → {}", w.ssid),
+                        message.clone(),
+                    );
+                    let detail = vec![
+                        format!("before: {prev}"),
+                        format!(
+                            "after:  {} · {} · ch {} · signal {} · tx {}",
+                            w.ssid, w.phy, w.channel, w.rssi, w.tx_rate
+                        ),
+                    ];
+                    let iface = s.netinfo.iface.clone();
+                    s.push_net_change(
+                        crate::app::NetChangeKind::WifiJoined,
+                        iface,
+                        message,
+                        detail,
+                    );
+                }
+                // Same network, different channel: the radio moved to another
+                // access point (or the AP changed channel) — a roam.
+                if let (Some(prev_ch), Some(prev_ssid)) =
+                    (last_channel.as_deref(), last_ssid.as_deref())
+                    && prev_ssid == w.ssid
+                    && prev_ch != w.channel
+                    && !w.channel.is_empty()
+                {
+                    let message =
+                        format!("Wi-Fi roamed — {} ch {} → {}", w.ssid, prev_ch, w.channel);
+                    s.push_event(
+                        crate::verdict::Severity::Info,
+                        crate::app::EventCategory::Wifi,
+                        message.clone(),
+                    );
+                    let detail = vec![
+                        format!("before: ch {prev_ch}"),
+                        format!(
+                            "after:  ch {} · {} · signal {} · tx {}",
+                            w.channel, w.phy, w.rssi, w.tx_rate
+                        ),
+                    ];
+                    let iface = s.netinfo.iface.clone();
+                    s.push_net_change(
+                        crate::app::NetChangeKind::WifiRoamed,
+                        iface,
+                        message,
+                        detail,
                     );
                 }
                 last_ssid = Some(w.ssid.clone());
+                last_channel = Some(w.channel.clone());
             }
             s.netinfo.wifi = Some(w);
         }

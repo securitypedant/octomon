@@ -8,6 +8,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# A newer push to the same branch supersedes a run still in flight.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     name: fmt · clippy · build · test (${{ matrix.os }})
@@ -20,7 +25,32 @@ jobs:
         # Every platform with target-specific code gets built and tested. Before
         # this, only macOS ran, so the Linux parser tests in src/platform/mod.rs
         # were compiled and executed nowhere.
-        os: [macos-latest, ubuntu-latest, windows-latest, windows-11-arm]
+        # ubuntu-24.04-arm is the aarch64 Linux runner: the binary it uploads
+        # is the one an ARM64 VM (UTM on Apple silicon, Raspberry Pi) can run.
+        # `artifact` names the uploaded binary by architecture and OS, which is
+        # what a tester picking one from the run page needs to know.
+        # Linux binaries are built for the musl target, statically linked, as
+        # the release is: a glibc build from this runner would refuse to start
+        # on any distribution with an older glibc (RHEL 8, Ubuntu 20.04…).
+        # Tests still run against the native toolchain.
+        include:
+          - os: macos-latest
+            artifact: octomon-arm64-macos
+            bin: target/release/octomon
+          - os: ubuntu-latest
+            artifact: octomon-x86-linux
+            target: x86_64-unknown-linux-musl
+            bin: target/x86_64-unknown-linux-musl/release/octomon
+          - os: ubuntu-24.04-arm
+            artifact: octomon-arm64-linux
+            target: aarch64-unknown-linux-musl
+            bin: target/aarch64-unknown-linux-musl/release/octomon
+          - os: windows-latest
+            artifact: octomon-x64-windows
+            bin: target/release/octomon.exe
+          - os: windows-11-arm
+            artifact: octomon-arm64-windows
+            bin: target/release/octomon.exe
     steps:
       - uses: actions/checkout@v4
 
@@ -36,6 +66,20 @@ jobs:
         if: matrix.os == 'windows-11-arm'
         run: choco install llvm --no-progress -y
 
+      # The static Linux build: the musl target plus musl-gcc for ring's C.
+      # apt on a fresh ubuntu-latest image can sit behind the dpkg lock held
+      # by the boot-time unattended-upgrades run — silently, for the whole
+      # job — so that is stopped first, the lock is given a bounded wait, and
+      # the step as a whole cannot hang the matrix.
+      - name: Install musl target (Linux)
+        if: matrix.target != ''
+        timeout-minutes: 8
+        run: |
+          rustup target add ${{ matrix.target }}
+          sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+          install() { sudo apt-get -o DPkg::Lock::Timeout=240 install -y -q --no-install-recommends musl-tools; }
+          install || (sudo apt-get -o DPkg::Lock::Timeout=240 update -q && install)
+
       # Formatting is platform-independent; checking it four times would only
       # multiply the noise when it fails.
       - name: Format
@@ -46,7 +90,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
 
       - name: Test
         run: cargo test
@@ -59,11 +103,8 @@ jobs:
       - name: Upload binary for manual testing
         uses: actions/upload-artifact@v7
         with:
-          name: octomon-${{ matrix.os }}
-          # Whichever of the two exists on this runner (.exe on Windows).
-          path: |
-            target/release/octomon
-            target/release/octomon.exe
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.bin }}
           retention-days: 14
           if-no-files-found: error
 

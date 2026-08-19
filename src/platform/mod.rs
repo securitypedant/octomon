@@ -39,6 +39,8 @@ pub struct ProcSample {
 /// tools print: `1.2.3.4:443`, `[2606:4700::1111]:443` (ss), `::1.8021` (nettop
 /// separates a v6 port with a dot, since colons are taken), and a `%scope`
 /// suffix on link-local addresses. `None` for the wildcard `*` forms.
+// Used by the macOS (nettop) and Linux (ss) parsers; Windows reads ETW.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn parse_endpoint(text: &str) -> Option<(std::net::IpAddr, u16)> {
     let text = text.trim();
     if text.is_empty() || text.starts_with('*') {
@@ -61,6 +63,8 @@ pub fn parse_endpoint(text: &str) -> Option<(std::net::IpAddr, u16)> {
 /// Stable identity for a per-socket row that has no inode to key on: the pid,
 /// the row's own text and its position among identical rows (a process can
 /// hold several unbound `*:*` sockets that print the same).
+// nettop rows have no inode to key on; ss and ETW do.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn socket_key(pid: u32, row: &str, nth: usize) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -843,8 +847,11 @@ mod linux {
     /// would be wrong: `ss` lists only open sockets, so a process total falls
     /// when a connection closes, and the drop cancels out real traffic.
     fn parse_ss(text: &str) -> Vec<ProcSample> {
+        /// (pid, process name, inode, remote endpoint) of the socket line
+        /// whose `skmem`/counters line is expected next.
+        type Pending = (u32, String, u64, Option<(std::net::IpAddr, u16)>);
         let mut out: Vec<ProcSample> = Vec::new();
-        let mut current: Option<(u32, String, u64, Option<(std::net::IpAddr, u16)>)> = None;
+        let mut current: Option<Pending> = None;
 
         for line in text.lines() {
             let trimmed = line.trim();

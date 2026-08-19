@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::AsyncWriteExt;
 
-use crate::app::{AppState, LogStatus};
+use crate::app::{AppState, EventItem, LogStatus};
 use crate::config::Config;
 
 const HEADER: &str = "timestamp,category,subject,metric,value,unit\n";
@@ -301,6 +301,41 @@ fn format_events(s: &AppState, stamp: &str, seen: &mut u64) -> String {
     out
 }
 
+/// The event timeline as its own CSV, for the [x] export in the events
+/// overlay: one row per event, oldest first, so it reads top-to-bottom like a
+/// log. Timestamps are local RFC 3339, matching the session recording, so the
+/// two files line up if both are opened.
+pub fn format_events_export(events: impl IntoIterator<Item = EventItem>) -> String {
+    use chrono::{Local, TimeZone};
+    let mut out = String::from("timestamp,category,severity,message\n");
+    for e in events {
+        let stamp = Local
+            .timestamp_opt(e.at, 0)
+            .single()
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "{stamp},{},{},{}",
+            e.category.label(),
+            e.severity.label(),
+            field(&e.message)
+        );
+    }
+    out
+}
+
+/// Write the timeline to a fresh file in the config folder and return its
+/// path. Blocking; run it off the UI path.
+pub fn export_events(events: Vec<EventItem>) -> Result<std::path::PathBuf, String> {
+    let path = crate::config::Config::events_export_path().ok_or("no config directory")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, format_events_export(events)).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 /// Quote a CSV field when it contains anything that would break parsing.
 /// Target labels and process names are user- and system-supplied.
 fn field(v: &str) -> String {
@@ -379,6 +414,30 @@ mod tests {
         let out = format_events(&s, "T", &mut seen);
         assert_eq!(out.lines().count(), 1);
         assert!(out.contains("network,info,VPN down"));
+    }
+
+    /// The [x] export: header, oldest first, message quoted when it needs it.
+    #[test]
+    fn events_export_is_a_standalone_csv_oldest_first() {
+        let ev = |at: i64, msg: &str| EventItem {
+            at,
+            severity: crate::verdict::Severity::Info,
+            category: crate::app::EventCategory::Network,
+            message: msg.into(),
+        };
+        let out = format_events_export(vec![
+            ev(1_700_000_000, "VPN down"),
+            ev(1_700_000_060, "network changed → en7, gateway 10.0.0.1"),
+        ]);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "timestamp,category,severity,message");
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].ends_with(",network,info,VPN down"));
+        // The comma in the message is quoted, so a reader sees four columns.
+        assert!(lines[2].ends_with(",network,info,\"network changed → en7, gateway 10.0.0.1\""));
+        // Timestamps are RFC 3339 with an offset, like the session recording.
+        assert!(lines[1].starts_with("2023-11-14T"));
+        assert!(lines[1].split(',').next().unwrap().len() >= 25);
     }
 
     /// A label containing a comma must not shift every later column.

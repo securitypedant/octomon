@@ -204,6 +204,23 @@ impl TargetStat {
         self.discovered && self.label.starts_with("hop ")
     }
 
+    /// The hop's distance for a discovered path hop ("hop 3→1.1.1.1" → 3);
+    /// 1 for the discovered gateway; `None` for anything else.
+    pub fn hop_ttl(&self) -> Option<u8> {
+        if !self.discovered {
+            return None;
+        }
+        if self.label == "gateway" {
+            return Some(1);
+        }
+        self.label
+            .strip_prefix("hop ")?
+            .split(['→', ' '])
+            .next()?
+            .parse()
+            .ok()
+    }
+
     /// Packet loss over the sliding window, as a percentage.
     pub fn loss_pct(&self) -> f64 {
         if self.window.is_empty() {
@@ -672,6 +689,12 @@ pub struct NetInfo {
     pub medium: LinkMedium,
     /// Negotiated link speed in bits/sec, when the OS reports it.
     pub link_speed_bps: Option<u64>,
+    /// The interface MTU, when the OS reports it — what the path-MTU probe
+    /// compares against.
+    pub mtu: Option<u32>,
+    /// The IPv6 default gateway, when there is one; empty otherwise. Kept apart
+    /// from `gateway_ip` (v4 first) so v6 reachability can be judged on its own.
+    pub gateway_ipv6: String,
     /// Set when internet traffic leaves through a tunnel device. Carries the
     /// VPN's name when it can be identified (e.g. "Cloudflare WARP"), else empty.
     pub tunnel: Option<String>,
@@ -700,6 +723,56 @@ impl NetInfo {
         )
     }
 
+    /// Whether `addr` sits on this machine's own LAN — inside one of the
+    /// interface's own subnets, or a loopback / link-local address. Such a
+    /// target says nothing about the internet and is judged separately.
+    pub fn is_lan_addr(&self, addr: IpAddr) -> bool {
+        match addr {
+            IpAddr::V4(a) => {
+                if a.is_loopback() || a.is_link_local() {
+                    return true;
+                }
+                self.ipv4.iter().any(|cidr| {
+                    let (ip, len) = match cidr.split_once('/') {
+                        Some((ip, len)) => (ip, len.parse::<u32>().unwrap_or(32)),
+                        // A bare address: assume the conventional /24.
+                        None => (cidr.as_str(), 24),
+                    };
+                    let Ok(own) = ip.parse::<std::net::Ipv4Addr>() else {
+                        return false;
+                    };
+                    let mask = if len == 0 {
+                        0
+                    } else {
+                        u32::MAX << (32 - len.min(32))
+                    };
+                    (u32::from(own) & mask) == (u32::from(a) & mask)
+                })
+            }
+            IpAddr::V6(a) => {
+                if a.is_loopback() || (a.segments()[0] & 0xffc0) == 0xfe80 {
+                    return true;
+                }
+                self.ipv6.iter().any(|cidr| {
+                    let (ip, len) = match cidr.split_once('/') {
+                        Some((ip, len)) => (ip, len.parse::<u32>().unwrap_or(64)),
+                        None => (cidr.as_str(), 64),
+                    };
+                    let Ok(own) = ip.parse::<std::net::Ipv6Addr>() else {
+                        return false;
+                    };
+                    let len = len.min(128);
+                    let mask = if len == 0 {
+                        0
+                    } else {
+                        u128::MAX << (128 - len)
+                    };
+                    (u128::from(own) & mask) == (u128::from(a) & mask)
+                })
+            }
+        }
+    }
+
     /// Tunnel description for display: the vendor when known, else generic.
     pub fn tunnel_label(&self) -> Option<String> {
         self.tunnel.as_ref().map(|v| {
@@ -719,11 +792,28 @@ pub struct DnsProbe {
     /// Round-trip of the most recent query, or `None` if it failed.
     pub last_ms: Option<f64>,
     pub hist: History,
+    /// Cumulative counters for the session, for "ok/sent" style display.
     pub sent: u64,
     pub ok: u64,
+    /// The last few outcomes (answered or not), newest last — what the
+    /// analysis judges on, so a resolver that died a minute ago reads as
+    /// failing now and one that recovered stops.
+    pub window: VecDeque<bool>,
+    /// Round trips of the answered queries in that same recent window.
+    pub recent: VecDeque<f64>,
     /// Why the last query failed ("SERVFAIL", "timeout"), else empty.
     pub status: String,
+    /// True for the configured public reference resolver, probed alongside
+    /// the system ones for contrast — not one of this network's resolvers.
+    pub reference: bool,
+    /// The hijack check's latest verdict: `Some(true)` when the resolver
+    /// answered a name that cannot exist with an address.
+    pub hijack: Option<bool>,
 }
+
+/// Outcomes kept per resolver for the recent judgement: at the default 5 s
+/// probe interval, one minute.
+pub const DNS_RECENT: usize = 12;
 
 impl DnsProbe {
     pub fn new(server: IpAddr) -> Self {
@@ -733,8 +823,43 @@ impl DnsProbe {
             hist: History::new(300),
             sent: 0,
             ok: 0,
+            window: VecDeque::with_capacity(DNS_RECENT),
+            recent: VecDeque::with_capacity(DNS_RECENT),
             status: String::new(),
+            reference: false,
+            hijack: None,
         }
+    }
+
+    /// Record one query's outcome.
+    pub fn record(&mut self, rtt_ms: Option<f64>) {
+        self.sent += 1;
+        if self.window.len() == DNS_RECENT {
+            self.window.pop_front();
+        }
+        self.window.push_back(rtt_ms.is_some());
+        if let Some(ms) = rtt_ms {
+            self.ok += 1;
+            self.hist.push(ms);
+            if self.recent.len() == DNS_RECENT {
+                self.recent.pop_front();
+            }
+            self.recent.push_back(ms);
+        }
+        self.last_ms = rtt_ms;
+    }
+
+    /// How many recent outcomes there are to judge on.
+    pub fn recent_len(&self) -> usize {
+        self.window.len()
+    }
+
+    /// Mean round trip over the recent window only.
+    pub fn recent_mean_ms(&self) -> Option<f64> {
+        if self.recent.is_empty() {
+            return None;
+        }
+        Some(self.recent.iter().sum::<f64>() / self.recent.len() as f64)
     }
 
     /// Mean round trip over the retained history.
@@ -745,12 +870,13 @@ impl DnsProbe {
         Some(self.hist.data.iter().sum::<f64>() / self.hist.data.len() as f64)
     }
 
-    /// Share of queries that went unanswered, as a percentage.
+    /// Share of *recent* queries that went unanswered, as a percentage.
     pub fn fail_pct(&self) -> f64 {
-        if self.sent == 0 {
+        if self.window.is_empty() {
             return 0.0;
         }
-        (self.sent - self.ok) as f64 / self.sent as f64 * 100.0
+        let failed = self.window.iter().filter(|ok| !**ok).count();
+        failed as f64 / self.window.len() as f64 * 100.0
     }
 }
 
@@ -781,10 +907,196 @@ pub struct HttpState {
     pub v6: FamilyProbe,
     /// Set when the second-opinion endpoint had to arbitrate.
     pub note: Option<String>,
+    /// The same check made *through* the configured manual proxy, when there
+    /// is one — what a browser would experience. `NotRun` otherwise.
+    pub via_proxy: FamilyProbe,
     /// Round-trip history per family (successful probes only), for the web
     /// graph in the Connection Quality panel.
     pub v4_hist: History,
     pub v6_hist: History,
+}
+
+/// A system-level web proxy configuration. See [`crate::collectors::proxy`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProxyConfig {
+    pub kind: ProxyKind,
+    /// Where it was read from ("System Settings", "environment").
+    pub source: String,
+    /// Hosts that bypass it, as the OS lists them.
+    pub bypass: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProxyKind {
+    /// Fixed proxies, as `host:port` (or a `socks5://` URL).
+    Manual { http: String, https: String },
+    /// A PAC script at this URL decides per request — not evaluable here.
+    Pac(String),
+    /// Auto-discovery (WPAD): the network names its own proxy via DHCP/DNS.
+    /// (Only the macOS and GNOME readers can report it.)
+    #[cfg_attr(windows, allow(dead_code))]
+    Wpad,
+}
+
+impl ProxyConfig {
+    /// One line for the panel: "proxy.corp:8080 (System Settings)".
+    pub fn describe(&self) -> String {
+        match &self.kind {
+            ProxyKind::Manual { http, https } if http == https => {
+                format!("{http} ({})", self.source)
+            }
+            ProxyKind::Manual { http, https } => {
+                format!("http {http} · https {https} ({})", self.source)
+            }
+            ProxyKind::Pac(url) => format!("PAC {url} ({})", self.source),
+            ProxyKind::Wpad => format!("auto-discovery / WPAD ({})", self.source),
+        }
+    }
+
+    /// The URL to hand reqwest for the HTTPS path, when the proxy is fixed.
+    pub fn https_url(&self) -> Option<String> {
+        match &self.kind {
+            ProxyKind::Manual { https, .. } if !https.is_empty() => {
+                Some(if https.contains("://") {
+                    https.clone()
+                } else {
+                    format!("http://{https}")
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// One entry in the interface / network history: something about how this
+/// machine is attached changed. The events overlay has the one-line version;
+/// this keeps the before/after detail so "what was the signal when it roamed"
+/// or "which address did we have on the old network" is answerable later.
+#[derive(Clone, Debug)]
+pub struct NetChange {
+    /// Unix timestamp (seconds).
+    pub at: i64,
+    pub kind: NetChangeKind,
+    /// The interface concerned ("en0", "wlan0", "utun4").
+    pub iface: String,
+    /// One line, as shown in the list.
+    pub summary: String,
+    /// The detail pane: before/after facts, one per line.
+    pub detail: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NetChangeKind {
+    /// An interface appeared / vanished.
+    IfaceUp,
+    IfaceDown,
+    /// The default route moved to a different network or interface.
+    NetworkChanged,
+    /// Default route lost / regained.
+    LinkLost,
+    LinkRestored,
+    /// Associated to a different SSID.
+    WifiJoined,
+    /// Same SSID, different access point.
+    WifiRoamed,
+    /// Addresses / gateway / DNS changed without the network identity moving
+    /// (a DHCP renewal handing out something new, a resolver push).
+    AddressChanged,
+    VpnUp,
+    VpnDown,
+}
+
+impl NetChangeKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            NetChangeKind::IfaceUp => "iface up",
+            NetChangeKind::IfaceDown => "iface down",
+            NetChangeKind::NetworkChanged => "network",
+            NetChangeKind::LinkLost => "link lost",
+            NetChangeKind::LinkRestored => "link back",
+            NetChangeKind::WifiJoined => "wifi join",
+            NetChangeKind::WifiRoamed => "wifi roam",
+            NetChangeKind::AddressChanged => "address",
+            NetChangeKind::VpnUp => "vpn up",
+            NetChangeKind::VpnDown => "vpn down",
+        }
+    }
+}
+
+/// Bounded history length.
+pub const NET_HISTORY_CAP: usize = 200;
+
+/// What the path-MTU probe found. See [`crate::collectors::pmtu`].
+#[derive(Clone, Debug)]
+pub struct PmtuResult {
+    pub target: IpAddr,
+    pub iface_mtu: Option<u32>,
+    /// Largest packet answered with DF set; `None` when not even the floor was.
+    pub path_mtu: Option<u32>,
+    /// A full-size probe vanished twice with nothing telling the kernel why:
+    /// fragmentation-needed messages are not getting back.
+    pub blackhole: bool,
+    /// The kernel learned a smaller MTU from an ICMP message — discovery works.
+    pub pmtud_works: bool,
+}
+
+/// Whether the system clock agrees with the world. See
+/// [`crate::collectors::clock`].
+#[derive(Clone, Default)]
+pub struct ClockState {
+    /// Signed offset from an SNTP exchange, ms; positive = local clock ahead.
+    pub ntp_offset_ms: Option<f64>,
+    /// Why the last NTP exchange failed (UDP 123 filtered, typically).
+    pub ntp_error: Option<String>,
+    /// The last few coarse (±1 s) offsets from the `Date` header of the HTTP
+    /// reachability probe — the fallback when NTP is blocked. Kept as a short
+    /// series so one odd answer (a proxy or portal with its own idea of the
+    /// time, an interception during a network change) is never believed on
+    /// its own: readings must agree with each other.
+    pub http_offsets: VecDeque<f64>,
+    /// True once any check has run, so "unknown" can be told from "fine".
+    pub checked: bool,
+}
+
+/// How many HTTP `Date` readings are kept, and how closely they must agree.
+pub const HTTP_SKEW_KEEP: usize = 3;
+pub const HTTP_SKEW_AGREE_MS: f64 = 5_000.0;
+
+impl ClockState {
+    /// The best available offset: NTP when it answered, else the HTTP reading.
+    pub fn offset_ms(&self) -> Option<f64> {
+        self.ntp_offset_ms.or_else(|| self.http_offset_ms())
+    }
+
+    /// The HTTP `Date` reading, when at least two recent answers agree: their
+    /// median. A single reading, or readings that disagree, say nothing.
+    pub fn http_offset_ms(&self) -> Option<f64> {
+        if self.http_offsets.len() < 2 {
+            return None;
+        }
+        let mut v: Vec<f64> = self.http_offsets.iter().copied().collect();
+        v.sort_by(f64::total_cmp);
+        let spread = v[v.len() - 1] - v[0];
+        if spread > HTTP_SKEW_AGREE_MS {
+            return None;
+        }
+        Some(v[v.len() / 2])
+    }
+
+    pub fn record_http_skew(&mut self, ms: f64) {
+        if self.http_offsets.len() == HTTP_SKEW_KEEP {
+            self.http_offsets.pop_front();
+        }
+        self.http_offsets.push_back(ms);
+        self.checked = true;
+    }
+    pub fn source(&self) -> &'static str {
+        if self.ntp_offset_ms.is_some() {
+            "ntp"
+        } else {
+            "http date"
+        }
+    }
 }
 
 /// Live Wi-Fi signal, sampled frequently (CoreWLAN on macOS) for graphing.
@@ -1186,6 +1498,8 @@ pub enum Overlay {
     Locations,
     /// Who owns the selected address (RDAP / whois).
     Whois,
+    /// Outbound reachability by port — which protocols this network lets out.
+    Egress,
 }
 
 /// Category of a timeline event, for the overlay and the CSV export.
@@ -1260,6 +1574,25 @@ pub struct AppState {
     pub dns: Vec<DnsProbe>,
     /// HTTP-layer reachability (captive portal / broken-v6 detection).
     pub http: HttpState,
+    pub clock: ClockState,
+    /// Finished incidents on every network this machine has used, loaded at
+    /// startup and appended as findings clear. See [`crate::history`].
+    pub history: Vec<crate::history::Episode>,
+    /// Why public-IP discovery failed, when it did (both endpoints tried).
+    pub public_ip_error: Option<String>,
+    /// The system web proxy, when one is configured.
+    pub proxy: Option<ProxyConfig>,
+    /// The [c] egress scan, once one has been run this session.
+    pub egress: Option<crate::collectors::egress::Scan>,
+    /// How this machine's attachment to the network has changed this session,
+    /// newest last. Shown in the full-screen Network panel.
+    pub net_history: VecDeque<NetChange>,
+    /// Cursor into `net_history` (0 = newest) when that pane holds it.
+    pub net_history_sel: usize,
+    /// Path-MTU probe result, once it has run; and why it could not, when it
+    /// could not (an OS that ignores Don't-Fragment, no UDP out).
+    pub pmtu: Option<PmtuResult>,
+    pub pmtu_error: Option<String>,
     pub signal: SignalState,
     pub vitals: Vitals,
     /// Error/drop counters for the default interface.
@@ -1373,6 +1706,11 @@ pub struct AppState {
     /// Set when the ICMP socket could not be opened, with guidance on the fix.
     /// Everything latency-related is dead without it.
     pub icmp_error: Option<String>,
+    /// True while the machine has no default route at all — Wi-Fi off, cable
+    /// out. Set and cleared by the netinfo collector; the analysis reads it so
+    /// the bottom rung of the ladder can say "not connected" instead of
+    /// blaming whatever failed first downstream.
+    pub link_lost: bool,
     /// What is degraded by running unprivileged, when anything is.
     pub privilege_notice: Option<String>,
     /// External tools absent from this machine: (name, what it provides, how to
@@ -1391,7 +1729,76 @@ pub struct AppState {
     pub started: Instant,
 }
 
+/// What the first hops say about address translation on the way out.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NatKind {
+    /// Hop 2 is in 100.64.0.0/10: the ISP shares one public address among
+    /// customers. Inbound connections, port forwarding and some games and VoIP
+    /// setups suffer; the "public IP" is the ISP's, not the router's.
+    Cgnat,
+    /// Hop 2 is another private (RFC 1918) address: two NAT routers in series —
+    /// an ISP box in front of the user's own, typically. Same symptoms as CGNAT
+    /// but fixable at home (bridge mode on the first router — or, for a
+    /// virtual machine on host/shared networking, bridged networking in the
+    /// hypervisor).
+    DoubleNat,
+}
+
+impl NatKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            NatKind::Cgnat => "CGNAT",
+            NatKind::DoubleNat => "double NAT",
+        }
+    }
+
+    /// What to do about it, in one clause.
+    pub fn advice(self) -> &'static str {
+        match self {
+            NatKind::Cgnat => "ISP shares your public IP",
+            NatKind::DoubleNat => "ISP box or VM host in front of your router",
+        }
+    }
+}
+
 impl AppState {
+    /// See [`NetInfo::is_lan_addr`].
+    pub fn is_lan_addr(&self, addr: IpAddr) -> bool {
+        self.netinfo.is_lan_addr(addr)
+    }
+
+    /// CGNAT / double NAT, read off the discovered path: the gateway is private
+    /// (that is ordinary NAT) and the *next* hop is still not a public address.
+    /// `None` when the path is unknown or plainly routed. Returns the kind and
+    /// the hop-2 address that gave it away.
+    pub fn nat_kind(&self) -> Option<(NatKind, IpAddr)> {
+        let hop = |ttl: u8| {
+            self.targets
+                .iter()
+                .find(|t| t.hop_ttl() == Some(ttl))
+                .map(|t| t.addr)
+        };
+        let IpAddr::V4(gw) = hop(1)? else {
+            return None;
+        };
+        let IpAddr::V4(next) = hop(2)? else {
+            return None;
+        };
+        if !gw.is_private() {
+            return None;
+        }
+        // 100.64.0.0/10 is reserved for carrier-grade NAT (RFC 6598).
+        let shared =
+            |a: std::net::Ipv4Addr| a.octets()[0] == 100 && (64..=127).contains(&a.octets()[1]);
+        if shared(next) {
+            Some((NatKind::Cgnat, IpAddr::V4(next)))
+        } else if next.is_private() {
+            Some((NatKind::DoubleNat, IpAddr::V4(next)))
+        } else {
+            None
+        }
+    }
+
     pub fn new(targets: Vec<TargetStat>) -> Self {
         Self {
             targets,
@@ -1400,6 +1807,15 @@ impl AppState {
             netinfo: NetInfo::default(),
             dns: Vec::new(),
             http: HttpState::default(),
+            clock: ClockState::default(),
+            history: Vec::new(),
+            public_ip_error: None,
+            proxy: None,
+            egress: None,
+            net_history: VecDeque::new(),
+            net_history_sel: 0,
+            pmtu: None,
+            pmtu_error: None,
             signal: SignalState::default(),
             vitals: Vitals::default(),
             link_errors: LinkErrors::default(),
@@ -1441,6 +1857,7 @@ impl AppState {
             paused: false,
             overlay: Overlay::None,
             verdict: crate::verdict::VerdictState::default(),
+            link_lost: false,
             baseline: None,
             baseline_key: None,
             explainer_pending: false,
@@ -1573,9 +1990,46 @@ impl AppState {
             }
             // Available whenever both panes are drawn; an empty history is
             // still a pane you can focus and watch fill up.
-            Panel::Bandwidth => self.fullscreen,
+            Panel::Bandwidth | Panel::NetInfo => self.fullscreen,
             _ => false,
         }
+    }
+
+    /// Record a change to how the machine is attached to the network. Also
+    /// lands on the event timeline as `summary`, so the two never disagree.
+    pub fn push_net_change(
+        &mut self,
+        kind: NetChangeKind,
+        iface: String,
+        summary: String,
+        detail: Vec<String>,
+    ) {
+        if self.net_history.len() == NET_HISTORY_CAP {
+            self.net_history.pop_front();
+        }
+        self.net_history.push_back(NetChange {
+            at: chrono::Utc::now().timestamp(),
+            kind,
+            iface,
+            summary,
+            detail,
+        });
+    }
+
+    /// This network's incident summary over the standard window, when the
+    /// network is known.
+    pub fn history_summary(&self) -> Option<crate::history::Summary> {
+        let key = self.baseline_key.as_deref()?;
+        Some(crate::history::summarise(
+            &self.history,
+            key,
+            crate::history::WINDOW_DAYS,
+        ))
+    }
+
+    /// The history entry under the cursor (0 = newest).
+    pub fn selected_net_change(&self) -> Option<&NetChange> {
+        self.net_history.iter().rev().nth(self.net_history_sel)
     }
 
     /// The hop the monitor cursor is on, when that pane holds the cursor.

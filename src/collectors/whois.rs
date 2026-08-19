@@ -30,8 +30,13 @@ use tokio::process::Command;
 use crate::app::{AppState, Whois};
 
 const RDAP_URL: &str = "https://rdap.org/ip/";
+/// ARIN's RDAP answers for its own space and redirects to the right RIR for
+/// everyone else's — a second front door when rdap.org is unreachable.
+const RDAP_FALLBACK_URL: &str = "https://rdap.arin.net/registry/ip/";
 const RIPESTAT_URL: &str = "https://stat.ripe.net/data/prefix-overview/data.json?resource=";
-const TIMEOUT: Duration = Duration::from_secs(10);
+/// Per attempt. Two attempts (dual-stack, then IPv4 only) keep the whole
+/// lookup inside what a person will wait for.
+const TIMEOUT: Duration = Duration::from_secs(6);
 /// RDAP answers are a few KB; a registry that sends more is not answering.
 const MAX_BODY: usize = 256 * 1024;
 
@@ -57,14 +62,29 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr) {
         });
     }
 
+    // Through the system's fixed proxy when there is one — on a network that
+    // requires it, that is the only way out, and a browser on the same
+    // machine would use it.
+    let proxy = state
+        .lock()
+        .unwrap()
+        .proxy
+        .as_ref()
+        .and_then(|p| p.https_url());
     tokio::spawn(async move {
         // Registration and routing are independent lookups; ask both at once.
-        let (reg, asn) = tokio::join!(rdap(addr), ripestat_asn(addr));
+        let (reg, asn) = tokio::join!(
+            rdap(addr, proxy.as_deref()),
+            ripestat_asn(addr, proxy.as_deref())
+        );
         let outcome = match reg {
             Ok((fields, source)) => Ok((fields, Vec::new(), source)),
+            // Windows ships no whois program, so there is no fallback to
+            // report on — the RDAP reason is the whole story there.
+            Err(rdap_err) if cfg!(windows) => Err(format!("RDAP: {rdap_err}")),
             Err(rdap_err) => match system_whois(addr).await {
                 Ok(raw) => Ok((Vec::new(), raw, "whois".to_string())),
-                Err(whois_err) => Err(format!("RDAP: {rdap_err}; whois: {whois_err}")),
+                Err(whois_err) => Err(format!("RDAP: {rdap_err}; whois fallback: {whois_err}")),
             },
         };
         // The ASN rows ride along whichever way registration went; a failed
@@ -95,25 +115,10 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr) {
 
 /// The announcing ASN for `addr` from RIPEstat: `asn` and `prefix` rows, or
 /// nothing when the address is not announced.
-async fn ripestat_asn(addr: IpAddr) -> Result<Vec<(String, String)>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(TIMEOUT)
-        .user_agent(concat!("octomon/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let body = client
-        .get(format!("{RIPESTAT_URL}{addr}"))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?
-        .bytes()
-        .await
-        .map_err(|e| e.to_string())?;
-    if body.len() > MAX_BODY {
-        return Err("response exceeded size limit".to_string());
-    }
+async fn ripestat_asn(addr: IpAddr, proxy: Option<&str>) -> Result<Vec<(String, String)>, String> {
+    let url = format!("{RIPESTAT_URL}{addr}");
+    let (resp, _) = get_resilient(&url, proxy, None).await?;
+    let body = crate::util::read_capped(resp, MAX_BODY).await?;
     let json: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     Ok(fields_from_ripestat(&json))
 }
@@ -163,29 +168,96 @@ pub fn fields_from_ripestat(json: &Value) -> Vec<(String, String)> {
     out
 }
 
-/// RDAP lookup: the structured fields and the registry that answered.
-async fn rdap(addr: IpAddr) -> Result<(Vec<(String, String)>, String), String> {
-    let client = reqwest::Client::builder()
-        .timeout(TIMEOUT)
-        .user_agent(concat!("octomon/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let url = format!("{RDAP_URL}{addr}");
-    let resp = client
-        .get(&url)
-        .header("accept", "application/rdap+json, application/json")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    // The registry that finally answered, after rdap.org's redirect.
-    let source = resp.url().host_str().unwrap_or("rdap.org").to_string();
-    let resp = resp.error_for_status().map_err(|e| e.to_string())?;
-    let body = resp.bytes().await.map_err(|e| e.to_string())?;
-    if body.len() > MAX_BODY {
-        return Err("response exceeded size limit".to_string());
+/// GET `url`, and if that times out, once more over IPv4 only. A machine
+/// with an IPv6 address but no working IPv6 route (a VM on shared
+/// networking, a half-configured tunnel) connects to a dual-stack host over
+/// v6 first and waits out the timeout — while v4-only hosts answer at once,
+/// which is exactly the confusing shape this was seen in. Returns the
+/// response and which attempt answered.
+async fn get_resilient(
+    url: &str,
+    proxy: Option<&str>,
+    accept: Option<&str>,
+) -> Result<(reqwest::Response, &'static str), String> {
+    let send = |c: reqwest::Client| {
+        let mut req = c.get(url);
+        if let Some(a) = accept {
+            req = req.header("accept", a);
+        }
+        req.send()
+    };
+    let first = match send(client(proxy, None)?).await {
+        Ok(r) => {
+            return r
+                .error_for_status()
+                .map(|r| (r, "dual-stack"))
+                .map_err(|e| crate::util::describe_error(&e));
+        }
+        Err(e) => e,
+    };
+    // Only a timeout or a connect failure earns the retry; a refusal or a
+    // TLS error would just repeat. Through a proxy the family is its call.
+    if !(first.is_timeout() || first.is_connect()) || proxy.is_some() {
+        return Err(crate::util::describe_error(&first));
     }
-    let json: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
-    Ok((fields_from_rdap(&json), source))
+    let v4 = client(None, Some(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)))?;
+    match send(v4).await {
+        Ok(r) => r
+            .error_for_status()
+            .map(|r| (r, "ipv4-only"))
+            .map_err(|e| crate::util::describe_error(&e)),
+        Err(e2) => Err(format!(
+            "{} (dual-stack); {} (IPv4 only)",
+            crate::util::describe_error(&first),
+            crate::util::describe_error(&e2)
+        )),
+    }
+}
+
+/// RDAP lookup: the structured fields and the registry that answered.
+async fn rdap(
+    addr: IpAddr,
+    proxy: Option<&str>,
+) -> Result<(Vec<(String, String)>, String), String> {
+    let accept = Some("application/rdap+json, application/json");
+    let mut errors: Vec<String> = Vec::new();
+    for base in [RDAP_URL, RDAP_FALLBACK_URL] {
+        let url = format!("{base}{addr}");
+        match get_resilient(&url, proxy, accept).await {
+            Ok((resp, how)) => {
+                // The registry that finally answered, after the redirect.
+                let mut source = resp.url().host_str().unwrap_or("rdap.org").to_string();
+                if how != "dual-stack" {
+                    source.push_str(" (IPv4 only)");
+                }
+                let body = crate::util::read_capped(resp, MAX_BODY).await?;
+                let json: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+                return Ok((fields_from_rdap(&json), source));
+            }
+            Err(e) => {
+                let host = base.split('/').nth(2).unwrap_or(base);
+                errors.push(format!("{host}: {e}"));
+            }
+        }
+    }
+    Err(errors.join("; "))
+}
+
+/// The HTTP client for the registry lookups: direct, or via the system's
+/// fixed proxy when one is configured.
+fn client(proxy: Option<&str>, local: Option<IpAddr>) -> Result<reqwest::Client, String> {
+    let mut b = reqwest::Client::builder()
+        .timeout(TIMEOUT)
+        .user_agent(concat!("octomon/", env!("CARGO_PKG_VERSION")));
+    b = match proxy {
+        Some(url) => b.proxy(reqwest::Proxy::all(url).map_err(|e| e.to_string())?),
+        None => b.no_proxy(),
+    };
+    // Binding the local address pins the family at connect time.
+    if let Some(l) = local {
+        b = b.local_address(l);
+    }
+    b.build().map_err(|e| e.to_string())
 }
 
 /// Pull the fields a person actually reads out of an RDAP IP-network object.
@@ -431,13 +503,13 @@ mod tests {
     async fn live_rdap() {
         for a in ["75.101.33.185", "1.1.1.1", "2606:4700:4700::1111"] {
             let addr: IpAddr = a.parse().unwrap();
-            let (fields, source) = rdap(addr).await.expect("rdap answers");
+            let (fields, source) = rdap(addr, None).await.expect("rdap answers");
             println!("{addr} via {source}");
             for (k, v) in &fields {
                 println!("  {k:<12}{v}");
             }
             assert!(!fields.is_empty(), "{addr}: no fields");
-            let asn = ripestat_asn(addr).await.expect("ripestat answers");
+            let asn = ripestat_asn(addr, None).await.expect("ripestat answers");
             for (k, v) in &asn {
                 println!("  {k:<12}{v}");
             }
