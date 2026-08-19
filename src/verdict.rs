@@ -1006,7 +1006,8 @@ pub fn evaluate(s: &AppState) -> Triage {
         // Consensus says the connection works; whatever is bad is *that* place.
         for t in &bad {
             let loss = t.recent_loss_pct(th::RECENT);
-            let what = if loss >= th::LOSS_DOWN_PCT {
+            let unreachable = loss >= th::LOSS_DOWN_PCT;
+            let what = if unreachable {
                 "unreachable".to_string()
             } else {
                 format!("degraded ({loss:.0}% loss)")
@@ -1016,7 +1017,15 @@ pub fn evaluate(s: &AppState) -> Triage {
             let web_out = t.web.status == crate::app::WebStatus::Web && t.web.fails >= 2;
             findings.push(Finding {
                 cause: Cause::SingleDestination,
-                severity: Severity::Degraded,
+                // The connection is fine by construction here — this is about
+                // one far end. Some loss to one anchor is a note; only a
+                // destination that has gone entirely is worth more, and even
+                // then it is that place's problem, not this machine's.
+                severity: if unreachable {
+                    Severity::Degraded
+                } else {
+                    Severity::Info
+                },
                 confidence: judge(true, web_out || (bad.len() == 1 && fine >= 3), false),
                 summary: format!("{} {what} — your connection is fine", t.label),
                 evidence: vec![
@@ -1787,9 +1796,18 @@ fn build_rungs(
         }
     } else if !bad.is_empty() && fine >= 2 && bad.len() * 2 < with_data.len() {
         let names: Vec<&str> = bad.iter().map(|t| t.label.as_str()).collect();
+        // Red only for a destination that has gone entirely; loss to one far
+        // end while the rest answer is a caution about that place.
+        let any_unreachable = bad
+            .iter()
+            .any(|t| t.recent_loss_pct(th::RECENT) >= th::LOSS_DOWN_PCT);
         Rung {
             area: Area::Destinations,
-            status: RungStatus::Bad,
+            status: if any_unreachable {
+                RungStatus::Bad
+            } else {
+                RungStatus::Warn
+            },
             detail: format!("struggling: {}", names.join(", ")),
         }
     } else {
@@ -2529,6 +2547,32 @@ mod tests {
         assert_eq!(f.subject, "myserver");
         assert!(f.summary.contains("your connection is fine"));
         assert!(!causes(&t).contains(&Cause::WideInternet));
+        // 75% loss: gone, so Degraded and a red destinations rung.
+        assert_eq!(f.severity, Severity::Degraded);
+        let rung = t
+            .rungs
+            .iter()
+            .find(|r| r.area == Area::Destinations)
+            .unwrap();
+        assert_eq!(rung.status, RungStatus::Bad);
+
+        // Some loss to one far end while the rest answer: a note, and a
+        // caution on the rung — the machine isn't even using that resolver.
+        let mut s = healthy_state();
+        s.targets.push(probe("Quad9-ish", [203, 0, 113, 10], 17, 3));
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::SingleDestination)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Info);
+        let rung = t
+            .rungs
+            .iter()
+            .find(|r| r.area == Area::Destinations)
+            .unwrap();
+        assert_eq!(rung.status, RungStatus::Warn);
     }
 
     #[test]
