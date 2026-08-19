@@ -20,7 +20,9 @@ jobs:
         # Every platform with target-specific code gets built and tested. Before
         # this, only macOS ran, so the Linux parser tests in src/platform/mod.rs
         # were compiled and executed nowhere.
-        os: [macos-latest, ubuntu-latest, windows-latest, windows-11-arm]
+        # ubuntu-24.04-arm is the aarch64 Linux runner: the binary it uploads
+        # is the one an ARM64 VM (UTM on Apple silicon, Raspberry Pi) can run.
+        os: [macos-latest, ubuntu-latest, ubuntu-24.04-arm, windows-latest, windows-11-arm]
     steps:
       - uses: actions/checkout@v4
 
