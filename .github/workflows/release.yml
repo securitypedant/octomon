@@ -130,6 +130,13 @@ jobs:
       - name: "Install clang (Windows ARM64)"
         if: "${{ matrix.runner == 'windows-11-arm' }}"
         run: "choco install llvm --no-progress -y"
+      - name: "Release the apt lock (Linux)"
+        if: "${{ runner.os == 'Linux' }}"
+        run: |
+          sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+          for _ in $(seq 1 60); do
+            if sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1; then sleep 5; else break; fi
+          done
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest

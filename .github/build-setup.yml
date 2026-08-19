@@ -7,3 +7,15 @@
   # runner needs it; every other image already has a usable compiler.
   if: ${{ matrix.runner == 'windows-11-arm' }}
   run: choco install llvm --no-progress -y
+- name: Release the apt lock (Linux)
+  # dist's "Install dependencies" step runs apt-get for musl-tools. On a fresh
+  # ubuntu-latest image the boot-time unattended-upgrades run can hold the
+  # dpkg lock for many minutes, and apt waits for it silently — the x86 musl
+  # build sat there for 20+ minutes on v0.6.0's first attempt. Stop the timers,
+  # then give any run already in flight a bounded wait to finish.
+  if: ${{ runner.os == 'Linux' }}
+  run: |
+    sudo systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+    for _ in $(seq 1 60); do
+      if sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1; then sleep 5; else break; fi
+    done
