@@ -1,8 +1,9 @@
 # octomon
 
-**A `btop`-style terminal dashboard for your network.** Think `btop`, `trippy`, and
-`bandwhich` in a single view — so you can tell at a glance whether it's the
-network, the Wi-Fi, the ISP, or your own machine that's misbehaving.
+**A `btop`-style terminal dashboard for your network.** I got sick of having
+to use multiple tools to diagnose network issues, so I built this. Think `btop`,
+`trippy`, and `bandwhich` in a single view, so you can tell at a glance 
+whether it's the network, the Wi-Fi, the ISP, or your own machine that's the problem.
 
 [![CI](https://github.com/securitypedant/octomon/actions/workflows/ci.yml/badge.svg)](https://github.com/securitypedant/octomon/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/octomon.svg)](https://crates.io/crates/octomon)

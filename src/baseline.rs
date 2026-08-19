@@ -32,6 +32,11 @@ pub struct Baseline {
     /// User-given name ("Home", "Office"), set with [N].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// How the machine was attached when this was learned ("Wi-Fi",
+    /// "Ethernet (wired)") — the same LAN over a cable and over the radio is
+    /// two different normals, and two entries, so this tells them apart.
+    #[serde(default)]
+    pub medium: String,
     /// Healthy folds so far — confidence in the baseline itself.
     pub samples: u32,
     pub gateway_ms: Option<f64>,
@@ -56,8 +61,9 @@ impl Baseline {
 }
 
 /// One minute's healthy aggregates, computed under the state lock.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct Sample {
+    pub medium: String,
     pub gateway_ms: Option<f64>,
     pub gateway_p95_ms: Option<f64>,
     pub anchor_ms: Option<f64>,
@@ -96,6 +102,7 @@ impl Sample {
         let dns_ms = (!dns.is_empty()).then(|| dns.iter().sum::<f64>() / dns.len() as f64);
         let rssi_dbm = s.signal.present.then_some(s.signal.rssi_dbm as f64);
         Sample {
+            medium: s.netinfo.medium.label().to_string(),
             gateway_ms,
             gateway_p95_ms,
             anchor_ms,
@@ -116,6 +123,9 @@ fn ewma(prev: Option<f64>, new: Option<f64>) -> Option<f64> {
 impl Baseline {
     /// Fold one healthy minute in.
     pub fn fold(&mut self, sample: Sample) {
+        if !sample.medium.is_empty() {
+            self.medium = sample.medium;
+        }
         self.gateway_ms = ewma(self.gateway_ms, sample.gateway_ms);
         self.gateway_p95_ms = ewma(self.gateway_p95_ms, sample.gateway_p95_ms);
         self.anchor_ms = ewma(self.anchor_ms, sample.anchor_ms);

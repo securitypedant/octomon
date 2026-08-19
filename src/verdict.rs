@@ -355,6 +355,61 @@ fn probe_health(t: &TargetStat) -> Health {
     Health::Good
 }
 
+/// How one round-trip reading compares with what this path normally shows.
+/// The question the colour answers is "is this worse than it should be
+/// *here*", not "is this far away": 160 ms through a VPN exit on another
+/// continent is physics, and a 5 ms LAN gateway sitting at 40 ms is a fault.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RttGrade {
+    Good,
+    Warn,
+    Bad,
+}
+
+/// Grade `ms` against `reference_ms`, the path's idle floor (its session
+/// minimum, lowered to the learned normal for this network when there is
+/// one). Relative bands — within 1.5× is fine, up to 3× is a caution, beyond
+/// is bad — with the old absolute thresholds kept as floors, so a LAN path
+/// with a 2 ms floor still reads yellow at 50 ms and red at 150 ms rather than
+/// at 3 ms and 6 ms. With no reference at all, the absolute scale stands.
+pub fn rtt_grade(ms: f64, reference_ms: Option<f64>) -> RttGrade {
+    let r = reference_ms.unwrap_or(0.0).max(0.0);
+    let good_max = (r * 1.5).max(th::RTT_WARN_MS);
+    let bad_min = (r * th::RTT_INFLATED_FACTOR).max(th::RTT_BAD_MS);
+    if ms <= good_max {
+        RttGrade::Good
+    } else if ms <= bad_min {
+        RttGrade::Warn
+    } else {
+        RttGrade::Bad
+    }
+}
+
+/// The reference floor for a target: its own idle minimum this session,
+/// lowered to this network's learned normal for that kind of target when a
+/// baseline is established — so a session that *starts* degraded still has
+/// something honest to be judged against.
+pub fn rtt_reference(t: &TargetStat, s: &AppState) -> Option<f64> {
+    let learned = s
+        .baseline
+        .as_ref()
+        .filter(|b| b.established())
+        .and_then(|b| {
+            if t.hop_ttl() == Some(1) {
+                b.gateway_ms
+            } else if !t.discovered {
+                b.anchor_ms
+            } else {
+                None
+            }
+        });
+    match (t.min_ever_ms, learned) {
+        (Some(m), Some(l)) => Some(m.min(l)),
+        (Some(m), None) => Some(m),
+        (None, l) => l,
+    }
+}
+
 /// Recent mean RTT well above the all-time idle floor.
 fn inflated(t: &TargetStat) -> bool {
     match (t.stats(th::RECENT).mean, t.min_ever_ms) {
@@ -1251,14 +1306,14 @@ pub fn evaluate(s: &AppState) -> Triage {
                     // Contrast: ping is fine while HTTP is not. Corroboration
                     // would be a second vantage point, which there isn't.
                     confidence: judge(true, false, false),
-                    summary: format!("{} web service not answering — ping still fine", t.label),
+                    summary: format!("web check to {} unanswered — ping still fine", t.label),
                     evidence: vec![
                         format!(
-                            "{} HTTP probes unanswered on a target that served HTTP before",
+                            "{} HTTPS HEAD probes in a row unanswered by a target that answered them before",
                             t.web.fails
                         ),
                         format!(
-                            "ICMP to {} still healthy ({:.0}% loss) — the service, not the path",
+                            "ICMP to {} still healthy ({:.0}% loss) — the web side, not the path",
                             t.addr,
                             t.recent_loss_pct(th::RECENT)
                         ),
@@ -1985,7 +2040,7 @@ pub fn checks(s: &AppState) -> Vec<Check> {
                 "DNS honesty",
                 RungStatus::Ok,
                 format!(
-                    "{} resolver{} answer NXDOMAIN for names that don't exist",
+                    "{} resolver{} say \"no such name\" honestly — none redirect typos",
                     judged.len(),
                     if judged.len() == 1 { "" } else { "s" }
                 ),
@@ -2920,6 +2975,40 @@ mod tests {
             .find(|f| f.cause == Cause::ClockSkew)
             .unwrap();
         assert_eq!(f.confidence, Confidence::Likely);
+    }
+
+    /// Colour and analysis share one question — worse than it should be
+    /// *here*? — so a far-away path is not red for being far away.
+    #[test]
+    fn rtt_grade_is_relative_with_absolute_floors() {
+        use RttGrade::*;
+        // No reference: the absolute scale.
+        assert_eq!(rtt_grade(40.0, None), Good);
+        assert_eq!(rtt_grade(100.0, None), Warn);
+        assert_eq!(rtt_grade(200.0, None), Bad);
+        // A 2 ms LAN gateway: the floors hold, so 40 ms is still fine and
+        // 160 ms still bad — not 3 ms and 6 ms.
+        assert_eq!(rtt_grade(40.0, Some(2.0)), Good);
+        assert_eq!(rtt_grade(100.0, Some(2.0)), Warn);
+        assert_eq!(rtt_grade(160.0, Some(2.0)), Bad);
+        // A 156 ms VPN exit: 170 is normal, 400 a caution, 600 bad.
+        assert_eq!(rtt_grade(170.0, Some(156.0)), Good);
+        assert_eq!(rtt_grade(400.0, Some(156.0)), Warn);
+        assert_eq!(rtt_grade(600.0, Some(156.0)), Bad);
+
+        // The reference is the session floor, lowered to the learned normal so
+        // a session that started degraded is still judged honestly.
+        let mut s = healthy_state();
+        let t = probe("x", [203, 0, 113, 5], 5, 0);
+        let mut t = t;
+        t.min_ever_ms = Some(150.0);
+        assert_eq!(rtt_reference(&t, &s), Some(150.0));
+        s.baseline = Some(crate::baseline::Baseline {
+            anchor_ms: Some(20.0),
+            samples: 40,
+            ..Default::default()
+        });
+        assert_eq!(rtt_reference(&t, &s), Some(20.0));
     }
 
     /// Wi-Fi with no signal sample yet is not measured, so it is not "ok".
