@@ -951,8 +951,9 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     // Each table keeps its own sort and column cursor: swap
                     // them in and out rather than resetting.
                     if view != s.bw_view {
-                        std::mem::swap(&mut s.bw_sort, &mut s.bw_sort_other);
-                        std::mem::swap(&mut s.bw_col, &mut s.bw_col_other);
+                        let st: &mut AppState = &mut s;
+                        std::mem::swap(&mut st.bw_sort, &mut st.bw_sort_other);
+                        std::mem::swap(&mut st.bw_col, &mut st.bw_col_other);
                     }
                     s.bw_view = view;
                     s.sub_pane = pane;
