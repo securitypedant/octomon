@@ -1738,7 +1738,9 @@ pub enum NatKind {
     Cgnat,
     /// Hop 2 is another private (RFC 1918) address: two NAT routers in series —
     /// an ISP box in front of the user's own, typically. Same symptoms as CGNAT
-    /// but fixable at home (bridge mode on the first router).
+    /// but fixable at home (bridge mode on the first router — or, for a
+    /// virtual machine on host/shared networking, bridged networking in the
+    /// hypervisor).
     DoubleNat,
 }
 
@@ -1747,6 +1749,16 @@ impl NatKind {
         match self {
             NatKind::Cgnat => "CGNAT",
             NatKind::DoubleNat => "double NAT",
+        }
+    }
+
+    /// What to do about it, in one clause.
+    pub fn advice(self) -> &'static str {
+        match self {
+            NatKind::Cgnat => "ISP shares your public IP; inbound ports won't work",
+            NatKind::DoubleNat => {
+                "an ISP box in front of your router (put it in bridge mode), or a VM on shared networking (use bridged networking)"
+            }
         }
     }
 }

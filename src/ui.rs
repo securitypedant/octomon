@@ -2894,7 +2894,7 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
                         crate::app::NatKind::Cgnat =>
                             "ISP shares your public IP; inbound ports won't work",
                         crate::app::NatKind::DoubleNat =>
-                            "two routers translating; consider bridge mode",
+                            "two routers translating — an ISP box in front of yours, or a VM on shared networking",
                     }
                 ),
                 Style::new().fg(Color::Gray),

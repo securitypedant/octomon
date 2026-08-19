@@ -1881,7 +1881,7 @@ pub fn checks(s: &AppState) -> Vec<Check> {
         Some((kind, via)) => push(
             "nat",
             RungStatus::Warn,
-            format!("{} — hop 2 is {via}", kind.label()),
+            format!("{} — hop 2 is {via} · {}", kind.label(), kind.advice()),
         ),
         None if gw && hops > 0 => push("nat", RungStatus::Ok, "ordinary NAT at the gateway".into()),
         None => push("nat", RungStatus::Unknown, "path not known yet".into()),
