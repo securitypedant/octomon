@@ -46,7 +46,6 @@ pub mod thresholds {
     pub const CLOCK_WARN_MS: f64 = 30_000.0;
     pub const CLOCK_BAD_MS: f64 = 300_000.0;
     pub const CPU_HOT_PCT: f32 = 90.0;
-    pub const CORE_HOT_PCT: f32 = 95.0;
     pub const MEM_HOT_PCT: f32 = 90.0;
     /// Outcomes considered for *detection*. The display window (100) takes
     /// 100 s to reflect an outage; 20 reacts inside half a minute.
@@ -1418,8 +1417,11 @@ pub fn evaluate(s: &AppState) -> Triage {
             since: None,
         });
     }
+    // Whole-machine load only: one saturated core is a compile or an encode,
+    // not a reason packets are late, and it would read as "machine under
+    // load (cpu 36%)" — a note nobody believes.
     let hottest = v.hottest_core().map(|(_, pct)| pct).unwrap_or(0.0);
-    if v.cpu_pct >= th::CPU_HOT_PCT || hottest >= th::CORE_HOT_PCT {
+    if v.cpu_pct >= th::CPU_HOT_PCT {
         findings.push(Finding {
             cause: Cause::Machine,
             severity: Severity::Info,
@@ -1510,13 +1512,9 @@ fn build_rungs(
     // Machine.
     let v = &s.vitals;
     // Warn exactly when the machine finding fires — one rulebook.
-    let hottest = v.hottest_core().map(|(_, pct)| pct).unwrap_or(0.0);
     let m_status = if v.throttled {
         RungStatus::Bad
-    } else if v.cpu_pct >= th::CPU_HOT_PCT
-        || hottest >= th::CORE_HOT_PCT
-        || v.mem_pressure_pct >= th::MEM_HOT_PCT
-    {
+    } else if v.cpu_pct >= th::CPU_HOT_PCT || v.mem_pressure_pct >= th::MEM_HOT_PCT {
         RungStatus::Warn
     } else if v.cores.is_empty() {
         RungStatus::Unknown
