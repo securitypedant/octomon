@@ -30,8 +30,13 @@ use tokio::process::Command;
 use crate::app::{AppState, Whois};
 
 const RDAP_URL: &str = "https://rdap.org/ip/";
+/// ARIN's RDAP answers for its own space and redirects to the right RIR for
+/// everyone else's — a second front door when rdap.org is unreachable.
+const RDAP_FALLBACK_URL: &str = "https://rdap.arin.net/registry/ip/";
 const RIPESTAT_URL: &str = "https://stat.ripe.net/data/prefix-overview/data.json?resource=";
-const TIMEOUT: Duration = Duration::from_secs(10);
+/// Per attempt. Two attempts (dual-stack, then IPv4 only) keep the whole
+/// lookup inside what a person will wait for.
+const TIMEOUT: Duration = Duration::from_secs(6);
 /// RDAP answers are a few KB; a registry that sends more is not answering.
 const MAX_BODY: usize = 256 * 1024;
 
@@ -108,14 +113,8 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr) {
 /// The announcing ASN for `addr` from RIPEstat: `asn` and `prefix` rows, or
 /// nothing when the address is not announced.
 async fn ripestat_asn(addr: IpAddr, proxy: Option<&str>) -> Result<Vec<(String, String)>, String> {
-    let client = client(proxy)?;
-    let resp = client
-        .get(format!("{RIPESTAT_URL}{addr}"))
-        .send()
-        .await
-        .map_err(|e| crate::util::describe_error(&e))?
-        .error_for_status()
-        .map_err(|e| crate::util::describe_error(&e))?;
+    let url = format!("{RIPESTAT_URL}{addr}");
+    let (resp, _) = get_resilient(&url, proxy, None).await?;
     let body = crate::util::read_capped(resp, MAX_BODY).await?;
     let json: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     Ok(fields_from_ripestat(&json))
@@ -166,32 +165,84 @@ pub fn fields_from_ripestat(json: &Value) -> Vec<(String, String)> {
     out
 }
 
+/// GET `url`, and if that times out, once more over IPv4 only. A machine
+/// with an IPv6 address but no working IPv6 route (a VM on shared
+/// networking, a half-configured tunnel) connects to a dual-stack host over
+/// v6 first and waits out the timeout — while v4-only hosts answer at once,
+/// which is exactly the confusing shape this was seen in. Returns the
+/// response and which attempt answered.
+async fn get_resilient(
+    url: &str,
+    proxy: Option<&str>,
+    accept: Option<&str>,
+) -> Result<(reqwest::Response, &'static str), String> {
+    let send = |c: reqwest::Client| {
+        let mut req = c.get(url);
+        if let Some(a) = accept {
+            req = req.header("accept", a);
+        }
+        req.send()
+    };
+    let first = match send(client(proxy, None)?).await {
+        Ok(r) => {
+            return r
+                .error_for_status()
+                .map(|r| (r, "dual-stack"))
+                .map_err(|e| crate::util::describe_error(&e));
+        }
+        Err(e) => e,
+    };
+    // Only a timeout or a connect failure earns the retry; a refusal or a
+    // TLS error would just repeat. Through a proxy the family is its call.
+    if !(first.is_timeout() || first.is_connect()) || proxy.is_some() {
+        return Err(crate::util::describe_error(&first));
+    }
+    let v4 = client(None, Some(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)))?;
+    match send(v4).await {
+        Ok(r) => r
+            .error_for_status()
+            .map(|r| (r, "ipv4-only"))
+            .map_err(|e| crate::util::describe_error(&e)),
+        Err(e2) => Err(format!(
+            "{} (dual-stack); {} (IPv4 only)",
+            crate::util::describe_error(&first),
+            crate::util::describe_error(&e2)
+        )),
+    }
+}
+
 /// RDAP lookup: the structured fields and the registry that answered.
 async fn rdap(
     addr: IpAddr,
     proxy: Option<&str>,
 ) -> Result<(Vec<(String, String)>, String), String> {
-    let client = client(proxy)?;
-    let url = format!("{RDAP_URL}{addr}");
-    let resp = client
-        .get(&url)
-        .header("accept", "application/rdap+json, application/json")
-        .send()
-        .await
-        .map_err(|e| crate::util::describe_error(&e))?;
-    // The registry that finally answered, after rdap.org's redirect.
-    let source = resp.url().host_str().unwrap_or("rdap.org").to_string();
-    let resp = resp
-        .error_for_status()
-        .map_err(|e| crate::util::describe_error(&e))?;
-    let body = crate::util::read_capped(resp, MAX_BODY).await?;
-    let json: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
-    Ok((fields_from_rdap(&json), source))
+    let accept = Some("application/rdap+json, application/json");
+    let mut errors: Vec<String> = Vec::new();
+    for base in [RDAP_URL, RDAP_FALLBACK_URL] {
+        let url = format!("{base}{addr}");
+        match get_resilient(&url, proxy, accept).await {
+            Ok((resp, how)) => {
+                // The registry that finally answered, after the redirect.
+                let mut source = resp.url().host_str().unwrap_or("rdap.org").to_string();
+                if how != "dual-stack" {
+                    source.push_str(" (IPv4 only)");
+                }
+                let body = crate::util::read_capped(resp, MAX_BODY).await?;
+                let json: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+                return Ok((fields_from_rdap(&json), source));
+            }
+            Err(e) => {
+                let host = base.split('/').nth(2).unwrap_or(base);
+                errors.push(format!("{host}: {e}"));
+            }
+        }
+    }
+    Err(errors.join("; "))
 }
 
 /// The HTTP client for the registry lookups: direct, or via the system's
 /// fixed proxy when one is configured.
-fn client(proxy: Option<&str>) -> Result<reqwest::Client, String> {
+fn client(proxy: Option<&str>, local: Option<IpAddr>) -> Result<reqwest::Client, String> {
     let mut b = reqwest::Client::builder()
         .timeout(TIMEOUT)
         .user_agent(concat!("octomon/", env!("CARGO_PKG_VERSION")));
@@ -199,6 +250,10 @@ fn client(proxy: Option<&str>) -> Result<reqwest::Client, String> {
         Some(url) => b.proxy(reqwest::Proxy::all(url).map_err(|e| e.to_string())?),
         None => b.no_proxy(),
     };
+    // Binding the local address pins the family at connect time.
+    if let Some(l) = local {
+        b = b.local_address(l);
+    }
     b.build().map_err(|e| e.to_string())
 }
 
@@ -328,6 +383,10 @@ fn vcard(v: Option<&Value>) -> (Option<String>, Option<String>) {
 
 /// Fallback: the system `whois`, comment lines stripped, capped in length.
 async fn system_whois(addr: IpAddr) -> Result<Vec<String>, String> {
+    if cfg!(windows) {
+        // Windows ships no whois. Say so rather than "program not found".
+        return Err("no whois program on Windows".to_string());
+    }
     let run = Command::new("whois")
         .arg(addr.to_string())
         .stdin(Stdio::null())

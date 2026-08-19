@@ -1755,10 +1755,8 @@ impl NatKind {
     /// What to do about it, in one clause.
     pub fn advice(self) -> &'static str {
         match self {
-            NatKind::Cgnat => "ISP shares your public IP; inbound ports won't work",
-            NatKind::DoubleNat => {
-                "an ISP box in front of your router (put it in bridge mode), or a VM on shared networking (use bridged networking)"
-            }
+            NatKind::Cgnat => "ISP shares your public IP",
+            NatKind::DoubleNat => "ISP box or VM host in front of your router",
         }
     }
 }

@@ -2888,15 +2888,7 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
             Span::styled(format!("{:<9}", "nat"), Style::new().fg(Color::DarkGray)),
             Span::styled(kind.label(), Style::new().fg(Color::Yellow)),
             Span::styled(
-                format!(
-                    " · hop 2 is {via} — {}",
-                    match kind {
-                        crate::app::NatKind::Cgnat =>
-                            "ISP shares your public IP; inbound ports won't work",
-                        crate::app::NatKind::DoubleNat =>
-                            "two routers translating — an ISP box in front of yours, or a VM on shared networking",
-                    }
-                ),
+                format!(" · hop 2 is {via} · {}", kind.advice()),
                 Style::new().fg(Color::Gray),
             ),
         ]));
