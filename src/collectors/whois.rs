@@ -79,9 +79,12 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr) {
         );
         let outcome = match reg {
             Ok((fields, source)) => Ok((fields, Vec::new(), source)),
+            // Windows ships no whois program, so there is no fallback to
+            // report on — the RDAP reason is the whole story there.
+            Err(rdap_err) if cfg!(windows) => Err(format!("RDAP: {rdap_err}")),
             Err(rdap_err) => match system_whois(addr).await {
                 Ok(raw) => Ok((Vec::new(), raw, "whois".to_string())),
-                Err(whois_err) => Err(format!("RDAP: {rdap_err}; whois: {whois_err}")),
+                Err(whois_err) => Err(format!("RDAP: {rdap_err}; whois fallback: {whois_err}")),
             },
         };
         // The ASN rows ride along whichever way registration went; a failed
@@ -383,10 +386,6 @@ fn vcard(v: Option<&Value>) -> (Option<String>, Option<String>) {
 
 /// Fallback: the system `whois`, comment lines stripped, capped in length.
 async fn system_whois(addr: IpAddr) -> Result<Vec<String>, String> {
-    if cfg!(windows) {
-        // Windows ships no whois. Say so rather than "program not found".
-        return Err("no whois program on Windows".to_string());
-    }
     let run = Command::new("whois")
         .arg(addr.to_string())
         .stdin(Stdio::null())
