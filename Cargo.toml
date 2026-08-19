@@ -33,13 +33,17 @@ directories = "6.0.0"
 futures-util = "0.3.33"
 netdev = "0.46.0"
 ratatui = "0.30.2"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"] }
+# Both root stores: Mozilla's bundled set, and the OS store — which is where a
+# corporate / Zero-Trust TLS-inspection root (Cloudflare WARP with Gateway,
+# Zscaler…) lives. With only the bundle, every HTTPS check fails behind such a
+# proxy while the browser, trusting the OS store, is fine.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "rustls-tls-native-roots", "stream", "http2"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 surge-ping = "0.9.0"
 sysinfo = "0.39.6"
 tokio = { version = "1.53.1", features = ["full"] }
-tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots", "rustls-tls-native-roots"] }
 toml = "1.1.4"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"

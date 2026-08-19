@@ -55,9 +55,9 @@ pub async fn fetch_text_capped(
         .get(url)
         .send()
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| describe_error(&e))?
         .error_for_status()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| describe_error(&e))?;
     let buf = read_capped(resp, max_bytes).await?;
     String::from_utf8(buf).map_err(|_| "non-UTF-8 response".to_string())
 }
