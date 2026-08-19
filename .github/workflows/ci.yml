@@ -22,7 +22,19 @@ jobs:
         # were compiled and executed nowhere.
         # ubuntu-24.04-arm is the aarch64 Linux runner: the binary it uploads
         # is the one an ARM64 VM (UTM on Apple silicon, Raspberry Pi) can run.
-        os: [macos-latest, ubuntu-latest, ubuntu-24.04-arm, windows-latest, windows-11-arm]
+        # `artifact` names the uploaded binary by architecture and OS, which is
+        # what a tester picking one from the run page needs to know.
+        include:
+          - os: macos-latest
+            artifact: octomon-arm64-macos
+          - os: ubuntu-latest
+            artifact: octomon-x86-linux
+          - os: ubuntu-24.04-arm
+            artifact: octomon-arm64-linux
+          - os: windows-latest
+            artifact: octomon-x64-windows
+          - os: windows-11-arm
+            artifact: octomon-arm64-windows
     steps:
       - uses: actions/checkout@v4
 
@@ -61,7 +73,7 @@ jobs:
       - name: Upload binary for manual testing
         uses: actions/upload-artifact@v7
         with:
-          name: octomon-${{ matrix.os }}
+          name: ${{ matrix.artifact }}
           # Whichever of the two exists on this runner (.exe on Windows).
           path: |
             target/release/octomon
