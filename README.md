@@ -11,6 +11,8 @@ whether it's the network, the Wi-Fi, the ISP, or your own machine that's the pro
 
 ![octomon screenshot](https://raw.githubusercontent.com/securitypedant/octomon/main/screenshot.png)
 
+▶️ **[Watch the intro video](https://www.youtube.com/watch?v=sHPd2LeYvaw)** — why octomon exists and a tour of what it does.
+
 ## What it shows
 
 Four live panels plus **an actual answer**: a one-line analysis at the bottom
@@ -161,9 +163,7 @@ Expand-Archive octomon-x86_64-pc-windows-msvc.zip -DestinationPath .
 ```
 
 The binary is unsigned, so SmartScreen warns on first run. Windows Terminal is
-recommended. If charts render as empty boxes, the console font lacks braille
-glyphs: switch to Consolas or Cascadia Mono, or set `graph_marker = "halfblock"`
-in `%APPDATA%\octomon\config.toml`.
+recommended.
 
 ### crates.io / from source
 

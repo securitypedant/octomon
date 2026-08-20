@@ -23,6 +23,8 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
     let mut file: Option<tokio::fs::File> = None;
     // Timeline high-water mark: only events newer than this go into the CSV.
     let mut events_seen: u64 = 0;
+    // Same idea for completed speed tests, which get tidy metric rows.
+    let mut speed_seen: usize = 0;
 
     loop {
         ticker.tick().await;
@@ -38,6 +40,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
                         // The recording covers from now on; history that predates
                         // it belongs to the events overlay, not this file.
                         events_seen = s.events_total;
+                        speed_seen = s.speed_total;
                         s.log = Some(LogStatus {
                             path: path.clone(),
                             rows: 0,
@@ -92,6 +95,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
             let s = state.lock().unwrap();
             let stamp = chrono::Local::now().to_rfc3339();
             let mut body = format_rows(&s, &stamp);
+            body.push_str(&format_speedtests(&s, &stamp, &mut speed_seen));
             body.push_str(&format_events(&s, &stamp, &mut events_seen));
             let rows = body.lines().count() as u64;
             (body, rows)
@@ -282,6 +286,39 @@ fn format_rows(s: &AppState, stamp: &str) -> String {
     out
 }
 
+/// Speed tests completed since the high-water mark, as tidy metric rows.
+/// The timeline events say a test started and what it found as text; these
+/// carry the same results as numbers a CSV import can chart. The provider is
+/// the subject, matching how the results panel attributes them.
+fn format_speedtests(s: &AppState, stamp: &str, seen: &mut usize) -> String {
+    let mut out = String::new();
+    let new = s
+        .speed_total
+        .saturating_sub(*seen)
+        .min(s.speed_history.len());
+    for r in s.speed_history.iter().skip(s.speed_history.len() - new) {
+        let mut row = |metric: &str, value: String, unit: &str| {
+            let _ = writeln!(
+                out,
+                "{stamp},speedtest,{},{metric},{value},{unit}",
+                field(&r.provider)
+            );
+        };
+        row("down_mbps", format!("{:.1}", r.down_mbps), "Mbps");
+        row("up_mbps", format!("{:.1}", r.up_mbps), "Mbps");
+        // Idle-vs-loaded is the bufferbloat measurement; blank cells read as
+        // "not measured" on import, matching the Wi-Fi noise convention.
+        if let Some(v) = r.idle_ms {
+            row("idle_latency_ms", format!("{v:.1}"), "ms");
+        }
+        if let Some(v) = r.loaded_ms {
+            row("loaded_latency_ms", format!("{v:.1}"), "ms");
+        }
+    }
+    *seen = s.speed_total;
+    out
+}
+
 /// Timeline events newer than the high-water mark, one row each. Events are
 /// text, not measurements, so the message rides in the value column (quoted)
 /// with the severity as the metric: `…,event,verdict,degraded,"▲ …",`.
@@ -414,6 +451,37 @@ mod tests {
         let out = format_events(&s, "T", &mut seen);
         assert_eq!(out.lines().count(), 1);
         assert!(out.contains("network,info,VPN down"));
+    }
+
+    /// Speed-test results land in the CSV exactly once, as numeric rows.
+    #[test]
+    fn speedtest_results_drain_once_past_the_watermark() {
+        let mut s = AppState::new(vec![]);
+        let mut seen = 0;
+        assert!(format_speedtests(&s, "T", &mut seen).is_empty());
+
+        s.speed_history.push(crate::store::SpeedRecord {
+            at: 1_700_000_000,
+            provider: "Cloudflare".into(),
+            down_mbps: 953.24,
+            up_mbps: 941.9,
+            idle_ms: Some(4.2),
+            loaded_ms: Some(122.6),
+        });
+        s.speed_total += 1;
+
+        let out = format_speedtests(&s, "T", &mut seen);
+        assert!(out.contains("T,speedtest,Cloudflare,down_mbps,953.2,Mbps"));
+        assert!(out.contains("T,speedtest,Cloudflare,up_mbps,941.9,Mbps"));
+        assert!(out.contains("T,speedtest,Cloudflare,idle_latency_ms,4.2,ms"));
+        assert!(out.contains("T,speedtest,Cloudflare,loaded_latency_ms,122.6,ms"));
+        // Same six-column shape as every other row.
+        for line in out.lines() {
+            assert_eq!(line.matches(',').count(), 5, "row: {line}");
+        }
+
+        // Already recorded: the next tick writes nothing.
+        assert!(format_speedtests(&s, "T", &mut seen).is_empty());
     }
 
     /// The [x] export: header, oldest first, message quoted when it needs it.

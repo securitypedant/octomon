@@ -312,6 +312,93 @@ pub async fn thermal_state() -> Option<ThermalState> {
     })
 }
 
+/// Whether the font this console window actually renders with contains every
+/// glyph in `chars`. `None` when it cannot be asked — output is redirected,
+/// there is no conhost window, or the font is a raster font (which
+/// `GetGlyphIndicesW` cannot inspect and which lacks these glyphs anyway) —
+/// so the caller keeps its pessimistic default.
+///
+/// This asks the *font*, not the console: conhost can sometimes rescue a
+/// missing glyph through GDI font linking, so a `Some(false)` may still
+/// render. Falling back to plainer glyphs in that case only costs looks.
+pub fn console_font_has_glyphs(chars: &[char]) -> Option<bool> {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Graphics::Gdi::{
+        CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
+        DEFAULT_QUALITY, DeleteDC, DeleteObject, FW_NORMAL, GGI_MARK_NONEXISTING_GLYPHS,
+        GetGlyphIndicesW, OUT_DEFAULT_PRECIS, SelectObject,
+    };
+    use windows_sys::Win32::System::Console::{
+        CONSOLE_FONT_INFOEX, GetCurrentConsoleFontEx, GetStdHandle, STD_OUTPUT_HANDLE,
+    };
+
+    unsafe {
+        let console = GetStdHandle(STD_OUTPUT_HANDLE);
+        if console.is_null() || console == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut info = CONSOLE_FONT_INFOEX {
+            cbSize: size_of::<CONSOLE_FONT_INFOEX>() as u32,
+            ..Default::default()
+        };
+        if GetCurrentConsoleFontEx(console, 0, &mut info) == 0 {
+            return None;
+        }
+        // Raster fonts report an empty or non-TrueType face; the glyph query
+        // below would fail on them, so bail out to the pessimistic default.
+        if info.FaceName[0] == 0 {
+            return None;
+        }
+
+        let font = CreateFontW(
+            0, // default height — coverage does not depend on size
+            0,
+            0,
+            0,
+            FW_NORMAL as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET as u32,
+            OUT_DEFAULT_PRECIS as u32,
+            CLIP_DEFAULT_PRECIS as u32,
+            DEFAULT_QUALITY as u32,
+            DEFAULT_PITCH as u32,
+            info.FaceName.as_ptr(),
+        );
+        if font.is_null() {
+            return None;
+        }
+        let dc = CreateCompatibleDC(std::ptr::null_mut());
+        if dc.is_null() {
+            DeleteObject(font);
+            return None;
+        }
+        let previous = SelectObject(dc, font);
+
+        // All probed glyphs sit in the BMP, so one code unit per char.
+        let utf16: Vec<u16> = chars.iter().collect::<String>().encode_utf16().collect();
+        let mut indices = vec![0u16; utf16.len()];
+        let queried = GetGlyphIndicesW(
+            dc,
+            utf16.as_ptr(),
+            utf16.len() as i32,
+            indices.as_mut_ptr(),
+            GGI_MARK_NONEXISTING_GLYPHS,
+        );
+
+        SelectObject(dc, previous);
+        DeleteDC(dc);
+        DeleteObject(font);
+
+        if queried as i32 == -1 {
+            return None; // GDI_ERROR — a non-TrueType font, most likely
+        }
+        // 0xffff is the "nonexisting" mark the flag asks for.
+        Some(indices.iter().all(|&i| i != 0xffff))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

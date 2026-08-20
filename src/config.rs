@@ -88,14 +88,81 @@ pub struct Config {
     pub egress_checks: Vec<crate::collectors::egress::EgressCheck>,
     /// Whether the first-run explainer has been shown (set automatically).
     pub explainer_seen: bool,
-    /// Glyphs used to plot chart lines: "braille", "halfblock" or "dot".
+    /// Glyphs used to plot chart lines: "auto", "braille", "halfblock" or
+    /// "dot".
     ///
     /// Braille packs 2x4 dots into one cell and is what the charts are drawn
     /// around, but those glyphs are missing from the raster fonts a legacy
     /// Windows console still defaults to, where every plotted point comes out
     /// as an empty box. "halfblock" gives up half the vertical resolution for
-    /// glyphs that render essentially anywhere.
+    /// glyphs that render essentially anywhere. "auto" picks braille except on
+    /// a legacy Windows console.
     pub graph_marker: String,
+    /// Glyphs the bar graphs (bandwidth, CPU, per-hop sparklines) are built
+    /// from: "auto", "fine" or "coarse".
+    ///
+    /// The fine set resolves eight levels per cell with the eighth-block
+    /// glyphs (▁▂▃…), but the fonts a legacy Windows console offers (Consolas
+    /// included) carry only the half and full blocks, so every bar tip comes
+    /// out as an empty box. "coarse" sticks to those two glyphs; "auto" picks
+    /// fine unless this is a legacy Windows console whose current font
+    /// really lacks the glyphs (the font itself is asked, so a conhost set
+    /// to Cascadia Mono keeps the fine set).
+    pub bar_glyphs: String,
+}
+
+/// Two-level bar glyphs for consoles whose fonts lack the eighth-blocks.
+/// Unlike ratatui's own three-level set this keeps `one_eighth` visible: the
+/// bandwidth traces promise that any non-zero sample shows at least one
+/// sub-cell, and a blank there would break that.
+const COARSE_BARS: ratatui::symbols::bar::Set<'static> = ratatui::symbols::bar::Set {
+    full: ratatui::symbols::bar::FULL,
+    seven_eighths: ratatui::symbols::bar::FULL,
+    three_quarters: ratatui::symbols::bar::HALF,
+    five_eighths: ratatui::symbols::bar::HALF,
+    half: ratatui::symbols::bar::HALF,
+    three_eighths: ratatui::symbols::bar::HALF,
+    one_quarter: ratatui::symbols::bar::HALF,
+    one_eighth: ratatui::symbols::bar::HALF,
+    empty: " ",
+};
+
+/// True on the legacy Windows console (conhost) — the host an elevated
+/// PowerShell or cmd typically opens in. Windows Terminal sets WT_SESSION,
+/// and other modern emulators and unix-ish environments set TERM or
+/// TERM_PROGRAM (ConEmu sets ConEmuANSI); conhost sets none of them.
+fn legacy_windows_console() -> bool {
+    cfg!(windows)
+        && std::env::var_os("WT_SESSION").is_none()
+        && std::env::var_os("TERM_PROGRAM").is_none()
+        && std::env::var_os("TERM").is_none()
+        && std::env::var_os("ConEmuANSI").is_none()
+}
+
+/// The glyphs the fine bar set needs beyond the universal half/full blocks.
+const BAR_PROBE: [char; 6] = ['▁', '▂', '▃', '▅', '▆', '▇'];
+/// A sample of the braille range the line charts plot with.
+const MARKER_PROBE: [char; 2] = ['⠁', '⣿'];
+
+/// Whether an "auto" glyph setting must fall back to the plainer set: only
+/// ever on a legacy Windows console, and even there the console's actual
+/// font gets the last word when it can be asked — someone who pointed
+/// conhost at Cascadia Mono has the glyphs and deserves the fine set. When
+/// the font cannot be asked (output redirected, a raster font), missing is
+/// assumed: the coarse sets render anywhere, tofu does not.
+fn auto_needs_fallback(probe: &[char]) -> bool {
+    if !legacy_windows_console() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        crate::platform::console_font_has_glyphs(probe) != Some(true)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = probe;
+        true // unreachable: legacy_windows_console() is false off Windows
+    }
 }
 
 impl Default for Config {
@@ -131,7 +198,8 @@ impl Default for Config {
             pmtu_probe_host: "1.1.1.1".to_string(),
             egress_checks: crate::collectors::egress::default_checks(),
             explainer_seen: false,
-            graph_marker: "braille".to_string(),
+            graph_marker: "auto".to_string(),
+            bar_glyphs: "auto".to_string(),
         }
     }
 }
@@ -168,7 +236,7 @@ impl Config {
         Duration::from_millis(self.http_probe_interval_ms.max(2000))
     }
 
-    /// Chart marker, falling back to braille for an unrecognised value rather
+    /// Chart marker, falling back to auto for an unrecognised value rather
     /// than refusing to start over a cosmetic setting.
     pub fn marker(&self) -> Marker {
         match self.graph_marker.trim().to_ascii_lowercase().as_str() {
@@ -176,7 +244,20 @@ impl Config {
             "dot" => Marker::Dot,
             "block" => Marker::Block,
             "bar" => Marker::Bar,
+            "braille" => Marker::Braille,
+            _ if auto_needs_fallback(&MARKER_PROBE) => Marker::HalfBlock,
             _ => Marker::Braille,
+        }
+    }
+
+    /// Sparkline bar glyphs, resolved the same way as [`Config::marker`]:
+    /// an explicit "fine"/"coarse" is honoured, anything else auto-detects.
+    pub fn bar_set(&self) -> ratatui::symbols::bar::Set<'static> {
+        match self.bar_glyphs.trim().to_ascii_lowercase().as_str() {
+            "fine" => ratatui::symbols::bar::NINE_LEVELS,
+            "coarse" => COARSE_BARS,
+            _ if auto_needs_fallback(&BAR_PROBE) => COARSE_BARS,
+            _ => ratatui::symbols::bar::NINE_LEVELS,
         }
     }
 
@@ -298,13 +379,57 @@ mod path_tests {
             graph_marker: v.to_string(),
             ..Config::default()
         };
-        assert_eq!(Config::default().marker(), Marker::Braille);
+        // What "auto" resolves to depends on where the tests run (a legacy
+        // Windows console gets halfblock), so assert against the same probe.
+        let auto = if auto_needs_fallback(&MARKER_PROBE) {
+            Marker::HalfBlock
+        } else {
+            Marker::Braille
+        };
+        assert_eq!(Config::default().marker(), auto);
+        // An explicit choice is never second-guessed by the detection.
+        assert_eq!(with("braille").marker(), Marker::Braille);
         assert_eq!(with("halfblock").marker(), Marker::HalfBlock);
         assert_eq!(with("HalfBlock").marker(), Marker::HalfBlock);
         assert_eq!(with("half-block").marker(), Marker::HalfBlock);
         assert_eq!(with(" dot ").marker(), Marker::Dot);
         // A typo in a cosmetic setting must not stop octomon starting.
-        assert_eq!(with("brailel").marker(), Marker::Braille);
-        assert_eq!(with("").marker(), Marker::Braille);
+        assert_eq!(with("brailel").marker(), auto);
+        assert_eq!(with("").marker(), auto);
+    }
+
+    #[test]
+    fn the_bar_glyphs_stay_within_what_a_console_font_has() {
+        let with = |v: &str| Config {
+            bar_glyphs: v.to_string(),
+            ..Config::default()
+        };
+        assert_eq!(with("fine").bar_set(), ratatui::symbols::bar::NINE_LEVELS);
+        let coarse = with(" Coarse ").bar_set();
+        // Only the glyphs every console font carries — the eighth-blocks are
+        // exactly what a legacy Windows console cannot draw.
+        for g in [
+            coarse.full,
+            coarse.seven_eighths,
+            coarse.three_quarters,
+            coarse.five_eighths,
+            coarse.half,
+            coarse.three_eighths,
+            coarse.one_quarter,
+            coarse.one_eighth,
+            coarse.empty,
+        ] {
+            assert!(matches!(g, "█" | "▄" | " "), "unsafe glyph {g:?}");
+        }
+        // The bandwidth traces promise any non-zero sample stays visible.
+        assert_ne!(coarse.one_eighth, " ");
+        // "auto" and typos resolve by detection, and must agree.
+        let auto = if auto_needs_fallback(&BAR_PROBE) {
+            COARSE_BARS
+        } else {
+            ratatui::symbols::bar::NINE_LEVELS
+        };
+        assert_eq!(Config::default().bar_set(), auto);
+        assert_eq!(with("nonsense").bar_set(), auto);
     }
 }

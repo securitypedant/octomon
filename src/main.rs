@@ -99,6 +99,11 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Every rustls consumer (reqwest, tokio-tungstenite) resolves its crypto
+    // provider from this process default. Must come before any TLS handshake.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("install rustls crypto provider before any TLS use");
     use_utf8_console();
     let cli = Cli::parse();
 
@@ -141,6 +146,7 @@ async fn main() -> Result<()> {
         s.speedtest_enabled = !cli.no_speedtest;
         s.samples_per_sec = 1000.0 / cfg.ping_interval_ms.max(1) as f64;
         s.graph_marker = cfg.marker();
+        s.bar_set = cfg.bar_set();
         s.speedtest_provider_names = provider_names;
         s.speedtest_provider_idx = sel;
         let (history, total) = store::load_recent(500);

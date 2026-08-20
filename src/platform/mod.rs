@@ -139,6 +139,15 @@ pub fn wifi_signal() -> Option<WifiSignal> {
     None
 }
 
+/// Whether the console's current font contains every glyph in `chars` —
+/// `None` when there is no console window or the font cannot be asked.
+/// Windows-only: everywhere else the terminal emulator does its own font
+/// fallback and the question has no single answer.
+#[cfg(windows)]
+pub fn console_font_has_glyphs(chars: &[char]) -> Option<bool> {
+    windows::console_font_has_glyphs(chars)
+}
+
 /// Thermal / power state. Throttling collapses throughput while CPU reads idle,
 /// which is otherwise one of the more baffling failure modes to diagnose.
 pub struct ThermalState {

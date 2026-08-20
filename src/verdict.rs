@@ -567,6 +567,16 @@ pub fn evaluate(s: &AppState) -> Triage {
     // absolute thresholds still work on the first visit to a network.
     let baseline = s.baseline.as_ref().filter(|b| b.established());
 
+    // Self-inflicted load: the speed test saturates the link on purpose, so
+    // while it runs — and until its samples have left the recent window the
+    // findings below judge on — loss and latency are expected, and pinning
+    // them on the network would be blaming it for what this program did.
+    let speedtest_running = matches!(s.speedtest.status, crate::app::SpeedStatus::Running);
+    let self_load = speedtest_running
+        || s.speedtest.last_run.is_some_and(|t| {
+            t.elapsed().as_secs_f64() * s.samples_per_sec.max(0.1) < th::RECENT as f64
+        });
+
     let mut findings: Vec<Finding> = Vec::new();
 
     // --- link: is there anything to measure over? ---
@@ -1332,7 +1342,6 @@ pub fn evaluate(s: &AppState) -> Triage {
     // link speed is the fallback, and a poor one — a gigabit NIC on a 50 Mb
     // line never looks loaded by that measure.
     let n = s.window_samples().min(60);
-    let speedtest_running = matches!(s.speedtest.status, crate::app::SpeedStatus::Running);
     let wan_loaded = baseline.is_some_and(|b| {
         let down_cap = b.down_mbps.map(|m| m * 1e6);
         let up_cap = b.up_mbps.map(|m| m * 1e6);
@@ -1516,6 +1525,26 @@ pub fn evaluate(s: &AppState) -> Triage {
             subject: "memory".to_string(),
             symptom: false,
             since: None,
+        });
+    }
+
+    // Drop the loss- and latency-driven findings raised from samples taken
+    // under the speed test's own load: the gateway dropping octomon's pings
+    // while the test saturates the line is not "gateway losing packets".
+    // Bufferbloat stays — it is the honest reading of that interval and names
+    // the test as the load — as do the content-based findings (hijack,
+    // captive portal, clock), which no amount of load can fake.
+    if self_load {
+        findings.retain(|f| {
+            !matches!(
+                f.cause,
+                Cause::GatewayLan
+                    | Cause::Dns
+                    | Cause::IspHop
+                    | Cause::WideInternet
+                    | Cause::SingleDestination
+                    | Cause::WebTarget
+            )
         });
     }
 
@@ -2703,6 +2732,34 @@ mod tests {
             s.dns[0].record(Some(12.0));
         }
         assert!(!causes(&evaluate(&s)).contains(&Cause::Dns));
+    }
+
+    /// A speed test saturates the link on purpose, so the loss and latency it
+    /// causes must not be reported as the network failing — during the run,
+    /// or in the recent window just after it.
+    #[test]
+    fn speed_test_load_is_not_pinned_on_the_network() {
+        use std::time::{Duration, Instant};
+        let mut s = healthy_state();
+        let gw = s.targets.iter_mut().find(|t| t.discovered).unwrap();
+        for _ in 0..8 {
+            gw.record_loss();
+        }
+        // With no test in the picture this is a gateway finding.
+        assert!(causes(&evaluate(&s)).contains(&Cause::GatewayLan));
+        // While one runs, the loss is the test's own load.
+        s.speedtest.status = crate::app::SpeedStatus::Running;
+        assert!(!causes(&evaluate(&s)).contains(&Cause::GatewayLan));
+        // Just finished: samples taken under load are still in the window.
+        s.speedtest.status = crate::app::SpeedStatus::Done;
+        s.speedtest.last_run = Some(Instant::now());
+        assert!(!causes(&evaluate(&s)).contains(&Cause::GatewayLan));
+        // Long over: continuing loss is the network's again. (checked_sub —
+        // a freshly booted machine may not have 120s of Instant behind it.)
+        if let Some(t) = Instant::now().checked_sub(Duration::from_secs(120)) {
+            s.speedtest.last_run = Some(t);
+            assert!(causes(&evaluate(&s)).contains(&Cause::GatewayLan));
+        }
     }
 
     /// The whole point of the ladder: with the gateway dead, DNS timing out is

@@ -1274,6 +1274,18 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
             title.push_str(&format!(" · bloat +{bloat:.0}ms {grade}"));
         }
     }
+    // A speed test saturates the link on purpose; without a label, the loaded
+    // readings — which stay in these stats until the window rolls past them —
+    // look like the connection failing.
+    if matches!(s.speedtest.status, SpeedStatus::Running) {
+        title.push_str(" · under speed test load");
+    } else if s
+        .speedtest
+        .last_run
+        .is_some_and(|t| t.elapsed().as_secs() < s.window_secs)
+    {
+        title.push_str(" · includes speed test load");
+    }
     title.push(')');
     f.render_widget(block(&title, s.focus == Panel::Quality), area);
     // The scroll cue runs beside the rows, under the header.
@@ -1372,6 +1384,7 @@ fn web_graph(f: &mut Frame, s: &AppState, area: Rect) {
                         .map(|v| SparklineBar::from(*v))
                         .collect::<Vec<_>>(),
                 )
+                .bar_set(s.bar_set.clone())
                 .style(Style::new().fg(SERIES_COLOR)),
             rows[1],
         );
@@ -1621,7 +1634,10 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                     })
                     .collect();
                 f.render_widget(
-                    Sparkline::default().data(bars).max(max),
+                    Sparkline::default()
+                        .data(bars)
+                        .max(max)
+                        .bar_set(s.bar_set.clone()),
                     Rect {
                         x: inner.x + table_w + 1 + (spark_w - width),
                         y,
@@ -1964,6 +1980,7 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let down = Sparkline::default()
         .data(ddata)
         .max(dmax)
+        .bar_set(s.bar_set.clone())
         .style(Style::new().fg(Color::Green))
         .block(Block::new().title(Span::styled(
             format!(" ↓ down  {}", fmt_rate(tp.down_bps)),
@@ -1975,6 +1992,7 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let up = Sparkline::default()
         .data(udata)
         .max(umax)
+        .bar_set(s.bar_set.clone())
         .style(Style::new().fg(Color::Magenta))
         .block(Block::new().title(Span::styled(
             format!(" ↑ up    {}", fmt_rate(tp.up_bps)),
@@ -3154,6 +3172,7 @@ fn dns_graphs(f: &mut Frame, s: &AppState, area: Rect) {
             Sparkline::default()
                 .data(data)
                 .max(max)
+                .bar_set(s.bar_set.clone())
                 .style(Style::new().fg(color)),
             Rect {
                 x: spark_x,
@@ -3575,6 +3594,7 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let spark = Sparkline::default()
         .max(100)
         .data(v.cpu_hist.tail_u64(parts[6].width as usize))
+        .bar_set(s.bar_set.clone())
         .style(Style::new().fg(Color::Yellow))
         .block(Block::new().title(Span::styled(
             " cpu history ",
@@ -4455,6 +4475,24 @@ mod tests {
         );
         // The peak still reaches the top.
         assert_eq!(data.iter().copied().max().unwrap(), 5_000_000);
+    }
+
+    /// The reds a speed test causes are real readings; the header has to say
+    /// where they came from — while the test runs, and for as long as the
+    /// loaded samples remain inside the stats window.
+    #[test]
+    fn quality_header_names_speed_test_load() {
+        use crate::app::SpeedStatus;
+
+        let mut s = AppState::new(vec![]);
+        assert!(!draw(&s, 160, 40).contains("speed test load"));
+
+        s.speedtest.status = SpeedStatus::Running;
+        assert!(draw(&s, 160, 40).contains("under speed test load"));
+
+        s.speedtest.status = SpeedStatus::Done;
+        s.speedtest.last_run = Some(std::time::Instant::now());
+        assert!(draw(&s, 160, 40).contains("includes speed test load"));
     }
 
     /// The gauge label must stay legible where the fill runs underneath it.

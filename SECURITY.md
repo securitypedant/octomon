@@ -62,8 +62,9 @@ exports on request, and CSV recordings while recording is on (see
 recordings contain your SSID, gateway, addresses and process names. Files are
 created with your umask; octomon does not tighten their permissions.
 
-**Subprocesses.** octomon shells out to standard system tools, always with a
-fixed argument array and never through a shell: `traceroute` (`tracert` on
+**Subprocesses.** octomon runs standard system tools as child processes,
+each executed directly with a fixed argument array — never through a shell,
+so nothing is subject to word-splitting or `sh -c` interpolation: `traceroute` (`tracert` on
 Windows), `whois`, `ps`, and per platform `nettop`, `pmset`, `system_profiler`,
 `scutil --proxy` (macOS), `iw`, `nmcli`, `ss`, `gsettings` (Linux) or `reg
 query` (Windows). Dynamic arguments are IP-address literals, with one

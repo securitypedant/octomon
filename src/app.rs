@@ -1653,6 +1653,9 @@ pub struct AppState {
     /// Glyphs the charts plot with. Carried here because a legacy Windows
     /// console has no braille glyphs and draws every point as an empty box.
     pub graph_marker: ratatui::symbols::Marker,
+    /// Glyphs the sparkline bars are built from, for the same reason: the
+    /// eighth-block glyphs are missing there too (see `Config::bar_set`).
+    pub bar_set: ratatui::symbols::bar::Set<'static>,
     /// Column cursor over the target table (0=target,1=last,2=avg,3=p95,4=max,5=loss).
     pub q_col: usize,
     /// Active target sort: (column, descending). None = insertion order.
@@ -1850,6 +1853,7 @@ impl AppState {
             window_secs: 60,
             samples_per_sec: 1.0,
             graph_marker: ratatui::symbols::Marker::Braille,
+            bar_set: ratatui::symbols::bar::NINE_LEVELS,
             q_col: 0,
             q_sort: None,
             traceroute: None,
@@ -1906,6 +1910,7 @@ impl AppState {
         self.graph_target = live.graph_target;
         self.window_secs = live.window_secs;
         self.graph_marker = live.graph_marker;
+        self.bar_set = live.bar_set.clone();
         self.q_col = live.q_col;
         self.q_sort = live.q_sort;
         self.bw_view = live.bw_view;

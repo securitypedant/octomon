@@ -1,6 +1,6 @@
 [package]
 name = "octomon"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 description = "Btop-style terminal network monitor: latency, bandwidth, and Wi-Fi signal"
 repository = "https://github.com/securitypedant/octomon"
@@ -37,7 +37,14 @@ ratatui = "0.30.2"
 # corporate / Zero-Trust TLS-inspection root (Cloudflare WARP with Gateway,
 # Zscaler…) lives. With only the bundle, every HTTPS check fails behind such a
 # proxy while the browser, trusting the OS store, is fine.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "rustls-tls-native-roots", "stream", "http2"] }
+# The `-no-provider` variants keep reqwest from wiring in ring; the crypto
+# provider is the `rustls` dependency below, installed in main().
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider", "rustls-tls-native-roots-no-provider", "stream", "http2"] }
+# aws-lc-rs rather than ring: Cloudflare Gateway's TLS-inspection intermediate
+# signs with ECDSA-SHA256 under a P-384 key, a mixed combination ring refuses
+# (ring pairs each curve with one hash) — so behind WARP every HTTPS check died
+# with UnsupportedSignatureAlgorithmForPublicKeyContext. aws-lc-rs accepts it.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12", "logging"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 surge-ping = "0.9.0"
@@ -67,6 +74,7 @@ objc2-foundation = "0.3.2"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Globalization",
+    "Win32_Graphics_Gdi",
     "Win32_NetworkManagement_WiFi",
     "Win32_Security",
     "Win32_System_Console",

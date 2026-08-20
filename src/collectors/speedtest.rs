@@ -117,6 +117,16 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>, cfg: crate::
                 .get(s.speedtest_provider_idx)
                 .cloned()
         };
+        // The start goes on the timeline (and into a session recording, which
+        // drains events): a latency spike mid-recording that coincides with a
+        // speed test should read as the test, not as a mystery.
+        if let Some(name) = selected.as_deref() {
+            state.lock().unwrap().push_event(
+                crate::verdict::Severity::Info,
+                crate::app::EventCategory::Speedtest,
+                format!("speed test started ({name})"),
+            );
+        }
         let result = match selected.as_deref() {
             Some(name) => match Provider::from_name(name, &cfg) {
                 Some(provider) => run_provider(&client, &state, &provider).await,
