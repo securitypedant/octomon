@@ -25,7 +25,7 @@ ranked below its cause rather than shouting over it, and a busy CPU or a VPN is
 a caveat, never a way to hide a fault. Every finding shows how long it has been
 going on.
 
-Things it checks that most tools don't:
+Things it checks:
 
 - **Not connected at all** — no default route, a self-assigned 169.254 address
   (no DHCP lease), an address with no gateway: named as such, not blamed on
