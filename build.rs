@@ -44,4 +44,17 @@ fn main() {
         println!("cargo:rerun-if-changed={dir}/HEAD");
         println!("cargo:rerun-if-changed={dir}/index");
     }
+
+    // wlanapi.dll does not exist on Windows Server unless the optional
+    // Wireless LAN Service feature is installed, and a load-time import
+    // stops octomon starting there at all — STATUS_DLL_NOT_FOUND before
+    // main, with nothing printed. Delay-load it so the import resolves on
+    // first call instead; the guard in `platform::windows` never makes that
+    // call when the DLL is absent.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        println!("cargo:rustc-link-arg=/DELAYLOAD:wlanapi.dll");
+        println!("cargo:rustc-link-arg=delayimp.lib");
+    }
 }

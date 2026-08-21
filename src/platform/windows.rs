@@ -29,8 +29,29 @@ use crate::app::{Neighbour, WifiInfo};
 /// alternative to guards is threading a close through every early return.
 struct WlanClient(HANDLE);
 
+/// Whether wlanapi.dll exists on this machine at all. Windows Server ships
+/// without it unless the Wireless LAN Service feature is added, so the
+/// import is delay-loaded (see build.rs) to let octomon start there —
+/// which makes it this function's job to keep every Wlan call from being
+/// reached, because a delay-loaded call with no DLL behind it faults.
+fn wlan_dll_present() -> bool {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+    static PRESENT: OnceLock<bool> = OnceLock::new();
+    // SAFETY: a constant, NUL-terminated wide string. The module handle is
+    // deliberately never freed: the DLL staying loaded is what lets the
+    // delay-load thunks resolve for the rest of the session.
+    *PRESENT
+        .get_or_init(|| !unsafe { LoadLibraryW(windows_sys::core::w!("wlanapi.dll")) }.is_null())
+}
+
 impl WlanClient {
     fn open() -> Option<Self> {
+        // Every WLAN API call in this file starts from a client handle, so
+        // this is the one place the missing-DLL guard has to hold.
+        if !wlan_dll_present() {
+            return None;
+        }
         let mut negotiated = 0u32;
         let mut handle: HANDLE = std::ptr::null_mut();
         // SAFETY: both out-parameters are owned locals. The handle is only used
