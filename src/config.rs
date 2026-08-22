@@ -19,6 +19,12 @@ pub struct Target {
     pub label: String,
     /// IP address to ping.
     pub addr: IpAddr,
+    /// The DNS name this target was added as, when it was one. A name gets
+    /// re-resolved when the network changes and probed over HTTPS with real
+    /// SNI — properties a bare IP cannot have, and worth keeping across
+    /// restarts for targets saved from the [a] prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 /// User-facing configuration.
@@ -170,6 +176,7 @@ impl Default for Config {
         let t = |label: &str, ip: &str| Target {
             label: label.to_string(),
             addr: ip.parse().expect("valid default IP"),
+            host: None,
         };
         Self {
             targets: vec![
@@ -213,7 +220,11 @@ pub fn parse_target(s: &str) -> Result<Target, String> {
     let addr = ip
         .parse()
         .map_err(|_| format!("invalid IP in target '{s}'"))?;
-    Ok(Target { label, addr })
+    Ok(Target {
+        label,
+        addr,
+        host: None,
+    })
 }
 
 impl Config {
@@ -333,6 +344,27 @@ impl Config {
         Self::update_on_disk(|cfg| cfg.explainer_seen = true);
     }
 
+    /// Remember a target added from the [a] prompt, so it is probed on every
+    /// start. Discovered targets (gateway, hops) never reach the file.
+    pub fn persist_target_added(label: &str, addr: IpAddr, host: Option<&str>) {
+        Self::update_on_disk(|cfg| {
+            if cfg.targets.iter().any(|t| t.addr == addr) {
+                return;
+            }
+            cfg.targets.push(Target {
+                label: label.to_string(),
+                addr,
+                host: host.map(str::to_string),
+            });
+        });
+    }
+
+    /// Forget a deleted target — including a default one: deleting Google and
+    /// finding it back at the next start would read as the delete not working.
+    pub fn persist_target_removed(addr: IpAddr) {
+        Self::update_on_disk(|cfg| cfg.targets.retain(|t| t.addr != addr));
+    }
+
     /// Read-modify-write one field of the on-disk config, preserving the rest.
     fn update_on_disk(mutate: impl FnOnce(&mut Config)) {
         let Some(path) = Self::path() else { return };
@@ -396,6 +428,30 @@ mod path_tests {
         // A typo in a cosmetic setting must not stop octomon starting.
         assert_eq!(with("brailel").marker(), auto);
         assert_eq!(with("").marker(), auto);
+    }
+
+    /// Saved name-targets keep their hostname across a config round-trip,
+    /// and config files from before the `host` key still parse.
+    #[test]
+    fn saved_targets_round_trip_with_their_hostname() {
+        let mut cfg = Config::default();
+        cfg.targets.push(Target {
+            label: "bbc.co.uk".into(),
+            addr: "151.101.0.81".parse().unwrap(),
+            host: Some("bbc.co.uk".into()),
+        });
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(
+            back.targets.last().unwrap().host.as_deref(),
+            Some("bbc.co.uk")
+        );
+        // Defaults carry no host and must not serialise one.
+        assert!(back.targets[0].host.is_none());
+
+        let legacy = "[[targets]]\nlabel = \"Cloudflare\"\naddr = \"1.1.1.1\"\n";
+        let back: Config = toml::from_str(legacy).unwrap();
+        assert!(back.targets[0].host.is_none());
     }
 
     #[test]

@@ -70,52 +70,23 @@ pub fn render(f: &mut Frame, s: &AppState) {
 /// The [c] scan: which protocols this network lets out, one row per check.
 fn egress_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     use crate::collectors::egress::Outcome;
-    let mut lines: Vec<Line> = Vec::new();
-    // Column widths follow the content, so a long note is not clipped and a
-    // short list does not sprawl; the box then takes what the columns need,
-    // up to the terminal.
-    let (name_w, ref_w, res_w) = match &s.egress {
-        Some(scan) => (
-            scan.results
-                .iter()
-                .map(|r| r.check.name.len())
-                .max()
-                .unwrap_or(5)
-                .max(5),
-            scan.results
-                .iter()
-                .map(|r| format!("{}:{}/{}", r.check.host, r.check.port, r.check.proto).len())
-                .max()
-                .unwrap_or(9)
-                .max(9),
-            "FILTERED (host answers on other ports)".len(),
-        ),
-        None => (5, 9, 6),
-    };
-    let note_w = match &s.egress {
+
+    // Rows first, widths second: the result column is sized to the labels
+    // actually on screen — padding it for the widest *possible* label left a
+    // gulf between the results and the notes whenever everything was open.
+    struct Row {
+        name: String,
+        target: String,
+        label: String,
+        color: Color,
+        note: String,
+    }
+    let rows: Vec<Row> = match &s.egress {
+        None => Vec::new(),
         Some(scan) => scan
             .results
             .iter()
-            .map(|r| r.check.note.len())
-            .max()
-            .unwrap_or(0),
-        None => 0,
-    }
-    .max("why it matters".len());
-    match &s.egress {
-        None => lines.push(Line::from(Span::styled(
-            " starting scan…",
-            Style::new().fg(Color::DarkGray),
-        ))),
-        Some(scan) => {
-            let dim = Style::new().fg(Color::DarkGray);
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {:<name_w$}  ", "check"), dim),
-                Span::styled(format!("{:<ref_w$}  ", "reference"), dim),
-                Span::styled(format!("{:<res_w$}  ", "result"), dim),
-                Span::styled("why it matters", dim),
-            ]));
-            for r in &scan.results {
+            .map(|r| {
                 // A timeout to a host that answers on some other port is the
                 // network filtering that port, not the host being down.
                 let host_up = matches!(r.outcome, Outcome::Blocked)
@@ -135,22 +106,79 @@ fn egress_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                     Outcome::Blocked => (r.outcome.label(), Color::Red),
                     Outcome::Error(_) => (r.outcome.label(), Color::Yellow),
                 };
-                let target = format!("{}:{}/{}", r.check.host, r.check.port, r.check.proto);
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!(" {:<name_w$}  ", r.check.name),
-                        Style::new().fg(Color::White),
-                    ),
-                    Span::styled(
-                        format!("{:<ref_w$}  ", target),
-                        Style::new().fg(Color::Gray),
-                    ),
-                    Span::styled(
-                        format!("{:<res_w$}  ", label),
-                        Style::new().fg(color).bold(),
-                    ),
-                    Span::styled(r.check.note.clone(), dim),
-                ]));
+                Row {
+                    name: r.check.name.clone(),
+                    target: format!("{}:{}/{}", r.check.host, r.check.port, r.check.proto),
+                    label,
+                    color,
+                    note: r.check.note.clone(),
+                }
+            })
+            .collect(),
+    };
+
+    let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(5).max(5);
+    let ref_w = rows
+        .iter()
+        .map(|r| r.target.len())
+        .max()
+        .unwrap_or(9)
+        .max(9);
+    let res_w = rows
+        .iter()
+        .map(|r| r.label.chars().count())
+        .max()
+        .unwrap_or(6)
+        .max("result".len());
+    let note_w = rows
+        .iter()
+        .map(|r| r.note.len())
+        .max()
+        .unwrap_or(0)
+        .max("why it matters".len());
+
+    // The box takes what the columns need, up to the terminal; when that is
+    // not enough, the notes wrap inside their own column rather than spilling
+    // to the left margin.
+    let indent = 1 + name_w + 2 + ref_w + 2 + res_w + 2;
+    let width = ((indent + note_w + 4) as u16)
+        .min(area.width.saturating_sub(2))
+        .max(40.min(area.width));
+    // Border + 1-column padding each side.
+    let text_w = width.saturating_sub(4) as usize;
+
+    let dim = Style::new().fg(Color::DarkGray);
+    let mut lines: Vec<Line> = Vec::new();
+    match &s.egress {
+        None => lines.push(Line::from(Span::styled(" starting scan…", dim))),
+        Some(scan) => {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {:<name_w$}  ", "check"), dim),
+                Span::styled(format!("{:<ref_w$}  ", "reference"), dim),
+                Span::styled(format!("{:<res_w$}  ", "result"), dim),
+                Span::styled("why it matters", dim),
+            ]));
+            for r in &rows {
+                lines.extend(column_lines(
+                    vec![
+                        Span::styled(
+                            format!(" {:<name_w$}  ", r.name),
+                            Style::new().fg(Color::White),
+                        ),
+                        Span::styled(
+                            format!("{:<ref_w$}  ", r.target),
+                            Style::new().fg(Color::Gray),
+                        ),
+                        Span::styled(
+                            format!("{:<res_w$}  ", r.label),
+                            Style::new().fg(r.color).bold(),
+                        ),
+                    ],
+                    &r.note,
+                    dim,
+                    indent,
+                    text_w,
+                ));
             }
             lines.push(Line::from(""));
             let summary = if scan.running {
@@ -163,23 +191,18 @@ fn egress_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                     ),
                 }
             };
-            lines.push(Line::from(Span::styled(
-                format!(" {summary}"),
-                Style::new().fg(if scan.running {
-                    Color::DarkGray
-                } else {
-                    Color::White
-                }),
-            )));
+            let style = Style::new().fg(if scan.running {
+                Color::DarkGray
+            } else {
+                Color::White
+            });
+            for chunk in wrap_words(&summary, text_w.saturating_sub(1)) {
+                lines.push(Line::from(Span::styled(format!(" {chunk}"), style)));
+            }
         }
     }
-    // Border + padding = 4 columns; the widest line decides the rest.
-    let widest = lines.iter().map(|l| l.width()).max().unwrap_or(40) as u16;
-    let width = (widest + 4)
-        .max((1 + name_w + 2 + ref_w + 2 + res_w + 2 + note_w + 4) as u16)
-        .min(area.width.saturating_sub(2))
-        .max(40.min(area.width));
-    let h = ((lines.len() as u16) + 2).clamp(5, area.height);
+    let max_h = area.height.max(1);
+    let h = ((lines.len() as u16) + 2).clamp(5.min(max_h), max_h);
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -200,7 +223,8 @@ fn egress_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         .border_style(Style::new().fg(Color::Cyan));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // Pre-wrapped into columns above; Paragraph wrap would break the indents.
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn whois_overlay(f: &mut Frame, s: &AppState, area: Rect) {
@@ -261,8 +285,9 @@ fn whois_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         )));
     }
 
+    let max_h = (area.height * 4 / 5).max(1);
     let h = ((lines.len() as u16) + 2)
-        .clamp(5, area.height * 4 / 5)
+        .clamp(5.min(max_h), max_h)
         .min(area.height);
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -291,23 +316,70 @@ fn whois_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     f.render_widget(Paragraph::new(shown), inner);
 }
 
-/// Greedy word wrap to `width` columns; a single over-long word stands alone.
+/// Greedy word wrap to `width` columns. A word wider than a whole line — a
+/// Windows path, a comma-joined address list — is split hard at the width:
+/// these wrapped strings land in aligned columns, where one over-long token
+/// overflowing its column would defeat the wrap entirely.
 fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
     let mut out = Vec::new();
     let mut cur = String::new();
+    let mut cur_w = 0usize;
     for word in text.split_whitespace() {
-        if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > width {
-            out.push(std::mem::take(&mut cur));
+        let chars: Vec<char> = word.chars().collect();
+        for piece in chars.chunks(width) {
+            if cur_w != 0 && cur_w + 1 + piece.len() > width {
+                out.push(std::mem::take(&mut cur));
+                cur_w = 0;
+            }
+            if cur_w != 0 {
+                cur.push(' ');
+                cur_w += 1;
+            }
+            cur.extend(piece.iter());
+            cur_w += piece.len();
         }
-        if !cur.is_empty() {
-            cur.push(' ');
-        }
-        cur.push_str(word);
     }
     if !cur.is_empty() || out.is_empty() {
         out.push(cur);
     }
     out
+}
+
+/// Text wrapped into its own column: `prefix` spans open the first line, and
+/// continuation lines are indented by `indent` so the text never wanders
+/// under the label/timestamp columns to its left. `indent` should equal the
+/// prefix's printed width; `width` is the whole line's budget.
+fn column_lines(
+    prefix: Vec<Span<'static>>,
+    text: &str,
+    style: Style,
+    indent: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let avail = width.saturating_sub(indent).max(8);
+    let mut prefix = Some(prefix);
+    // Text that fits is passed through untouched: wrapping goes via
+    // split_whitespace, which would collapse deliberate alignment runs
+    // ("after:  ch 149") even when no wrap was needed.
+    let chunks = if text.chars().count() <= avail {
+        vec![text.to_string()]
+    } else {
+        wrap_words(text, avail)
+    };
+    chunks
+        .into_iter()
+        .map(|chunk| match prefix.take() {
+            Some(mut spans) => {
+                spans.push(Span::styled(chunk, style));
+                Line::from(spans)
+            }
+            None => Line::from(vec![
+                Span::raw(" ".repeat(indent)),
+                Span::styled(chunk, style),
+            ]),
+        })
+        .collect()
 }
 
 /// Every stored network location with its learned baseline: what "normal"
@@ -421,7 +493,9 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     // As wide as the widest line wants (the stats line carries a lot), up to
     // nearly the terminal; never narrower than the footer hint needs.
     let widest = lines.iter().map(|l| l.width()).max().unwrap_or(60) as u16;
-    let w = (widest + 4).clamp(84.min(area.width), area.width.saturating_sub(2).max(1));
+    // Floor gives way below 86 columns — crossed clamp bounds panic.
+    let max_w = area.width.saturating_sub(2).max(1);
+    let w = (widest + 4).clamp(84.min(max_w), max_w);
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -513,9 +587,10 @@ fn explainer_overlay(f: &mut Frame, area: Rect) {
 /// The session timeline, newest first: what changed and when. This is the
 /// retroactive answer to "what happened during that call ten minutes ago?"
 fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
-    // Big but not modal-window-pretending-to-be-a-screen: 80% each way.
-    let w = (area.width * 4 / 5).max(40.min(area.width));
-    let h = (area.height * 4 / 5).max(6.min(area.height));
+    // Nearly the whole screen: event messages (paths, resolver lists) are the
+    // longest text octomon shows, and the panel exists to read them.
+    let w = (area.width * 19 / 20).max(40.min(area.width));
+    let h = (area.height * 9 / 10).max(6.min(area.height));
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -523,6 +598,10 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         height: h,
     };
     let visible = rect.height.saturating_sub(2) as usize;
+    // Border and padding cost 4 columns; messages wrap inside their own
+    // column, indented clear of the timestamp and category.
+    let text_w = rect.width.saturating_sub(4) as usize;
+    const INDENT: usize = 21; // " HH:MM:SS  " + "{:<9} "
 
     let mut lines: Vec<Line> = Vec::new();
     if s.events.is_empty() {
@@ -531,25 +610,34 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             Style::new().fg(Color::DarkGray),
         )));
     }
-    for e in s.events.iter().rev().skip(s.events_scroll).take(visible) {
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {}  ", e.when()), Style::new().fg(Color::DarkGray)),
-            Span::styled(
-                format!("{:<9} ", e.category.label()),
-                Style::new().fg(Color::Cyan),
-            ),
-            Span::styled(
-                e.message.clone(),
-                Style::new().fg(severity_color(e.severity)),
-            ),
-        ]));
+    // Entries vary in height once wrapped, so take rows until the panel is
+    // full rather than a fixed count of events.
+    let mut taken = 0usize;
+    for e in s.events.iter().rev().skip(s.events_scroll) {
+        if lines.len() >= visible {
+            break;
+        }
+        lines.extend(column_lines(
+            vec![
+                Span::styled(format!(" {}  ", e.when()), Style::new().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:<9} ", e.category.label()),
+                    Style::new().fg(Color::Cyan),
+                ),
+            ],
+            &e.message,
+            Style::new().fg(severity_color(e.severity)),
+            INDENT,
+            text_w,
+        ));
+        taken += 1;
     }
 
     let older = s
         .events
         .len()
         .saturating_sub(s.events_scroll)
-        .saturating_sub(visible);
+        .saturating_sub(taken);
     let title = format!(
         " octomon · events ({} this session{}) ",
         s.events_total,
@@ -571,7 +659,7 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
     // The list is newest-first; the cue runs the same way (top = newest).
-    let content = scroll_cue(f, inner, s.events.len(), s.events_scroll, visible);
+    let content = scroll_cue(f, inner, s.events.len(), s.events_scroll, taken.max(1));
     f.render_widget(Paragraph::new(lines), content);
 }
 
@@ -969,117 +1057,165 @@ fn severity_color(sev: Severity) -> Color {
 /// included, so the verdict is auditable rather than oracular — then the active
 /// findings with their evidence.
 fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
-    let mut lines: Vec<Line> = Vec::new();
+    // Built twice: once unwrapped to learn how wide the content wants to be,
+    // then again wrapped to the width the box actually got — so every long
+    // detail, headline and evidence line continues in its own column instead
+    // of sliding under the glyph and label to its left.
+    let build = |text_w: usize| -> Vec<Line> {
+        let mut lines: Vec<Line> = Vec::new();
 
-    for r in &s.verdict.triage.rungs {
-        let (glyph, color) = match r.status {
+        let status_glyph = |st: RungStatus| match st {
             RungStatus::Ok => ("✓", Color::Green),
             RungStatus::Warn => ("~", Color::Yellow),
             RungStatus::Bad => ("✗", Color::Red),
             RungStatus::Unknown => ("?", Color::DarkGray),
         };
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {glyph} "), Style::new().fg(color).bold()),
-            Span::styled(
-                format!("{:<15}", r.area.label()),
-                Style::new().fg(Color::White),
-            ),
-            Span::styled(r.detail.clone(), Style::new().fg(Color::Gray)),
-        ]));
-    }
+        for r in &s.verdict.triage.rungs {
+            let (glyph, color) = status_glyph(r.status);
+            lines.extend(column_lines(
+                vec![
+                    Span::styled(format!(" {glyph} "), Style::new().fg(color).bold()),
+                    Span::styled(
+                        format!("{:<15}", r.area.label()),
+                        Style::new().fg(Color::White),
+                    ),
+                ],
+                &r.detail,
+                Style::new().fg(Color::Gray),
+                18,
+                text_w,
+            ));
+        }
 
-    // The background checks: things that are not a rung but a person wants
-    // to see were done — clock, proxy, path MTU, NAT, DNS honesty.
-    if !s.verdict.triage.checks.is_empty() {
-        lines.push(Line::from(Span::styled(
-            " checks",
-            Style::new().fg(Color::White).bold(),
-        )));
-        for c in &s.verdict.triage.checks {
-            let (glyph, color) = match c.status {
-                RungStatus::Ok => ("✓", Color::Green),
-                RungStatus::Warn => ("~", Color::Yellow),
-                RungStatus::Bad => ("✗", Color::Red),
-                RungStatus::Unknown => ("?", Color::DarkGray),
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {glyph} "), Style::new().fg(color).bold()),
-                Span::styled(format!("{:<15}", c.name), Style::new().fg(Color::White)),
-                Span::styled(c.detail.clone(), Style::new().fg(Color::Gray)),
-            ]));
-        }
-    }
-
-    lines.push(Line::from(""));
-    // The record: is it always like this on this network?
-    if let Some(h) = s.history_summary()
-        && h.episodes > 0
-    {
-        lines.push(Line::from(vec![
-            Span::styled(" history ", Style::new().fg(Color::White).bold()),
-            Span::styled(h.line(), Style::new().fg(Color::Gray)),
-        ]));
-        lines.push(Line::from(""));
-    }
-    match &s.verdict.current {
-        Verdict::Insufficient(reason) => {
+        // The background checks: things that are not a rung but a person wants
+        // to see were done — clock, proxy, path MTU, NAT, DNS honesty.
+        if !s.verdict.triage.checks.is_empty() {
             lines.push(Line::from(Span::styled(
-                format!(" {reason}"),
-                Style::new().fg(Color::DarkGray),
-            )));
-        }
-        Verdict::Healthy => {
-            lines.push(Line::from(Span::styled(
-                " no findings — connection looks healthy",
-                Style::new().fg(Color::Green),
-            )));
-        }
-        Verdict::Problems(findings) => {
-            lines.push(Line::from(Span::styled(
-                " Findings",
+                " checks",
                 Style::new().fg(Color::White).bold(),
             )));
-            for finding in findings {
-                // Confidence stays internal (it drives the ranking); the
-                // evidence lines below make the case in words instead.
-                let mut head = vec![Span::styled(
-                    format!(" ▲ {}", finding.summary),
-                    Style::new().fg(severity_color(finding.severity)).bold(),
-                )];
-                if let Some(d) = active_for(finding) {
-                    head.push(Span::styled(
-                        format!("  · for {d}"),
-                        Style::new().fg(Color::Gray),
-                    ));
-                }
-                if finding.symptom {
-                    head.push(Span::styled(
-                        "  · symptom of the above",
-                        Style::new().fg(Color::DarkGray),
-                    ));
-                }
-                lines.push(Line::from(head));
-                for e in &finding.evidence {
-                    lines.push(Line::from(Span::styled(
-                        format!("     {e}"),
-                        Style::new().fg(Color::DarkGray),
-                    )));
+            for c in &s.verdict.triage.checks {
+                let (glyph, color) = status_glyph(c.status);
+                lines.extend(column_lines(
+                    vec![
+                        Span::styled(format!(" {glyph} "), Style::new().fg(color).bold()),
+                        Span::styled(format!("{:<15}", c.name), Style::new().fg(Color::White)),
+                    ],
+                    &c.detail,
+                    Style::new().fg(Color::Gray),
+                    18,
+                    text_w,
+                ));
+            }
+        }
+
+        lines.push(Line::from(""));
+        // The record: is it always like this on this network?
+        if let Some(h) = s.history_summary()
+            && h.episodes > 0
+        {
+            lines.extend(column_lines(
+                vec![Span::styled(
+                    " history ",
+                    Style::new().fg(Color::White).bold(),
+                )],
+                &h.line(),
+                Style::new().fg(Color::Gray),
+                9,
+                text_w,
+            ));
+            lines.push(Line::from(""));
+        }
+        match &s.verdict.current {
+            Verdict::Insufficient(reason) => {
+                lines.push(Line::from(Span::styled(
+                    format!(" {reason}"),
+                    Style::new().fg(Color::DarkGray),
+                )));
+            }
+            Verdict::Healthy => {
+                lines.push(Line::from(Span::styled(
+                    " no findings — connection looks healthy",
+                    Style::new().fg(Color::Green),
+                )));
+            }
+            Verdict::Problems(findings) => {
+                lines.push(Line::from(Span::styled(
+                    " Findings",
+                    Style::new().fg(Color::White).bold(),
+                )));
+                for finding in findings {
+                    // Confidence stays internal (it drives the ranking); the
+                    // evidence lines below make the case in words instead.
+                    let mut head = column_lines(
+                        vec![Span::styled(
+                            " ▲ ",
+                            Style::new().fg(severity_color(finding.severity)).bold(),
+                        )],
+                        &finding.summary,
+                        Style::new().fg(severity_color(finding.severity)).bold(),
+                        3,
+                        text_w,
+                    );
+                    // Duration / symptom tags ride on the headline's last
+                    // line when they fit, and take their own line when not.
+                    let mut tags: Vec<Span> = Vec::new();
+                    if let Some(d) = active_for(finding) {
+                        tags.push(Span::styled(
+                            format!("  · for {d}"),
+                            Style::new().fg(Color::Gray),
+                        ));
+                    }
+                    if finding.symptom {
+                        tags.push(Span::styled(
+                            "  · symptom of the above",
+                            Style::new().fg(Color::DarkGray),
+                        ));
+                    }
+                    if !tags.is_empty() {
+                        let tags_w: usize = tags.iter().map(|t| t.width()).sum();
+                        let last = head.last_mut().expect("column_lines is never empty");
+                        if last.width() + tags_w <= text_w {
+                            for t in tags {
+                                last.push_span(t);
+                            }
+                        } else {
+                            let mut spans = vec![Span::raw("   ")];
+                            spans.extend(tags);
+                            head.push(Line::from(spans));
+                        }
+                    }
+                    lines.extend(head);
+                    for e in &finding.evidence {
+                        lines.extend(column_lines(
+                            vec![Span::raw("     ")],
+                            e,
+                            Style::new().fg(Color::DarkGray),
+                            5,
+                            text_w,
+                        ));
+                    }
                 }
             }
         }
-    }
+        lines
+    };
 
     // As wide as the content wants, up to nearly the terminal: a finding's
     // headline with its duration should not wrap when there is room.
-    let widest = lines.iter().map(|l| l.width()).max().unwrap_or(60) as u16;
-    let w = (widest + 4).clamp(78.min(area.width), area.width.saturating_sub(2).max(1));
+    let widest = build(usize::MAX / 2)
+        .iter()
+        .map(|l| l.width())
+        .max()
+        .unwrap_or(60) as u16;
+    // The preferred floor gives way on a terminal too narrow to hold it —
+    // clamp panics outright when its bounds cross.
+    let max_w = area.width.saturating_sub(2).max(1);
+    let w = (widest + 4).clamp(78.min(max_w), max_w);
     // Border + 1-column padding each side.
     let text_w = w.saturating_sub(4).max(1) as usize;
-    let wrapped: usize = lines
-        .iter()
-        .map(|l| l.width().max(1).div_ceil(text_w))
-        .sum();
-    let h = (wrapped as u16 + 2).min(area.height);
+    let lines = build(text_w);
+    let h = (lines.len() as u16 + 2).min(area.height);
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -1097,7 +1233,8 @@ fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         .border_style(Style::new().fg(Color::Cyan));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // Pre-wrapped above; Paragraph-level wrap would only mangle the indents.
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn block(title: &str, focused: bool) -> Block<'static> {
@@ -1123,6 +1260,10 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         && (s.fullscreen || (s.quality_view == QualityView::Graph && inner.height >= 13));
     let web_h: u16 = match (show_web, s.fullscreen) {
         (false, _) => 0,
+        // Full-screen normally has room for the tall strip, but on a short
+        // viewport those rows are better spent on the path views above,
+        // which by then are rationing hop rows.
+        (true, true) if inner.height < 40 => 4,
         (true, true) => 6,
         (true, false) => 4,
     };
@@ -2567,8 +2708,8 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
 
     let mut right = vec![
         head("Connection Quality"),
-        row("a", "add target (pre-fills hop)"),
-        row("d / Del", "delete selected target"),
+        row("a", "add target (remembered)"),
+        row("d / Del", "delete + forget target"),
         row("g", "graph selected target"),
         row("t", "traceroute once"),
         row("m", "monitor every hop (MTR)"),
@@ -2687,76 +2828,109 @@ fn net_history_pane(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
             Paragraph::new(Span::styled(
                 " no changes yet — joins, roams, address and route changes land here",
                 Style::new().fg(Color::DarkGray),
-            )),
+            ))
+            .wrap(Wrap { trim: false }),
             inner,
         );
         return;
     }
     // List on top, detail of the selected entry below; the detail gets what
-    // it needs (its lines + a header), the list the rest.
+    // it needs (its wrapped lines + a header), the list the rest.
     let sel = s.selected_net_change();
-    let detail_h = sel
-        .map(|c| c.detail.len() as u16 + 1)
-        .unwrap_or(0)
-        .min(inner.height / 2);
+    let text_w = inner.width as usize;
+    // The detail is wrapped up front — its before/after resolver lists are
+    // exactly the lines that outgrow the pane — so the layout can size the
+    // pane from what will actually be printed.
+    let detail: Vec<Line> = match sel {
+        None => Vec::new(),
+        Some(c) => {
+            let mut d = vec![Line::from(Span::styled(
+                format!(" {} · {}", c.kind.label(), c.iface),
+                Style::new().fg(Color::White).bold(),
+            ))];
+            for l in &c.detail {
+                d.extend(column_lines(
+                    vec![Span::raw("  ")],
+                    l,
+                    Style::new().fg(Color::Gray),
+                    2,
+                    text_w,
+                ));
+            }
+            d
+        }
+    };
+    let detail_h = (detail.len() as u16).min(inner.height / 2);
     let parts = Layout::vertical([Constraint::Min(1), Constraint::Length(detail_h)]).split(inner);
     let list_area = parts[0];
     let visible = list_area.height as usize;
-    // Keep the cursor on screen.
-    let first = s.net_history_sel.saturating_sub(visible.saturating_sub(1));
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, c) in s
+
+    // Each entry wrapped, summary continuing under its own column — which
+    // makes entries vary in height, so the scroll window is chosen by rows.
+    use chrono::TimeZone as _;
+    let wrapped: Vec<Vec<Line>> = s
         .net_history
         .iter()
         .rev()
         .enumerate()
-        .skip(first)
-        .take(visible)
-    {
-        let selected = focused && i == s.net_history_sel;
-        use chrono::TimeZone as _;
-        let when = chrono::Local
-            .timestamp_opt(c.at, 0)
-            .single()
-            .map(|dt| dt.format("%H:%M:%S").to_string())
-            .unwrap_or_else(|| "—".to_string());
-        let style = if selected {
-            Style::new().fg(Color::Black).bg(Color::Cyan)
-        } else {
-            Style::new()
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {when} "),
-                style.fg(if selected {
-                    Color::Black
-                } else {
-                    Color::DarkGray
-                }),
-            ),
-            Span::styled(
-                format!("{:<10} ", c.kind.label()),
-                style.fg(if selected { Color::Black } else { Color::Cyan }),
-            ),
-            Span::styled(c.summary.clone(), style),
-        ]));
+        .map(|(i, c)| {
+            let selected = focused && i == s.net_history_sel;
+            let when = chrono::Local
+                .timestamp_opt(c.at, 0)
+                .single()
+                .map(|dt| dt.format("%H:%M:%S").to_string())
+                .unwrap_or_else(|| "—".to_string());
+            let style = if selected {
+                Style::new().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::new()
+            };
+            column_lines(
+                vec![
+                    Span::styled(
+                        format!(" {when} "),
+                        style.fg(if selected {
+                            Color::Black
+                        } else {
+                            Color::DarkGray
+                        }),
+                    ),
+                    Span::styled(
+                        format!("{:<10} ", c.kind.label()),
+                        style.fg(if selected { Color::Black } else { Color::Cyan }),
+                    ),
+                ],
+                &c.summary,
+                style,
+                21,
+                text_w,
+            )
+        })
+        .collect();
+    // Walk back from the selection until the window is full, so the cursor
+    // stays on screen however tall the wrapped entries above it are.
+    let sel_i = s.net_history_sel.min(wrapped.len().saturating_sub(1));
+    let mut first = sel_i;
+    let mut used = wrapped[sel_i].len();
+    while first > 0 && used + wrapped[first - 1].len() <= visible {
+        first -= 1;
+        used += wrapped[first].len();
     }
-    let content = scroll_cue(f, list_area, s.net_history.len(), first, visible);
-    f.render_widget(Paragraph::new(lines), content);
-    if let Some(c) = sel
-        && detail_h > 0
-    {
-        let mut d = vec![Line::from(Span::styled(
-            format!(" {} · {}", c.kind.label(), c.iface),
-            Style::new().fg(Color::White).bold(),
-        ))];
-        for l in &c.detail {
-            d.push(Line::from(Span::styled(
-                format!("  {l}"),
-                Style::new().fg(Color::Gray),
-            )));
+    let mut lines: Vec<Line> = Vec::new();
+    let mut shown = 0usize;
+    for entry in wrapped.iter().skip(first) {
+        // Whole entries only — except one too tall for the pane by itself,
+        // which is shown clipped rather than not at all.
+        if !lines.is_empty() && lines.len() + entry.len() > visible {
+            break;
         }
-        f.render_widget(Paragraph::new(d), parts[1]);
+        lines.extend(entry.iter().cloned());
+        shown += 1;
+    }
+    let content = scroll_cue(f, list_area, s.net_history.len(), first, shown.max(1));
+    f.render_widget(Paragraph::new(lines), content);
+    if detail_h > 0 {
+        f.render_widget(Paragraph::new(detail), parts[1]);
     }
 }
 
@@ -2818,27 +2992,33 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         ));
     }
 
-    let mut lines = vec![
-        kv("iface", iface),
-        Line::from(type_row),
-        kv(
-            "ipv4",
-            if n.ipv4.is_empty() {
-                "-".into()
-            } else {
-                n.ipv4.join(", ")
-            },
-        ),
-        kv(
-            "ipv6",
-            if n.ipv6.is_empty() {
-                "-".into()
-            } else {
-                n.ipv6.join(", ")
-            },
-        ),
-        kv("mac", dash(&n.mac)),
-    ];
+    let text_w = inner.width as usize;
+    let label = |k: &str| Span::styled(format!("{k:<9}"), Style::new().fg(Color::DarkGray));
+    // A value that can outgrow the panel (address lists on multihomed
+    // machines, resolver lists) wraps under its own column instead of
+    // clipping at the border.
+    let kv_wrapped = |k: &str, v: &str| -> Vec<Line<'static>> {
+        column_lines(vec![label(k)], v, Style::new(), 9, text_w)
+    };
+
+    let mut lines = vec![kv("iface", iface), Line::from(type_row)];
+    lines.extend(kv_wrapped(
+        "ipv4",
+        &if n.ipv4.is_empty() {
+            "-".to_string()
+        } else {
+            n.ipv4.join(", ")
+        },
+    ));
+    lines.extend(kv_wrapped(
+        "ipv6",
+        &if n.ipv6.is_empty() {
+            "-".to_string()
+        } else {
+            n.ipv6.join(", ")
+        },
+    ));
+    lines.push(kv("mac", dash(&n.mac)));
 
     // A tunnel hides the real path: the encapsulated hops never answer ICMP, so
     // an empty traceroute is expected rather than a fault. Say so instead of
@@ -2855,17 +3035,10 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
             ));
         }
         lines.push(Line::from(row));
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:<9}", "gateway"),
-                Style::new().fg(Color::DarkGray),
-            ),
-            Span::raw(format!(
-                "{}  ({})",
-                dash(&n.gateway_ip),
-                dash(&n.gateway_mac)
-            )),
-        ]));
+        lines.extend(kv_wrapped(
+            "gateway",
+            &format!("{}  ({})", dash(&n.gateway_ip), dash(&n.gateway_mac)),
+        ));
         // A split tunnel leaves the default route on the physical NIC, so the
         // gateway above is the real, reachable LAN gateway — internet traffic
         // simply never uses it. Don't mislabel it as the tunnel endpoint.
@@ -2884,7 +3057,7 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         if !n.gateway_ipv6.is_empty() && n.gateway_ipv6 != n.gateway_ip {
             row.push_str(&format!("  · v6 {}", n.gateway_ipv6));
         }
-        lines.push(kv("gateway", row));
+        lines.extend(kv_wrapped("gateway", &row));
     }
 
     // The clock, only when it is wrong: right is the expected state.
@@ -2962,7 +3135,7 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         ]));
     }
 
-    lines.push(dns_line(s));
+    lines.extend(dns_lines(s, text_w));
     if let Some(l) = http_line(s) {
         lines.push(l);
     }
@@ -3187,45 +3360,43 @@ fn dns_graphs(f: &mut Frame, s: &AppState, area: Rect) {
 /// The `dns` row, annotated with each resolver's measured response time. A
 /// resolver can answer pings in 2ms while taking 800ms to resolve, so the
 /// address alone tells you nothing about whether it is the problem.
-fn dns_line(s: &AppState) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        format!("{:<9}", "dns"),
-        Style::new().fg(Color::DarkGray),
-    )];
+/// The `dns` rows: each resolver with its reading is one indivisible group —
+/// a line break lands between resolvers, never between an address and its
+/// reading — and continuation lines stay in the value column.
+fn dns_lines(s: &AppState, width: usize) -> Vec<Line<'static>> {
+    let label = Span::styled(format!("{:<9}", "dns"), Style::new().fg(Color::DarkGray));
     if s.netinfo.dns.is_empty() {
-        spans.push(Span::raw("-"));
-        return Line::from(spans);
+        return vec![Line::from(vec![label, Span::raw("-")])];
     }
 
-    for (i, server) in s.netinfo.dns.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled("  ", Style::new()));
-        }
-        spans.push(Span::raw(server.clone()));
+    let mut groups: Vec<Vec<Span<'static>>> = Vec::new();
+    for server in s.netinfo.dns.iter() {
+        let mut g = vec![Span::raw(server.clone())];
         let probe = s.dns.iter().find(|p| p.server.to_string() == *server);
         match probe {
             // A failing resolver is the headline, not its latency.
             Some(p) if !p.status.is_empty() && p.last_ms.is_none() => {
-                spans.push(Span::styled(
+                g.push(Span::styled(
                     format!(" ({})", p.status),
                     Style::new().fg(Color::Red).bold(),
                 ));
             }
             Some(p) => match p.last_ms {
-                Some(ms) => spans.push(Span::styled(
+                Some(ms) => g.push(Span::styled(
                     format!(" ({ms:.0}ms)"),
                     Style::new().fg(dns_color(ms)),
                 )),
-                None => spans.push(Span::styled(" (…)", Style::new().fg(Color::DarkGray))),
+                None => g.push(Span::styled(" (…)", Style::new().fg(Color::DarkGray))),
             },
-            None => spans.push(Span::styled(" (…)", Style::new().fg(Color::DarkGray))),
+            None => g.push(Span::styled(" (…)", Style::new().fg(Color::DarkGray))),
         }
         if probe.is_some_and(|p| p.hijack == Some(true)) {
-            spans.push(Span::styled(
+            g.push(Span::styled(
                 " ⚠ redirects",
                 Style::new().fg(Color::Red).bold(),
             ));
         }
+        groups.push(g);
     }
     // The public reference resolver, for contrast — dimmed, it isn't ours.
     if let Some(r) = s.dns.iter().find(|p| p.reference) {
@@ -3234,22 +3405,43 @@ fn dns_line(s: &AppState) -> Line<'static> {
             None if !r.status.is_empty() => r.status.clone(),
             None => "…".to_string(),
         };
-        spans.push(Span::styled(
-            format!("  ref {} ({reading})", r.server),
+        let mut g = vec![Span::styled(
+            format!("ref {} ({reading})", r.server),
             Style::new().fg(if r.last_ms.is_none() && !r.status.is_empty() {
                 Color::Yellow
             } else {
                 Color::DarkGray
             }),
-        ));
+        )];
         if r.hijack == Some(true) {
-            spans.push(Span::styled(
+            g.push(Span::styled(
                 " ⚠ redirects",
                 Style::new().fg(Color::Red).bold(),
             ));
         }
+        groups.push(g);
     }
-    Line::from(spans)
+
+    // Pack whole groups into lines; a break never splits a group.
+    let mut lines: Vec<Line> = Vec::new();
+    let mut cur: Vec<Span> = vec![label];
+    let mut cur_w = 9usize;
+    for g in groups {
+        let g_w: usize = g.iter().map(|sp| sp.width()).sum();
+        if cur_w > 9 && cur_w + 2 + g_w > width {
+            lines.push(Line::from(std::mem::take(&mut cur)));
+            cur = vec![Span::raw(" ".repeat(9))];
+            cur_w = 9;
+        }
+        if cur_w > 9 {
+            cur.push(Span::raw("  "));
+            cur_w += 2;
+        }
+        cur_w += g_w;
+        cur.extend(g);
+    }
+    lines.push(Line::from(cur));
+    lines
 }
 
 /// The internet-level HTTP check ("can I reach the internet the way a browser
@@ -4074,6 +4266,115 @@ mod tests {
             "25 timing out while 22/993 to the same host answer is filtering, not a dead host"
         );
         assert!(out.contains("r rescan"));
+
+        // With nothing filtered, the result column shrinks to the labels on
+        // screen — no gulf sized for the FILTERED label that never appears.
+        s.egress = Some(Scan {
+            started: std::time::Instant::now(),
+            running: false,
+            results: vec![
+                check("SSH", 22, Outcome::Open(12.0)),
+                check("IMAPS", 993, Outcome::Open(9.0)),
+            ],
+        });
+        let out = draw(&s, 120, 30);
+        assert!(
+            out.contains("result     why it matters"),
+            "5-space gap: the column fits 'open 12ms', not the widest possible label"
+        );
+
+        // A note longer than the box wraps inside its own column instead of
+        // spilling to the left margin; its tail stays readable.
+        let mut long = check("SSH", 22, Outcome::Open(12.0));
+        long.check.note = "git over ssh, remote shells and captive portals live here".into();
+        s.egress = Some(Scan {
+            started: std::time::Instant::now(),
+            running: false,
+            results: vec![long],
+        });
+        let out = draw(&s, 70, 30);
+        assert!(out.contains("live here"), "note tail survives the wrap");
+    }
+
+    /// Every overlay must survive a degenerate terminal. The analysis
+    /// overlay's width clamp panicked below 80 columns (min > max), which
+    /// poisoned the state lock and took the collectors down with it.
+    #[test]
+    fn overlays_survive_tiny_terminals() {
+        use crate::app::TargetStat;
+        use std::net::{IpAddr, Ipv4Addr};
+        let mut s = AppState::new(vec![TargetStat::new(
+            "Cloudflare".into(),
+            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+        )]);
+        // Findings give the analysis overlay real content to size against.
+        for _ in 0..10 {
+            s.targets[0].record_loss();
+        }
+        s.verdict = crate::verdict::VerdictState::default();
+        s.verdict.triage = crate::verdict::evaluate(&s);
+        for overlay in [
+            Overlay::Triage,
+            Overlay::Events,
+            Overlay::Egress,
+            Overlay::Locations,
+            Overlay::Help,
+        ] {
+            s.overlay = overlay;
+            for (w, h) in [(20, 4), (40, 8), (79, 20)] {
+                draw(&s, w, h); // not panicking is the assertion
+            }
+        }
+    }
+
+    /// Long event messages wrap inside the message column; the tail is
+    /// readable instead of clipped at the border.
+    #[test]
+    fn events_overlay_wraps_long_messages() {
+        let mut s = AppState::new(vec![]);
+        s.overlay = Overlay::Events;
+        s.push_event(
+            Severity::Info,
+            crate::app::EventCategory::Network,
+            "DNS servers changed to 192.168.1.4 and 172.64.36.1 and 172.64.36.2 and finally omega"
+                .into(),
+        );
+        let out = draw(&s, 80, 24);
+        assert!(out.contains("DNS servers changed"));
+        assert!(out.contains("omega"), "tail of the message survives");
+    }
+
+    /// The dns row wraps between resolvers — a reading never separates from
+    /// its server — and continuations stay in the value column.
+    #[test]
+    fn dns_rows_wrap_between_resolvers() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let mut s = AppState::new(vec![]);
+        s.netinfo.dns = vec![
+            "192.168.1.4".into(),
+            "172.64.36.1".into(),
+            "172.64.36.2".into(),
+        ];
+        for (a, ms) in [([192, 168, 1, 4], 2.0), ([172, 64, 36, 1], 6.0)] {
+            let mut p = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::from(a)));
+            p.record(Some(ms));
+            s.dns.push(p);
+        }
+        let lines = dns_lines(&s, 40);
+        assert!(lines.len() > 1, "three resolvers cannot fit in 40 columns");
+        for l in &lines {
+            assert!(l.width() <= 40, "line overflows: {l:?}");
+        }
+        let texts: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert!(texts[0].starts_with("dns"));
+        assert!(
+            texts[1].starts_with("         "),
+            "continuation is indented into the value column: {:?}",
+            texts[1]
+        );
+        // The group is indivisible: each server's reading sits beside it.
+        let with_reading = texts.iter().find(|t| t.contains("172.64.36.1")).unwrap();
+        assert!(with_reading.contains("(6ms)"));
     }
 
     #[test]
@@ -4117,6 +4418,26 @@ mod tests {
         let out = draw(&s, 140, 40);
         assert!(out.contains("wifi roam · en0"));
         assert!(out.contains("after:  ch 149"));
+
+        // Long summaries and before/after details wrap inside the pane; the
+        // tail is readable instead of clipped at the border.
+        s.push_net_change(
+            crate::app::NetChangeKind::AddressChanged,
+            "en0".into(),
+            "DNS servers changed → 192.168.1.4, 172.64.36.1, 172.64.36.2, fe80::dad5:b9ff:fe00:b601"
+                .into(),
+            vec![
+                "before: 192.168.1.4, 172.64.36.1, 172.64.36.2, fe80::dad5:b9ff:fe00:b601"
+                    .into(),
+            ],
+        );
+        s.net_history_sel = 0;
+        let out = draw(&s, 100, 40);
+        assert!(
+            out.contains("fe80::dad5:b9ff:fe00:b601"),
+            "summary tail wraps into view"
+        );
+        assert!(out.contains("before:"), "detail present");
     }
 
     #[test]
@@ -4891,7 +5212,28 @@ mod tests {
         let lines = wrap_words("aa bb cc dd", 5);
         assert_eq!(lines, vec!["aa bb", "cc dd"]);
         assert_eq!(wrap_words("", 5), vec![""]);
-        assert_eq!(wrap_words("abcdefghij", 5), vec!["abcdefghij"]);
+        // Over-long single words split hard: these strings land in aligned
+        // columns, where an unbroken path or address list would overflow.
+        assert_eq!(wrap_words("abcdefghij", 5), vec!["abcde", "fghij"]);
+        assert_eq!(
+            wrap_words("x C:\\Users\\S\\file.csv", 8),
+            vec!["x", "C:\\Users", "\\S\\file.", "csv"]
+        );
+    }
+
+    /// Continuations stay in their own column, indented past the prefix.
+    #[test]
+    fn column_lines_keep_the_hanging_indent() {
+        let lines = column_lines(
+            vec![Span::raw("label:  ")],
+            "one two three four",
+            Style::new(),
+            8,
+            18,
+        );
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(text[0], "label:  one two");
+        assert_eq!(text[1], "        three four");
     }
 
     /// The scroll cue is a visual only — no mouse — so it appears only when
@@ -5077,7 +5419,7 @@ mod tests {
         // in each column and were truncated before the key field was narrowed.
         for desc in [
             "cycle panels",
-            "add target (pre-fills hop)",
+            "add target (remembered)",
             "full-screen focused panel",
             "back / exit full-screen",
             "start / stop CSV recording",

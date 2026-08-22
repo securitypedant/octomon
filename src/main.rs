@@ -125,7 +125,13 @@ async fn main() -> Result<()> {
     let targets = cfg
         .targets
         .iter()
-        .map(|t| TargetStat::new(t.label.clone(), t.addr))
+        .map(|t| {
+            let mut stat = TargetStat::new(t.label.clone(), t.addr);
+            // A saved name-target keeps behaving like one: re-resolved on
+            // network changes, web-probed with real SNI.
+            stat.hostname = t.host.clone();
+            stat
+        })
         .collect();
     let state = Arc::new(Mutex::new(AppState::new(targets)));
     {
@@ -541,6 +547,8 @@ enum Side {
     ExportEvents(Vec<app::EventItem>),
     /// Run the outbound port scan for the [c] overlay.
     EgressScan,
+    /// Remove a deleted target from the config file (user-added ones only).
+    ForgetTarget(IpAddr),
 }
 
 /// Remove the selected target, pulling the dependent cursors back into range.
@@ -975,8 +983,15 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     }
                     _ => {}
                 },
-                // Delete the selected target.
+                // Delete the selected target. A user-added one is also
+                // forgotten in the config, or it would be back next start;
+                // discovered targets never reached the file.
                 KeyCode::Char('d') | KeyCode::Delete if s.focus == Panel::Quality => {
+                    if let Some(t) = s.targets.get(s.selected)
+                        && !t.discovered
+                    {
+                        side = Side::ForgetTarget(t.addr);
+                    }
                     delete_selected_target(&mut s);
                 }
                 // Bandwidth: move the top-talkers column cursor and sort.
@@ -1158,6 +1173,9 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
         Side::SaveProvider(name) => {
             tokio::task::spawn_blocking(move || config::Config::persist_provider(&name));
         }
+        Side::ForgetTarget(addr) => {
+            tokio::task::spawn_blocking(move || config::Config::persist_target_removed(addr));
+        }
         Side::NameNetwork { key, label, name } => {
             tokio::task::spawn_blocking(move || baseline::name_network(&key, &label, &name));
         }
@@ -1244,7 +1262,7 @@ async fn add_target(
         let mut s = state.lock().unwrap();
         let idx = s.targets.len();
         let mut target = TargetStat::new(input.clone(), addr);
-        target.hostname = hostname;
+        target.hostname = hostname.clone();
         let id = target.id;
         s.targets.push(target);
         s.refreeze = true;
@@ -1252,6 +1270,11 @@ async fn add_target(
         s.graph_target = idx;
         id
     };
+    // Added targets survive restarts: remembered in the config file the
+    // moment they resolve, and forgotten again when deleted with [d].
+    tokio::task::spawn_blocking(move || {
+        Config::persist_target_added(&input, addr, hostname.as_deref());
+    });
     collectors::ping::spawn_for(state, clients, cfg, id, addr);
 }
 
