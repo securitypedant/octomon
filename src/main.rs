@@ -549,6 +549,8 @@ enum Side {
     EgressScan,
     /// Remove a deleted target from the config file (user-added ones only).
     ForgetTarget(IpAddr),
+    /// Remove a deleted location's stored baseline from baselines.json.
+    ForgetLocation(String),
 }
 
 /// Remove the selected target, pulling the dependent cursors back into range.
@@ -855,6 +857,13 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 KeyCode::PageDown if s.overlay == Overlay::Events => {
                     s.events_scroll = s.events_scroll.saturating_sub(10);
                 }
+                // Clear the timeline: a busy session buries the events that
+                // matter. Capital C — a slip of the finger should not wipe
+                // the record. The session counter in the title stays honest.
+                KeyCode::Char('C') if s.overlay == Overlay::Events => {
+                    s.events.clear();
+                    s.events_scroll = 0;
+                }
                 // Export the timeline. An empty one is not worth a file.
                 KeyCode::Char('x') if s.overlay == Overlay::Events => {
                     if s.events.is_empty() {
@@ -875,6 +884,42 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         s.rename_target = Some((key, label));
                         s.input_buffer = name.unwrap_or_default();
                         s.input_mode = InputMode::RenameLocation;
+                    }
+                }
+                // Delete the selected location — its learned baseline and its
+                // place in the list. Deleting the network we are *on* means
+                // "forget what you learned here", not "stop tracking where I
+                // am": it comes straight back as a blank entry that keeps
+                // only its identity (label, medium) and starts learning anew.
+                KeyCode::Char('d') | KeyCode::Delete if s.overlay == Overlay::Locations => {
+                    let picked = s
+                        .locations_view()
+                        .and_then(|all| all.get(s.locations_sel).cloned())
+                        .map(|(key, b)| (key, b.display_name().to_string()));
+                    if let Some((key, name)) = picked {
+                        // The delete and the re-add are instantaneous, so
+                        // without a word the key press looks ignored.
+                        if s.baseline_key.as_deref() == Some(key.as_str()) {
+                            s.baseline = s.baseline.take().map(|old| baseline::Baseline {
+                                label: old.label,
+                                medium: old.medium,
+                                ..Default::default()
+                            });
+                            s.notice = Some(format!(
+                                "{name} deleted — you are still on it, so it is back as a blank entry learning from scratch"
+                            ));
+                        } else {
+                            s.notice = Some(format!("{name} deleted"));
+                        }
+                        if let Some(list) = s.locations.as_mut() {
+                            list.retain(|(k, _)| k != &key);
+                        }
+                        let last = s
+                            .locations_view()
+                            .map(|l| l.len().saturating_sub(1))
+                            .unwrap_or(0);
+                        s.locations_sel = s.locations_sel.min(last);
+                        side = Side::ForgetLocation(key);
                     }
                 }
                 KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Locations => {
@@ -1076,6 +1121,16 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 KeyCode::Right if s.focus == Panel::Quality => {
                     s.q_col = (s.q_col + 1).min(5);
                 }
+                // ←/→ walk the resolvers on the dns row — they sit side by
+                // side, so sideways is the natural direction; ↑↓ stay with
+                // the history pane.
+                KeyCode::Left if s.focus == Panel::NetInfo && s.sub_pane == SubPane::Primary => {
+                    s.dns_sel = s.dns_sel.saturating_sub(1);
+                }
+                KeyCode::Right if s.focus == Panel::NetInfo && s.sub_pane == SubPane::Primary => {
+                    let last = s.netinfo.dns.len().saturating_sub(1);
+                    s.dns_sel = (s.dns_sel + 1).min(last);
+                }
                 KeyCode::Enter if s.focus == Panel::Quality => {
                     let col = s.q_col;
                     s.q_sort = match s.q_sort {
@@ -1100,7 +1155,9 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 // Shift+W asks the registry who owns the selected address — a
                 // target, or the hop under the cursor in the path monitor. That
                 // is the question a bad hop raises: whose router is it?
-                KeyCode::Char('W') if matches!(s.focus, Panel::Quality | Panel::Bandwidth) => {
+                KeyCode::Char('W')
+                    if matches!(s.focus, Panel::Quality | Panel::Bandwidth | Panel::NetInfo) =>
+                {
                     if let Some(addr) = s.selected_addr() {
                         s.whois_scroll = 0;
                         s.overlay = Overlay::Whois;
@@ -1175,6 +1232,9 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
         }
         Side::ForgetTarget(addr) => {
             tokio::task::spawn_blocking(move || config::Config::persist_target_removed(addr));
+        }
+        Side::ForgetLocation(key) => {
+            tokio::task::spawn_blocking(move || baseline::forget(&key));
         }
         Side::NameNetwork { key, label, name } => {
             tokio::task::spawn_blocking(move || baseline::name_network(&key, &label, &name));
@@ -1597,8 +1657,8 @@ fn doctor_report(s: &AppState, full: bool) -> (String, i32) {
         );
         let _ = writeln!(
             out,
-            "  ({} healthy minutes learned{})",
-            b.samples,
+            "  ({} of healthy minutes learned{})",
+            util::fmt_minutes(b.samples as u64),
             if b.established() {
                 ""
             } else {

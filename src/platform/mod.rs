@@ -139,6 +139,48 @@ pub fn wifi_signal() -> Option<WifiSignal> {
     None
 }
 
+/// The DNS search domains in force for the default interface: the suffixes
+/// the OS appends to bare names ("nas" → "nas.thorpevillage.local"). They
+/// name what only the network's own resolver can answer. Empty when the OS
+/// has none configured or the source cannot be read.
+#[cfg(not(windows))]
+pub fn dns_search_domains(_iface_index: u32) -> Vec<String> {
+    // resolv.conf is the one place every Unix agrees on: macOS's configd
+    // writes it, systemd-resolved's stub carries `search`, and a hand-edited
+    // one has it too. `search` and `domain` are alternatives for the same
+    // thing; whichever appears, in order, deduplicated.
+    std::fs::read_to_string("/etc/resolv.conf")
+        .map(|text| parse_resolv_search(&text))
+        .unwrap_or_default()
+}
+
+#[cfg(windows)]
+pub fn dns_search_domains(iface_index: u32) -> Vec<String> {
+    windows::dns_search_domains(iface_index)
+}
+
+/// `search` / `domain` directives out of resolv.conf text.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn parse_resolv_search(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let mut words = line.split_whitespace();
+        match words.next() {
+            Some("search") | Some("domain") => {
+                for d in words {
+                    let d = d.trim_end_matches('.').to_string();
+                    if !d.is_empty() && !out.iter().any(|o| o == &d) {
+                        out.push(d);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Whether the console's current font contains every glyph in `chars` —
 /// `None` when there is no console window or the font cannot be asked.
 /// Windows-only: everywhere else the terminal emulator does its own font
@@ -1108,6 +1150,17 @@ ESTAB 0 0 [fe80::1%eth0]:52001 [fe80::2%eth0]:22 users:((\"ssh\",pid=2,fd=4)) in
 #[cfg(test)]
 mod endpoint_tests {
     use super::parse_endpoint;
+
+    #[test]
+    fn resolv_conf_search_and_domain_both_count() {
+        let text = "# macOS configd\nnameserver 192.168.1.4\nsearch thorpevillage.local. corp.example\ndomain thorpevillage.local\nnameserver 172.64.36.1\n";
+        assert_eq!(
+            super::parse_resolv_search(text),
+            vec!["thorpevillage.local", "corp.example"],
+            "order kept, trailing dot dropped, duplicate folded"
+        );
+        assert!(super::parse_resolv_search("nameserver 1.1.1.1\n").is_empty());
+    }
 
     #[test]
     fn every_printed_endpoint_shape_parses() {

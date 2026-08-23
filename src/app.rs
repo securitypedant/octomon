@@ -682,6 +682,10 @@ pub struct NetInfo {
     pub iface_label: String,
     /// DNS resolver addresses for this interface.
     pub dns: Vec<String>,
+    /// DNS search domains (resolv.conf `search`/`domain`, a Windows
+    /// connection-specific suffix): the names only this network's own
+    /// resolver can answer, which is what a failing LAN resolver takes away.
+    pub dns_search: Vec<String>,
     /// Extra link facts the OS exposes — negotiated speed, DHCP — shown after
     /// the medium. Empty when nothing is known.
     pub link_detail: String,
@@ -878,7 +882,30 @@ impl DnsProbe {
         let failed = self.window.iter().filter(|ok| !**ok).count();
         failed as f64 / self.window.len() as f64 * 100.0
     }
+
+    /// Whether this resolver reads as failing. Two judgements, the quicker
+    /// of which wins in each direction: the failure share over the recent
+    /// window, and the last few outcomes outright — three timeouts in a row
+    /// is a dead resolver without waiting for the minute to fill with them,
+    /// and three answers in a row is a live one without waiting for the old
+    /// timeouts to age out. A stopped-then-restarted server reads as down in
+    /// ~15 s and as back in ~15 s, not half a minute each way.
+    pub fn failing(&self, fail_pct_threshold: f64) -> bool {
+        let tail: Vec<bool> = self.window.iter().rev().take(DNS_STREAK).copied().collect();
+        if tail.len() == DNS_STREAK {
+            if tail.iter().all(|ok| !ok) {
+                return true;
+            }
+            if tail.iter().all(|ok| *ok) {
+                return false;
+            }
+        }
+        self.fail_pct() >= fail_pct_threshold
+    }
 }
+
+/// Consecutive outcomes that settle a resolver's state on their own.
+pub const DNS_STREAK: usize = 3;
 
 /// One address family's HTTP reachability probe result.
 #[derive(Clone, Default, PartialEq, Debug)]
@@ -1195,6 +1222,102 @@ impl Default for History {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    /// A resolver is judged by its last few outcomes before the minute-long
+    /// window: three timeouts in a row is down, three answers in a row is
+    /// back — in both cases without waiting for the window to turn over.
+    #[test]
+    fn a_resolver_is_judged_down_and_back_by_streak() {
+        let mut p = DnsProbe::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 4)));
+        for _ in 0..DNS_RECENT {
+            p.record(Some(5.0));
+        }
+        p.record(None);
+        p.record(None);
+        assert!(!p.failing(50.0), "two timeouts are not yet an outage");
+        p.record(None);
+        assert!(p.failing(50.0), "three in a row is, at 25% of the window");
+        // Stopped for a while: the window is mostly failures now.
+        for _ in 0..DNS_RECENT {
+            p.record(None);
+        }
+        p.record(Some(5.0));
+        p.record(Some(5.0));
+        assert!(p.failing(50.0), "two answers do not clear a full window");
+        p.record(Some(5.0));
+        assert!(!p.failing(50.0), "three answers in a row: it is back");
+        // No streak to go on: the window share decides.
+        let mut q = DnsProbe::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 4)));
+        for ok in [false, true, false, true, false, true] {
+            q.record(ok.then_some(5.0));
+        }
+        assert!(
+            q.failing(50.0),
+            "50% of the window with no streak either way"
+        );
+    }
+
+    /// [W] in the Network panel asks about the resolver under the cursor —
+    /// and nothing when the history pane holds the cursor instead.
+    #[test]
+    fn whois_in_the_network_panel_targets_the_selected_resolver() {
+        let mut s = AppState::new(vec![]);
+        s.focus = Panel::NetInfo;
+        s.netinfo.dns = vec!["192.168.1.4".into(), "172.64.36.1".into()];
+        s.dns_sel = 1;
+        assert_eq!(
+            s.selected_addr(),
+            Some(IpAddr::V4(Ipv4Addr::new(172, 64, 36, 1)))
+        );
+        s.sub_pane = SubPane::Secondary;
+        assert_eq!(s.selected_addr(), None);
+        s.sub_pane = SubPane::Primary;
+        s.netinfo.dns.clear();
+        assert_eq!(s.selected_addr(), None, "no resolvers, nothing to ask");
+    }
+
+    /// Deleting a location from the overlay: a stored one is simply gone;
+    /// the network we are *on* comes straight back blank, because the list
+    /// merges the live baseline in whenever disk has no entry for it.
+    #[test]
+    fn deleting_the_current_location_leaves_a_blank_entry_others_vanish() {
+        let learned = |label: &str| crate::baseline::Baseline {
+            label: label.into(),
+            medium: "Wi-Fi (wireless)".into(),
+            samples: 40,
+            gateway_ms: Some(4.0),
+            ..Default::default()
+        };
+        let mut s = AppState::new(vec![]);
+        s.baseline_key = Some("home".into());
+        s.baseline = Some(learned("Home"));
+        s.locations = Some(vec![
+            ("home".into(), learned("Home")),
+            ("cafe".into(), learned("Cafe")),
+        ]);
+
+        // A stored, non-current location: removed, nothing replaces it.
+        s.locations.as_mut().unwrap().retain(|(k, _)| k != "cafe");
+        let v = s.locations_view().unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].0, "home");
+
+        // The current one: the same reset the key handler performs.
+        s.locations.as_mut().unwrap().retain(|(k, _)| k != "home");
+        s.baseline = s.baseline.take().map(|old| crate::baseline::Baseline {
+            label: old.label,
+            medium: old.medium,
+            ..Default::default()
+        });
+        let v = s.locations_view().unwrap();
+        assert_eq!(v.len(), 1, "the live network is merged back in");
+        let (key, b) = &v[0];
+        assert_eq!(key, "home");
+        assert_eq!(b.label, "Home");
+        assert_eq!(b.medium, "Wi-Fi (wireless)");
+        assert_eq!(b.samples, 0, "learned data is gone");
+        assert_eq!(b.gateway_ms, None);
+    }
 
     fn target_with(samples: &[f64]) -> TargetStat {
         let mut t = TargetStat::new("t".into(), IpAddr::V4(Ipv4Addr::LOCALHOST));
@@ -1591,6 +1714,9 @@ pub struct AppState {
     pub net_history: VecDeque<NetChange>,
     /// Cursor into `net_history` (0 = newest) when that pane holds it.
     pub net_history_sel: usize,
+    /// Cursor over the resolvers in the Network panel's dns row, so [W] can
+    /// ask who runs one.
+    pub dns_sel: usize,
     /// Path-MTU probe result, once it has run; and why it could not, when it
     /// could not (an OS that ignores Don't-Fragment, no UDP out).
     pub pmtu: Option<PmtuResult>,
@@ -1825,6 +1951,7 @@ impl AppState {
             egress: None,
             net_history: VecDeque::new(),
             net_history_sel: 0,
+            dns_sel: 0,
             pmtu: None,
             pmtu_error: None,
             signal: SignalState::default(),
@@ -1931,6 +2058,8 @@ impl AppState {
         self.locations_sel = live.locations_sel;
         self.events_scroll = live.events_scroll;
         self.whois_scroll = live.whois_scroll;
+        self.net_history_sel = live.net_history_sel;
+        self.dns_sel = live.dns_sel;
         self.logging_requested = live.logging_requested;
         self.log = live.log.clone();
         // Things the user asked for by hand: their results are wanted now.
@@ -2088,6 +2217,13 @@ impl AppState {
             }
             Panel::Quality => self.targets.get(self.selected).map(|t| t.addr),
             Panel::Bandwidth => self.selected_remote().map(|r| r.addr),
+            // The resolver under the cursor: on an unfamiliar network, "who
+            // is this DNS server DHCP gave me" is a fair question.
+            Panel::NetInfo if self.sub_pane == SubPane::Primary => self
+                .netinfo
+                .dns
+                .get(self.dns_sel)
+                .and_then(|d| d.parse().ok()),
             _ => None,
         }
     }

@@ -272,6 +272,7 @@ fn build(iface: &netdev::Interface) -> NetInfo {
     }
 
     let dns = iface.dns_servers.iter().map(|d| d.to_string()).collect();
+    let dns_search = crate::platform::dns_search_domains(iface.index);
 
     let medium = classify(iface);
     NetInfo {
@@ -284,6 +285,7 @@ fn build(iface: &netdev::Interface) -> NetInfo {
         gateway_ip,
         gateway_mac,
         dns,
+        dns_search,
         link_detail: detail.join(" · "),
         medium,
         link_speed_bps,

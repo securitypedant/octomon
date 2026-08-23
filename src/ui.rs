@@ -457,6 +457,15 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                         Style::new().fg(Color::Cyan).bold(),
                     ));
                 }
+                // Nothing folded in yet — freshly seen, or just deleted and
+                // re-added blank. Said loudly: the dashes below look broken
+                // otherwise.
+                if b.samples == 0 {
+                    name_row.push(Span::styled(
+                        "  · learning from scratch",
+                        Style::new().fg(Color::Yellow).bold(),
+                    ));
+                }
                 lines.push(Line::from(name_row));
                 let speed = match (b.down_mbps, b.up_mbps) {
                     (Some(d), Some(u)) => format!(" · speed {d:.0}↓/{u:.0}↑"),
@@ -468,11 +477,11 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                     .unwrap_or_default();
                 lines.push(Line::from(Span::styled(
                     format!(
-                        "  gateway {} · internet {} · DNS {}{rssi}{speed} · {} healthy min",
+                        "  gateway {} · internet {} · DNS {}{rssi}{speed} · {} healthy",
                         ms(b.gateway_ms),
                         ms(b.anchor_ms),
                         ms(b.dns_ms),
-                        b.samples
+                        crate::util::fmt_minutes(b.samples as u64)
                     ),
                     Style::new().fg(Color::Gray),
                 )));
@@ -512,7 +521,7 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             Style::new().bold(),
         ))
         .title_bottom(Span::styled(
-            " ↑↓ select · Enter renames the selected location · press L or Esc to close ",
+            " ↑↓ select · Enter renames · d deletes · press L or Esc to close ",
             Style::new().fg(Color::DarkGray),
         ))
         .border_style(Style::new().fg(Color::Cyan));
@@ -652,7 +661,7 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         .padding(Padding::new(1, 1, 0, 0))
         .title(Span::styled(title, Style::new().bold()))
         .title_bottom(Span::styled(
-            " ↑↓ scroll · x export · press e or Esc to close ",
+            " ↑↓ scroll · x export · C clear · press e or Esc to close ",
             Style::new().fg(Color::DarkGray),
         ))
         .border_style(Style::new().fg(Color::Cyan));
@@ -896,14 +905,22 @@ fn context_line(s: &AppState) -> Line<'static> {
             v.extend([key("[R]"), txt("eset "), key("[f]"), txt("ull ")]);
             v
         }
-        Panel::NetInfo => vec![
-            key("[r]"),
-            txt("efresh "),
-            key("[N]"),
-            txt("ame "),
-            key("[L]"),
-            txt("ocations "),
-        ],
+        Panel::NetInfo => {
+            let mut v = vec![
+                key("[r]"),
+                txt("efresh "),
+                key("[N]"),
+                txt("ame "),
+                key("[L]"),
+                txt("ocations "),
+            ];
+            // The resolver cursor only means something with resolvers to
+            // walk, and only while this pane (not the history) holds it.
+            if s.sub_pane == SubPane::Primary && !s.netinfo.dns.is_empty() {
+                v.extend([key("[←→]"), txt("dns "), key("[W]"), txt("hois ")]);
+            }
+            v
+        }
         Panel::Vitals => vec![],
     };
     spans.push(key("[?]"));
@@ -3369,9 +3386,20 @@ fn dns_lines(s: &AppState, width: usize) -> Vec<Line<'static>> {
         return vec![Line::from(vec![label, Span::raw("-")])];
     }
 
+    // The cursor over the resolvers, shown only while this panel holds it —
+    // it exists so [W] has a resolver to ask about.
+    let cursor = (s.focus == Panel::NetInfo && s.sub_pane == SubPane::Primary)
+        .then_some(s.dns_sel.min(s.netinfo.dns.len().saturating_sub(1)));
     let mut groups: Vec<Vec<Span<'static>>> = Vec::new();
-    for server in s.netinfo.dns.iter() {
-        let mut g = vec![Span::raw(server.clone())];
+    for (i, server) in s.netinfo.dns.iter().enumerate() {
+        let mut g = vec![if cursor == Some(i) {
+            Span::styled(
+                server.clone(),
+                Style::new().fg(Color::Black).bg(Color::Cyan),
+            )
+        } else {
+            Span::raw(server.clone())
+        }];
         let probe = s.dns.iter().find(|p| p.server.to_string() == *server);
         match probe {
             // A failing resolver is the headline, not its latency.
@@ -3420,6 +3448,14 @@ fn dns_lines(s: &AppState, width: usize) -> Vec<Line<'static>> {
             ));
         }
         groups.push(g);
+    }
+    // The search domain: what "nas" expands to, and what only the LAN's own
+    // resolver can answer — the thing a failing local resolver takes away.
+    if !s.netinfo.dns_search.is_empty() {
+        groups.push(vec![Span::styled(
+            format!("search {}", s.netinfo.dns_search.join(", ")),
+            Style::new().fg(Color::DarkGray),
+        )]);
     }
 
     // Pack whole groups into lines; a break never splits a group.
@@ -4213,8 +4249,16 @@ mod tests {
         );
         assert!(out.contains("gateway ~4ms"));
         assert!(out.contains("speed 310↓/28↑"));
-        assert!(out.contains("40 healthy min"));
+        assert!(out.contains("40m healthy"));
         assert!(out.contains("● current"), "the active network is marked");
+        assert!(
+            !out.contains("learning from scratch"),
+            "both entries have learned something"
+        );
+        // A blank entry — just re-added after a delete — says so loudly.
+        s.locations.as_mut().unwrap()[1].1.samples = 0;
+        assert!(draw(&s, 120, 30).contains("learning from scratch"));
+        assert!(out.contains("d deletes"), "delete hint in the footer");
         assert!(out.contains("press L or Esc to close"));
     }
 
@@ -4342,6 +4386,7 @@ mod tests {
         let out = draw(&s, 80, 24);
         assert!(out.contains("DNS servers changed"));
         assert!(out.contains("omega"), "tail of the message survives");
+        assert!(out.contains("C clear"), "clear shortcut in the footer");
     }
 
     /// The dns row wraps between resolvers — a reading never separates from
@@ -4375,6 +4420,11 @@ mod tests {
         // The group is indivisible: each server's reading sits beside it.
         let with_reading = texts.iter().find(|t| t.contains("172.64.36.1")).unwrap();
         assert!(with_reading.contains("(6ms)"));
+
+        // The search domain trails the resolvers when the OS has one.
+        s.netinfo.dns_search = vec!["thorpevillage.local".into()];
+        let all: String = dns_lines(&s, 200).iter().map(|l| l.to_string()).collect();
+        assert!(all.contains("search thorpevillage.local"));
     }
 
     #[test]

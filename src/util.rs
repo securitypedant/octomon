@@ -9,6 +9,20 @@ use futures_util::StreamExt;
 /// crates.io build. What every "which octomon is this?" surface prints.
 pub const VERSION: &str = env!("OCTOMON_VERSION_FULL");
 
+/// A count of minutes as people read time: "40m", "5h 20m", "2d 10h".
+/// "3458 min" asks the reader to do arithmetic mid-glance; two units are
+/// plenty, so days drop the minutes.
+pub fn fmt_minutes(mins: u64) -> String {
+    let (d, h, m) = (mins / 1440, (mins % 1440) / 60, mins % 60);
+    match (d, h, m) {
+        (0, 0, m) => format!("{m}m"),
+        (0, h, 0) => format!("{h}h"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, 0, _) => format!("{d}d"),
+        (d, h, _) => format!("{d}d {h}h"),
+    }
+}
+
 /// A reqwest error with its cause chain flattened: "error sending request …"
 /// on its own says nothing; the source underneath ("dns error: no such
 /// host", "certificate verify failed", "connection refused", "timed out") is
@@ -99,6 +113,18 @@ pub async fn drain_capped(resp: reqwest::Response, max_bytes: usize) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn minutes_read_like_time_not_arithmetic() {
+        use super::fmt_minutes;
+        assert_eq!(fmt_minutes(0), "0m");
+        assert_eq!(fmt_minutes(40), "40m");
+        assert_eq!(fmt_minutes(60), "1h");
+        assert_eq!(fmt_minutes(320), "5h 20m");
+        assert_eq!(fmt_minutes(1440), "1d");
+        // The screenshot case: 3458 min was unreadable.
+        assert_eq!(fmt_minutes(3458), "2d 9h");
+    }
+
     /// Against the network: an unresolvable host and a closed port each yield
     /// a reason a person can read, not just "error sending request".
     #[tokio::test]

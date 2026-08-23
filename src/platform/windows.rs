@@ -333,6 +333,74 @@ pub async fn thermal_state() -> Option<ThermalState> {
     })
 }
 
+/// The connection-specific DNS suffix of one adapter — DHCP option 15, the
+/// Windows equivalent of a resolv.conf `search` domain. Asked of
+/// `GetAdaptersAddresses` with every per-address list skipped, since only
+/// the suffix is wanted; an error or an unknown index yields nothing.
+pub fn dns_search_domains(iface_index: u32) -> Vec<String> {
+    use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST,
+        GAA_FLAG_SKIP_UNICAST, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
+
+    let flags = GAA_FLAG_SKIP_UNICAST
+        | GAA_FLAG_SKIP_ANYCAST
+        | GAA_FLAG_SKIP_MULTICAST
+        | GAA_FLAG_SKIP_DNS_SERVER;
+    // The API sizes its own buffer: ask, grow on overflow, ask again.
+    let mut size: u32 = 16 * 1024;
+    let mut buf: Vec<u8> = vec![0; size as usize];
+    loop {
+        // SAFETY: `buf` is at least `size` bytes and outlives the call; the
+        // API writes a linked list of adapters into it.
+        let rc = unsafe {
+            GetAdaptersAddresses(
+                AF_UNSPEC as u32,
+                flags,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
+                &mut size,
+            )
+        };
+        if rc == ERROR_BUFFER_OVERFLOW {
+            buf.resize(size as usize, 0);
+            continue;
+        }
+        if rc != ERROR_SUCCESS {
+            return Vec::new();
+        }
+        break;
+    }
+
+    let mut out = Vec::new();
+    let mut next = buf.as_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+    while !next.is_null() {
+        // SAFETY: the list lives inside `buf`, which the API just filled; the
+        // struct's union holds the index in its named form.
+        let adapter = unsafe { &*next };
+        let index = unsafe { adapter.Anonymous1.Anonymous.IfIndex };
+        if index == iface_index && !adapter.DnsSuffix.is_null() {
+            // SAFETY: DnsSuffix is a NUL-terminated wide string owned by the
+            // buffer.
+            let suffix = unsafe {
+                let mut len = 0usize;
+                while *adapter.DnsSuffix.add(len) != 0 {
+                    len += 1;
+                }
+                String::from_utf16_lossy(std::slice::from_raw_parts(adapter.DnsSuffix, len))
+            };
+            let suffix = suffix.trim_end_matches('.').to_string();
+            if !suffix.is_empty() {
+                out.push(suffix);
+            }
+        }
+        next = adapter.Next;
+    }
+    out
+}
+
 /// Whether the font this console window actually renders with contains every
 /// glyph in `chars`. `None` when it cannot be asked — output is redirected,
 /// there is no conhost window, or the font is a raster font (which

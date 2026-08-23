@@ -77,7 +77,10 @@ pub mod thresholds {
     /// again within the window it is the same episode continuing (intermittent
     /// loss), not a fresh raise — one timeline entry each way instead of a
     /// ▲/✓ pair every half minute. The footer stops showing it at once.
-    pub const FLAP_GRACE_SECS: u64 = 90;
+    /// 45 s: long enough to fold the typical Wi-Fi loss burst cadence into
+    /// one episode, short enough that a fix you just made is confirmed in
+    /// the timeline while you are still watching for it.
+    pub const FLAP_GRACE_SECS: u64 = 45;
     /// No verdict at all until this much uptime — early probes are still queued.
     pub const WARMUP_SECS: u64 = 10;
 }
@@ -96,6 +99,9 @@ pub enum Cause {
     GatewayLan,
     WifiLink,
     Dns,
+    /// The network's own resolver is down while public ones answer: internet
+    /// names resolve, the NAS and the printer do not.
+    LocalDns,
     /// A resolver answers names that don't exist — redirection, not resolution.
     DnsHijack,
     IspHop,
@@ -129,6 +135,7 @@ impl Cause {
             Cause::GatewayLan => "gateway",
             Cause::WifiLink => "link",
             Cause::Dns => "dns",
+            Cause::LocalDns => "local-dns",
             Cause::DnsHijack => "dns-hijack",
             Cause::IspHop => "isp",
             Cause::WideInternet => "internet",
@@ -788,7 +795,7 @@ pub fn evaluate(s: &AppState) -> Triage {
         .dns
         .iter()
         .find(|p| p.reference && p.recent_len() >= th::DNS_MIN_SAMPLES);
-    let failing = |p: &crate::app::DnsProbe| p.fail_pct() >= th::DNS_FAIL_PCT;
+    let failing = |p: &crate::app::DnsProbe| p.failing(th::DNS_FAIL_PCT);
     let reference_ok = reference.is_some_and(|r| !failing(r));
     let reference_dead = reference.is_some_and(failing);
     if !probes.is_empty() {
@@ -905,19 +912,77 @@ pub fn evaluate(s: &AppState) -> Triage {
                 since: None,
             });
         } else if n_fail > 0 {
-            findings.push(Finding {
-                cause: Cause::Dns,
-                severity: Severity::Info,
-                confidence: Confidence::Weak,
-                summary: format!(
-                    "{n_fail} of {} DNS resolvers failing — others fine",
-                    probes.len()
-                ),
-                evidence,
-                subject: String::new(),
-                symptom: false,
-                since: None,
-            });
+            // Which resolver failed decides what this means. A public one
+            // down while the LAN's answers is a footnote. The LAN's own
+            // resolver down while public ones answer is the network's DNS
+            // gone: internet names still resolve, but the NAS, the printer
+            // and this network's own domain live only on that server — and
+            // when it is first in the OS order, every lookup waits on its
+            // timeout before the next resolver is even tried.
+            let local_down: Vec<&crate::app::DnsProbe> = probes
+                .iter()
+                .copied()
+                .filter(|p| failing(p) && s.is_lan_addr(p.server))
+                .collect();
+            if let Some(p) = local_down.first() {
+                let first_in_order = s
+                    .netinfo
+                    .dns
+                    .first()
+                    .is_some_and(|d| *d == p.server.to_string());
+                // Two lines at most above the readings: what is lost, and
+                // (when it applies) why everything else got slower too.
+                let domains = s.netinfo.dns_search.join(", ");
+                let mut evidence = evidence.clone();
+                evidence.insert(
+                    0,
+                    if domains.is_empty() {
+                        format!("LAN names (NAS, printer) resolve only via {}", p.server)
+                    } else {
+                        format!(
+                            "{domains} names (NAS, printer) resolve only via {}",
+                            p.server
+                        )
+                    },
+                );
+                if first_in_order {
+                    evidence.insert(
+                        1,
+                        "first in resolver order: every lookup waits on its timeout first"
+                            .to_string(),
+                    );
+                }
+                findings.push(Finding {
+                    cause: Cause::LocalDns,
+                    severity: Severity::Degraded,
+                    // Contrast: public resolvers and the web check work while
+                    // the LAN's resolver does not. Corroboration: it is the
+                    // resolver the OS puts first — the one the network gave.
+                    confidence: judge(fine >= 2 || http_ok, first_in_order, dns_symptom),
+                    summary: format!(
+                        "local DNS {} down — internet OK, local names won't resolve",
+                        p.server
+                    ),
+                    evidence,
+                    subject: p.server.to_string(),
+                    symptom: dns_symptom,
+                    since: None,
+                });
+            } else {
+                findings.push(Finding {
+                    cause: Cause::Dns,
+                    severity: Severity::Info,
+                    confidence: Confidence::Weak,
+                    summary: format!(
+                        "{n_fail} of {} DNS resolvers failing — others fine",
+                        probes.len()
+                    ),
+                    evidence,
+                    subject: String::new(),
+                    symptom: false,
+                    since: None,
+                });
+            }
         }
     }
 
@@ -1177,7 +1242,7 @@ pub fn evaluate(s: &AppState) -> Triage {
                 })
                 .collect();
             let v6_dns_dead =
-                !v6_dns.is_empty() && v6_dns.iter().all(|p| p.fail_pct() >= th::DNS_FAIL_PCT);
+                !v6_dns.is_empty() && v6_dns.iter().all(|p| p.failing(th::DNS_FAIL_PCT));
             let mut evidence = vec![format!("v6 probe: {reason} · v4 probe: ok {v4_ms:.0}ms")];
             let (where_, corroborated) = if no_v6_gateway {
                 evidence.push(
@@ -1540,6 +1605,7 @@ pub fn evaluate(s: &AppState) -> Triage {
                 f.cause,
                 Cause::GatewayLan
                     | Cause::Dns
+                    | Cause::LocalDns
                     | Cause::IspHop
                     | Cause::WideInternet
                     | Cause::SingleDestination
@@ -1745,7 +1811,7 @@ fn build_rungs(
             .fold(0.0_f64, f64::max);
         let n_fail = probes
             .iter()
-            .filter(|p| p.fail_pct() >= th::DNS_FAIL_PCT)
+            .filter(|p| p.failing(th::DNS_FAIL_PCT))
             .count();
         let status = if n_fail == probes.len() {
             RungStatus::Bad
@@ -1754,6 +1820,11 @@ fn build_rungs(
         } else {
             RungStatus::Ok
         };
+        // The LAN's own resolver failing is named as such: it is the one
+        // that makes this network's names work, not one resolver of several.
+        let local_fail = probes
+            .iter()
+            .find(|p| p.failing(th::DNS_FAIL_PCT) && s.is_lan_addr(p.server));
         Rung {
             area: Area::Dns,
             status,
@@ -1761,10 +1832,13 @@ fn build_rungs(
                 "{} resolver{} · worst mean {worst_mean:.0}ms{}",
                 probes.len(),
                 if probes.len() == 1 { "" } else { "s" },
-                if n_fail > 0 {
-                    format!(" · {n_fail} failing")
-                } else {
-                    String::new()
+                match (local_fail, n_fail) {
+                    (Some(p), _) if n_fail < probes.len() => format!(
+                        " · local resolver {} down — local names won't resolve",
+                        p.server
+                    ),
+                    (_, 0) => String::new(),
+                    (_, n) => format!(" · {n} failing"),
                 }
             ),
         }
@@ -2085,7 +2159,7 @@ pub fn checks(s: &AppState) -> Vec<Check> {
     if let Some(r) = s.dns.iter().find(|p| p.reference) {
         let (status, detail) = if r.recent_len() < th::DNS_MIN_SAMPLES {
             (RungStatus::Unknown, format!("{} — probing", r.server))
-        } else if r.fail_pct() >= th::DNS_FAIL_PCT {
+        } else if r.failing(th::DNS_FAIL_PCT) {
             (
                 RungStatus::Warn,
                 format!(
@@ -2706,6 +2780,77 @@ mod tests {
         s.http.v4 = crate::app::FamilyProbe::Fail("dns error".into());
         let t = evaluate(&s);
         assert_eq!(t.findings[0].confidence, Confidence::Strong);
+    }
+
+    /// Which resolver fails decides the verdict. The LAN's own resolver down
+    /// while public ones answer is the network's DNS gone — the NAS and the
+    /// printer stop resolving — and must not read as "connection healthy";
+    /// a public resolver down while the LAN's answers stays a footnote.
+    #[test]
+    fn a_failing_local_resolver_is_degraded_not_a_footnote() {
+        let probe = |a: [u8; 4], ok: bool| {
+            let mut p = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::from(a)));
+            for _ in 0..10 {
+                p.record(if ok { Some(12.0) } else { None });
+            }
+            if !ok {
+                p.status = "timeout".into();
+            }
+            p
+        };
+        let mut s = healthy_state();
+        s.netinfo.iface = "en0".into();
+        s.netinfo.ipv4 = vec!["192.168.1.89/23".into()];
+        s.netinfo.dns = vec![
+            "192.168.1.4".into(),
+            "172.64.36.1".into(),
+            "172.64.36.2".into(),
+        ];
+        s.netinfo.dns_search = vec!["thorpevillage.local".into()];
+        s.dns = vec![
+            probe([192, 168, 1, 4], false),
+            probe([172, 64, 36, 1], true),
+            probe([172, 64, 36, 2], true),
+        ];
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::LocalDns)
+            .expect("the local resolver failing is its own finding");
+        assert_eq!(f.severity, Severity::Degraded);
+        assert!(f.summary.contains("internet OK"), "{}", f.summary);
+        assert!(f.summary.contains("won't resolve"), "{}", f.summary);
+        // First in the OS order → Strong; the search domain names the loss.
+        assert_eq!(f.confidence, Confidence::Strong);
+        assert!(
+            f.evidence.iter().any(|e| e.contains("thorpevillage.local")),
+            "{:?}",
+            f.evidence
+        );
+        assert!(
+            f.evidence
+                .iter()
+                .any(|e| e.contains("waits on its timeout"))
+        );
+        let rung = t.rungs.iter().find(|r| r.area == Area::Dns).unwrap();
+        assert!(
+            rung.detail.contains("local resolver 192.168.1.4"),
+            "{}",
+            rung.detail
+        );
+
+        // The mirror case: a public resolver down, the LAN's fine — a note.
+        s.dns = vec![
+            probe([192, 168, 1, 4], true),
+            probe([172, 64, 36, 1], false),
+            probe([172, 64, 36, 2], true),
+        ];
+        let t = evaluate(&s);
+        assert!(!causes(&t).contains(&Cause::LocalDns));
+        let f = t.findings.iter().find(|f| f.cause == Cause::Dns).unwrap();
+        assert_eq!(f.severity, Severity::Info);
+        assert!(f.summary.contains("others fine"));
     }
 
     /// A resolver that answered for an hour and then died must read as

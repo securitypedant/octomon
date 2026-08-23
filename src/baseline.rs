@@ -231,6 +231,15 @@ pub fn save_one(key: &str, b: &Baseline) {
     save(&all);
 }
 
+/// Remove one network's stored baseline (blocking — off the lock). Its
+/// incident history is deliberately kept: if the network is ever visited
+/// again, "3 outages this week" is still true and still useful.
+pub fn forget(key: &str) {
+    let mut all = load();
+    all.remove(key);
+    save(&all);
+}
+
 /// Set the user's name for a network, keeping any learned stats.
 pub fn name_network(key: &str, label: &str, name: &str) {
     let mut all = load();
