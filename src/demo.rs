@@ -568,9 +568,7 @@ mod tests {
             "location names and addresses scrubbed from event text"
         );
         assert!(
-            v.events
-                .iter()
-                .any(|e| e.message.contains("192.168.0.1")),
+            v.events.iter().any(|e| e.message.contains("192.168.0.1")),
             "the substitution, not deletion"
         );
         // The live state is untouched.

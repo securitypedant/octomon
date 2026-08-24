@@ -694,7 +694,9 @@ pub fn evaluate(s: &AppState) -> Triage {
                 fmt_ms(g.last_rtt_ms)
             )];
             evidence.push(if gw_drops_icmp {
-                format!("{fine} anchors reachable through it — it forwards, it just won't answer pings")
+                format!(
+                    "{fine} anchors reachable through it — it forwards, it just won't answer pings"
+                )
             } else if fine >= 2 && bad.is_empty() {
                 format!("but {fine} anchors reachable — gateway may just deprioritise ICMP")
             } else {
@@ -833,8 +835,7 @@ pub fn evaluate(s: &AppState) -> Triage {
             || matches!(s.http.v6, crate::app::FamilyProbe::Ok(_));
         let http_failing = matches!(s.http.v4, crate::app::FamilyProbe::Fail(_))
             && !matches!(s.http.v6, crate::app::FamilyProbe::Ok(_));
-        let dns_symptom =
-            no_link || (gw_health == Health::Bad && !gw_drops_icmp) || bad.len() >= 2;
+        let dns_symptom = no_link || (gw_health == Health::Bad && !gw_drops_icmp) || bad.len() >= 2;
         let confidence = judge(fine >= 2, http_failing, dns_symptom);
         let mut evidence: Vec<String> = probes
             .iter()
@@ -1847,7 +1848,10 @@ fn build_rungs(
             detail: if s.netinfo.gateway_ip.is_empty() || s.netinfo.gateway_ip == "-" {
                 "not discovered yet".to_string()
             } else {
-                format!("{} (from the routing table) — probing…", s.netinfo.gateway_ip)
+                format!(
+                    "{} (from the routing table) — probing…",
+                    s.netinfo.gateway_ip
+                )
             },
         },
     });

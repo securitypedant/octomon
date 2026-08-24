@@ -1431,8 +1431,7 @@ fn write_bundle_to(path: &std::path::Path, s: &AppState) -> Result<(), String> {
 
     let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut bundle = zip::ZipWriter::new(file);
-    let opt =
-        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let opt = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     let mut put = |name: &str, bytes: &[u8]| -> Result<(), String> {
         bundle.start_file(name, opt).map_err(|e| e.to_string())?;
         bundle.write_all(bytes).map_err(|e| e.to_string())
