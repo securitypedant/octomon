@@ -91,12 +91,30 @@ jobs:
           # first line always matches the key that signed InRelease.
           gpg --export "$KEYID" > repo/octomon.gpg
           find repo -type f | sort
-      - name: Upload to R2
+      - name: Upload to R2 (S3 API)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          cd repo
-          find . -type f | sed 's|^\./||' | while read -r f; do
-            npx wrangler r2 object put "octomon-apt/apt/$f" --file "$f" --remote
-          done
+          # Deliberately NOT `wrangler r2 object put`: wrangler talks to the
+          # Cloudflare REST API, which a bucket-scoped "Bucket Item Write"
+          # token cannot use (403) — that permission class only works with the
+          # S3-compatible API. The S3 credentials derive from the token
+          # itself: access key id = the token's id, secret = SHA-256 of the
+          # token value (developers.cloudflare.com/r2/api/tokens), so the
+          # least-privilege token stays and no extra secrets are needed.
+          TOKEN_ID=$(curl -sf -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/tokens/verify" \
+            | jq -r '.result.id // empty')
+          if [ -z "$TOKEN_ID" ]; then
+            # A user-owned (not account-owned) token verifies here instead.
+            TOKEN_ID=$(curl -sf -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+              | jq -r '.result.id // empty')
+          fi
+          test -n "$TOKEN_ID" || { echo "could not resolve the API token id"; exit 1; }
+          export AWS_ACCESS_KEY_ID="$TOKEN_ID"
+          export AWS_SECRET_ACCESS_KEY=$(printf %s "$CLOUDFLARE_API_TOKEN" | sha256sum | cut -d' ' -f1)
+          export AWS_DEFAULT_REGION=auto
+          aws s3 sync repo "s3://octomon-apt/apt" --no-progress \
+            --endpoint-url "https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com"
