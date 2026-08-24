@@ -1,0 +1,21 @@
+// octomon.dev — static site + /apt/* Debian repository.
+//
+// Deploy with `npx wrangler deploy` (uses your wrangler login locally, or
+// CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID in CI). The account ID is
+// deliberately not in this file.
+{
+  "name": "octomon-site",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-08-01",
+  "assets": {
+    "directory": "website",
+    "binding": "ASSETS"
+  },
+  "r2_buckets": [
+    { "binding": "APT", "bucket_name": "octomon-apt" }
+  ],
+  "routes": [
+    { "pattern": "octomon.dev", "custom_domain": true }
+  ],
+  "observability": { "enabled": true }
+}

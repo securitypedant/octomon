@@ -1,6 +1,6 @@
 [package]
 name = "octomon"
-version = "0.6.5"
+version = "0.7.0"
 edition = "2024"
 description = "Btop-style terminal network monitor: latency, bandwidth, and Wi-Fi signal"
 repository = "https://github.com/securitypedant/octomon"
@@ -54,6 +54,7 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
 toml = "1.1.4"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [target.'cfg(unix)'.dependencies]
 # tools::is_privileged(), and the DF-bit socket options of the path-MTU probe.
@@ -91,3 +92,25 @@ windows-sys = { version = "0.61", features = [
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# `cargo deb` (.github/workflows/deb.yml) — Debian packages attached to each
+# GitHub release, and the input to the apt repository.
+[package.metadata.deb]
+maintainer = "Simon Thorpe <simsecpedant@gmail.com>"
+copyright = "2025-2026, Simon Thorpe"
+section = "net"
+priority = "optional"
+depends = "$auto"
+# Powers startup path discovery and the [m] hop monitor; everything else
+# works without it.
+recommends = "traceroute"
+extended-description = """\
+A btop-style terminal dashboard for network health: per-target latency, loss \
+and jitter, per-process and per-remote bandwidth, Wi-Fi signal, DNS resolver \
+health, and a triage engine that names the failing layer (gateway, ISP path, \
+DNS, wide internet) instead of leaving graphs to interpret."""
+assets = [
+    ["target/release/octomon", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/octomon/", "644"],
+    ["PRIVILEGES.md", "usr/share/doc/octomon/", "644"],
+]

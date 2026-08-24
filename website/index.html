@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>octomon — easily diagnose your Internet connectivity</title>
+<meta name="description" content="A btop-style terminal dashboard that diagnoses your Internet connection: latency, bandwidth, Wi-Fi and DNS in one view — and a one-line answer naming the failing layer.">
+<link rel="canonical" href="https://octomon.dev/">
+<link rel="icon" type="image/png" sizes="32x32" href="/images/octomon-logo-32.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/images/octomon-icon-tile.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/images/octomon-icon-tile.png">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://octomon.dev/">
+<meta property="og:title" content="octomon — easily diagnose your Internet connectivity">
+<meta property="og:description" content="When your Internet misbehaves, octomon names the failing layer — latency, bandwidth, Wi-Fi and DNS in one terminal dashboard.">
+<meta property="og:image" content="https://octomon.dev/images/octomon-og-card.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="/tokens.css">
+<style>
+  /* Every colour on this page is a token from tokens.css — no hex here. */
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+  }
+  body {
+    margin: 0;
+    background: var(--octo-ink);
+    color: var(--octo-white);
+    font-family: var(--octo-body);
+    font-size: 17px;
+    line-height: 1.6;
+  }
+  a { color: var(--octo-green); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  :focus-visible {
+    outline: 2px solid var(--octo-green);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  h1, h2 {
+    font-family: var(--octo-display);
+    text-transform: uppercase;
+    letter-spacing: -0.01em;
+    font-weight: 400;
+    line-height: 1.05;
+    margin: 0 0 0.4em;
+  }
+  kbd {
+    font-family: var(--octo-mono);
+    font-size: 0.85em;
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    padding: 0.1em 0.45em;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  /* header */
+  header {
+    border-bottom: 1px solid var(--octo-line);
+    background: var(--octo-ink);
+  }
+  .nav {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 0;
+  }
+  .mark { display: flex; align-items: center; gap: 12px; color: var(--octo-white); }
+  .mark:hover { text-decoration: none; }
+  .mark svg { width: 34px; height: 34px; display: block; }
+  .wordmark {
+    font-family: var(--octo-mono);
+    font-weight: 800;
+    font-size: 1.35rem;
+    letter-spacing: 0.023em;
+  }
+  nav.links { margin-left: auto; display: flex; gap: 22px; font-family: var(--octo-mono); font-size: 0.95rem; }
+
+  /* hero */
+  .hero {
+    position: relative;
+    background-color: var(--octo-ink); /* readable before/without the image */
+    background-image: url('/images/octomon-hero-plain.png');
+    background-image: image-set(
+      url('/images/octomon-hero-plain.avif') type('image/avif'),
+      url('/images/octomon-hero-plain.webp') type('image/webp'),
+      url('/images/octomon-hero-plain.png') type('image/png'));
+    background-size: cover;
+    background-position: right center;
+    border-bottom: 2px solid var(--octo-magenta); /* decorative rule */
+  }
+  .hero-inner {
+    min-height: 480px;
+    display: flex; flex-direction: column; justify-content: center;
+    padding: 72px 0;
+    max-width: 46%;
+  }
+  .hero h1 { font-size: clamp(2.4rem, 5.4vw, 4.4rem); }
+  .hero p.sub {
+    color: var(--octo-muted);
+    font-size: clamp(1rem, 1.7vw, 1.3rem);
+    max-width: 34em;
+    margin: 0 0 1.6em;
+  }
+
+  /* command blocks: terminal register, one prompt per command line. The
+     block itself never scrolls — the inner .cmd-scroll does — so the copy
+     button (up in the card header) and the note below hold still. */
+  .cmd {
+    background: var(--octo-ink);
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-chip);
+  }
+  .cmd-scroll {
+    overflow-x: auto;
+    padding: 12px 14px;
+    font-family: var(--octo-mono);
+    font-size: 0.9rem;
+    line-height: 1.7;
+  }
+  .cmd .line { display: flex; gap: 10px; white-space: pre; width: max-content; }
+  .cmd .prompt { color: var(--octo-green); user-select: none; }
+  .copy-btn {
+    font-family: var(--octo-mono); font-size: 0.8rem;
+    color: var(--octo-muted);
+    background: var(--octo-ink); border: 1px solid var(--octo-line);
+    border-radius: 6px; padding: 4px 12px; cursor: pointer;
+    transition: color 120ms, border-color 120ms;
+  }
+  .copy-btn:hover { color: var(--octo-green); border-color: var(--octo-green); }
+  .copy-btn.done { color: var(--octo-green); border-color: var(--octo-green); }
+
+  /* sections */
+  section { padding: 64px 0; }
+  section + section { border-top: 1px solid var(--octo-line); }
+  h2 { font-size: clamp(1.6rem, 3vw, 2.4rem); }
+  .lede { color: var(--octo-muted); max-width: 56em; margin-top: 0; }
+
+  /* install grid: 2x2, room to breathe */
+  .installs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; margin-top: 28px; }
+  .install-card {
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+    padding: 24px;
+  }
+  .install-card .head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; margin: 0 0 14px;
+  }
+  .install-card h3 {
+    margin: 0;
+    font-family: var(--octo-mono); font-weight: 700; font-size: 1rem;
+    color: var(--octo-white);
+  }
+  .install-card .note { color: var(--octo-muted); font-size: 0.85rem; margin: 10px 0 0; }
+  .install-card .note code { font-family: var(--octo-mono); }
+
+  /* panels: screenshot beside its description, alternating sides */
+  .shot {
+    display: block; width: 100%; height: auto;
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+    cursor: zoom-in;
+  }
+
+  /* lightbox: any click (or Esc) closes */
+  .lightbox {
+    position: fixed; inset: 0; z-index: 50;
+    display: flex; align-items: center; justify-content: center;
+    padding: 3vmin;
+    background: color-mix(in srgb, var(--octo-deep) 94%, transparent);
+    cursor: zoom-out;
+  }
+  .lightbox[hidden] { display: none; }
+  .lightbox img {
+    max-width: 100%; max-height: 100%; width: auto; height: auto;
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+  }
+  .dashboard-shot { margin: 36px 0 8px; }
+  .panel {
+    display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    gap: 32px; align-items: center;
+    /* each panel is its own chapter: a hairline and generous air between */
+    margin-top: 48px; padding-top: 48px;
+    border-top: 1px solid var(--octo-line);
+  }
+  .panel:nth-of-type(even) .panel-text { order: 2; }
+  .panel h3 {
+    margin: 0 0 10px; font-size: 1.35rem;
+    font-family: var(--octo-mono); font-weight: 700;
+    color: var(--octo-green);
+  }
+  .panel p { margin: 0; color: var(--octo-muted); font-size: 0.98rem; }
+  .panel .amber { color: var(--octo-amber); font-family: var(--octo-mono); }
+  .panel .ok { color: var(--octo-green); font-family: var(--octo-mono); }
+  .analysis {
+    margin-top: 56px; padding-top: 40px;
+    border-top: 2px solid var(--octo-magenta); /* decorative rule */
+    display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    gap: 32px; align-items: center;
+  }
+
+  /* video embed: 16:9, framed like the screenshots */
+  .video-frame {
+    display: block;
+    aspect-ratio: 16 / 9;
+    width: 100%;
+    max-width: 920px;
+    margin: 28px auto 0;
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+    background: var(--octo-deep);
+  }
+
+  footer {
+    border-top: 2px solid var(--octo-magenta); /* decorative rule */
+    padding: 28px 0 40px;
+    color: var(--octo-muted);
+    font-size: 0.9rem;
+  }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; }
+
+  @media (max-width: 860px) {
+    .hero { background-position: 72% center; }
+    .hero-inner { max-width: 100%; min-height: 0; padding: 56px 0; }
+    /* keep the headline readable over the art on small screens */
+    .hero h1, .hero p.sub { text-shadow: 0 1px 14px var(--octo-deep), 0 0 34px var(--octo-deep); }
+    .installs { grid-template-columns: 1fr; }
+    .panel, .analysis { grid-template-columns: 1fr; gap: 16px; }
+    .panel:nth-of-type(even) .panel-text { order: 0; }
+  }
+  /* phones */
+  @media (max-width: 600px) {
+    .wrap { padding: 0 16px; }
+    section { padding: 44px 0; }
+    .hero-inner { padding: 44px 0; }
+    .hero h1 { font-size: clamp(2.1rem, 9vw, 2.8rem); }
+    .install-card { padding: 16px; }
+    .cmd-scroll { font-size: 0.8rem; }
+    .panel { margin-top: 32px; padding-top: 32px; }
+    .analysis { margin-top: 40px; padding-top: 28px; }
+    .dashboard-shot { margin-top: 24px; }
+    footer .wrap { flex-direction: column; align-items: flex-start; gap: 6px; }
+  }
+  @media (max-width: 480px) {
+    nav.links { gap: 14px; font-size: 0.85rem; }
+    .wordmark { font-size: 1.15rem; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <a class="mark" href="/" aria-label="octomon home">
+      <!-- octomon-brand/logo/octomon-logo.svg, fills swapped to tokens so the
+           inline mark themes with the page -->
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-hidden="true">
+        <g fill="var(--octo-green)">
+          <g transform="rotate(-14 22 64)"><rect x="18" y="60" width="8" height="44" rx="4"/></g>
+          <g transform="rotate(-7 34 64)"><rect x="30" y="60" width="8" height="58" rx="4"/></g>
+          <rect x="42" y="60" width="8" height="40" rx="4"/>
+          <rect x="54" y="60" width="8" height="54" rx="4"/>
+          <rect x="66" y="60" width="8" height="42" rx="4"/>
+          <rect x="78" y="60" width="8" height="58" rx="4" fill="var(--octo-amber)"/>
+          <g transform="rotate(7 94 64)"><rect x="90" y="60" width="8" height="46" rx="4"/></g>
+          <g transform="rotate(14 106 64)"><rect x="102" y="60" width="8" height="60" rx="4"/></g>
+        </g>
+        <path d="M22 70 C22 42 38 18 64 18 C90 18 106 42 106 70 Z" fill="var(--octo-green)"/>
+        <rect x="44" y="38" width="11" height="18" rx="1.5" fill="var(--octo-ink)"/>
+        <rect x="73" y="38" width="11" height="18" rx="1.5" fill="var(--octo-ink)"/>
+      </svg>
+      <span class="wordmark">octomon</span>
+    </a>
+    <nav class="links" aria-label="site">
+      <a href="#install">install</a>
+      <a href="#features">features</a>
+      <a href="#video">video</a>
+      <a href="https://github.com/securitypedant/octomon">github</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="hero">
+    <div class="wrap">
+      <div class="hero-inner">
+        <h1>Easily diagnose<br>your Internet<br>connectivity</h1>
+        <p class="sub">Latency, bandwidth, network config in a
+        terminal app with a built-in dashboard and analysis to help diagnose the data.</p>
+      </div>
+    </div>
+  </div>
+
+  <section id="install">
+    <div class="wrap">
+      <h2>Install</h2>
+      <div class="installs">
+        <div class="install-card">
+          <div class="head">
+            <h3>homebrew · macOS</h3>
+            <button type="button" class="copy-btn" data-copy="brew tap securitypedant/octomon
+brew install octomon">copy</button>
+          </div>
+          <div class="cmd"><div class="cmd-scroll">
+            <div class="line"><span class="prompt">$</span><code>brew tap securitypedant/octomon</code></div>
+            <div class="line"><span class="prompt">$</span><code>brew install octomon</code></div>
+          </div></div>
+        </div>
+        <div class="install-card">
+          <div class="head">
+            <h3>apt · Debian &amp; Ubuntu</h3>
+            <button type="button" class="copy-btn" data-copy="curl -fsSL https://octomon.dev/apt/octomon.gpg | sudo tee /usr/share/keyrings/octomon.gpg >/dev/null
+echo &quot;deb [signed-by=/usr/share/keyrings/octomon.gpg] https://octomon.dev/apt stable main&quot; | sudo tee /etc/apt/sources.list.d/octomon.list
+sudo apt update &amp;&amp; sudo apt install octomon">copy</button>
+          </div>
+          <div class="cmd"><div class="cmd-scroll">
+            <div class="line"><span class="prompt">$</span><code>curl -fsSL https://octomon.dev/apt/octomon.gpg | sudo tee /usr/share/keyrings/octomon.gpg >/dev/null</code></div>
+            <div class="line"><span class="prompt">$</span><code>echo "deb [signed-by=/usr/share/keyrings/octomon.gpg] https://octomon.dev/apt stable main" | sudo tee /etc/apt/sources.list.d/octomon.list</code></div>
+            <div class="line"><span class="prompt">$</span><code>sudo apt update &amp;&amp; sudo apt install octomon</code></div>
+          </div></div>
+          <p class="note">amd64 and arm64. Signed; the first line installs the key.</p>
+        </div>
+        <div class="install-card">
+          <div class="head">
+            <h3>powershell · Windows</h3>
+            <button type="button" class="copy-btn" data-copy="irm https://github.com/securitypedant/octomon/releases/latest/download/octomon-installer.ps1 | iex">copy</button>
+          </div>
+          <div class="cmd"><div class="cmd-scroll">
+            <div class="line"><span class="prompt">&gt;</span><code>irm https://github.com/securitypedant/octomon/releases/latest/download/octomon-installer.ps1 | iex</code></div>
+          </div></div>
+          <p class="note">x64 and ARM64, installer picks the right binary. Zips are on
+          <a href="https://github.com/securitypedant/octomon/releases">GitHub releases</a>.</p>
+        </div>
+        <div class="install-card">
+          <div class="head">
+            <h3>cargo · anywhere</h3>
+            <button type="button" class="copy-btn" data-copy="cargo install octomon">copy</button>
+          </div>
+          <div class="cmd"><div class="cmd-scroll">
+            <div class="line"><span class="prompt">$</span><code>cargo install octomon</code></div>
+          </div></div>
+          <p class="note">Builds from source; needs Rust 1.88+.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="wrap">
+      <h2>Four panels, one analysis</h2>
+      <p class="lede">Detailed information on each aspect of your Internet connection, with a single, easy to understand summary.
+      <span style="font-family: var(--octo-mono); color: var(--octo-amber);">▲ gateway unresponsive</span> or
+      <span style="font-family: var(--octo-mono); color: var(--octo-green);">● connection healthy</span>. 
+      Full analysis explanation <kbd>y</kbd>: showing each network subsystem from your
+      machine to the Internet.</p>
+
+      <picture class="dashboard-shot">
+        <source type="image/webp"
+          srcset="/images/octomon-screenshot-2400px.webp 2432w, /images/octomon-screenshot-3000px.webp 3098w"
+          sizes="(max-width: 1120px) 100vw, 1072px">
+        <img class="shot dashboard-shot" src="/images/octomon-screenshot-2400px.png"
+          srcset="/images/octomon-screenshot-2400px.png 2432w, /images/octomon-screenshot-3000px.png 3098w"
+          sizes="(max-width: 1120px) 100vw, 1072px"
+          width="2432" height="1338" loading="lazy"
+          alt="the full octomon dashboard: connection quality, bandwidth, network and machine panels">
+      </picture>
+
+      <div class="panel">
+        <div class="panel-text">
+          <h3>Connection Quality</h3>
+          <p>ICMP latency to your targets, last / avg / p95 / max, jitter,
+          loss, a bufferbloat grade. The gateway and first ISP hops are
+          auto-discovered. Traceroute any target with <kbd>t</kbd>, monitor
+          every hop <span class="ok">MTR-style</span> with <kbd>m</kbd>, and
+          a whois lookup for an address with <kbd>W</kbd>.</p>
+        </div>
+        <picture>
+          <source type="image/webp" srcset="/images/octomon-panel-quality.webp">
+          <img class="shot" src="/images/octomon-panel-quality.png"
+            width="2146" height="1192" loading="lazy"
+            alt="the Connection Quality panel: per-target latency table and per-hop path view">
+        </picture>
+      </div>
+
+      <div class="panel">
+        <div class="panel-text">
+          <h3>Bandwidth</h3>
+          <p>Live throughput and an on-demand speed test (<kbd>s</kbd>,
+          Cloudflare / M-Lab / LibreSpeed), with the traffic attributed: top
+          talkers by process or by remote address (<kbd>n</kbd>), session
+          totals, retransmits.</p>
+        </div>
+        <picture>
+          <source type="image/webp" srcset="/images/octomon-panel-bandwidth.webp">
+          <img class="shot" src="/images/octomon-panel-bandwidth.png"
+            width="2150" height="1190" loading="lazy"
+            alt="the Bandwidth panel: throughput graphs and per-process talkers">
+        </picture>
+      </div>
+
+      <div class="panel">
+        <div class="panel-text">
+          <h3>Network</h3>
+          <p>How you're attached: interface, Wi-Fi / Ethernet / VPN, addresses,
+          gateway, DHCP server, public IP, and every resolver timed. Checks against a public
+          reference, Wi-Fi signal and airspace congestion graphed, and a dated
+          history of every join, roam and address change.</p>
+        </div>
+        <picture>
+          <source type="image/webp" srcset="/images/octomon-panel-network.webp">
+          <img class="shot" src="/images/octomon-panel-network.png"
+            width="2144" height="1188" loading="lazy"
+            alt="the Network panel: interface details, DNS timings and Wi-Fi signal">
+        </picture>
+      </div>
+
+      <div class="panel">
+        <div class="panel-text">
+          <h3>Machine</h3>
+          <p>"Is my device the bottleneck?" CPU with the busiest core, memory
+          pressure, load, interface errors, thermal throttling. A busy machine
+          is reported as a caveat beside a network fault,
+          never as a way to hide one.</p>
+        </div>
+        <picture>
+          <source type="image/webp" srcset="/images/octomon-panel-machine.webp">
+          <img class="shot" src="/images/octomon-panel-machine.png"
+            width="2144" height="1190" loading="lazy"
+            alt="the Machine panel: CPU, memory pressure and load">
+        </picture>
+      </div>
+
+      <div class="analysis">
+        <div class="panel-text">
+          <h3>…and the analysis on top of the data</h3>
+          <p>Press <kbd>y</kbd> and octomon shows its work: the triage ladder
+          from your machine outward, the background checks (captive portal,
+          clock, path MTU, NAT, DNS honesty), this network's learned normal and
+          incident history, and the findings with their evidence. <kbd>D</kbd>
+          zips it all into a support bundle; <span class="ok">--doctor</span>
+          prints a redacted report safe to paste into an ISP ticket.</p>
+        </div>
+        <picture>
+          <source type="image/webp" srcset="/images/octomon-analysis.webp">
+          <img class="shot" src="/images/octomon-analysis.png"
+            width="1226" height="784" loading="lazy"
+            alt="the analysis overlay: triage ladder, checks, history and findings with evidence">
+        </picture>
+      </div>
+    </div>
+  </section>
+
+  <section id="video">
+    <div class="wrap">
+      <h2>Watch the tour</h2>
+      <iframe class="video-frame"
+        src="https://www.youtube-nocookie.com/embed/sHPd2LeYvaw"
+        title="octomon — intro and tour"
+        loading="lazy"
+        allow="encrypted-media; picture-in-picture; fullscreen"
+        allowfullscreen
+        referrerpolicy="strict-origin-when-cross-origin"></iframe>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2025–2026 Simon Thorpe · MIT or Apache-2.0</span>
+    <a href="https://github.com/securitypedant/octomon">github.com/securitypedant/octomon</a>
+    <a href="https://crates.io/crates/octomon">crates.io/crates/octomon</a>
+    <a href="https://www.youtube.com/watch?v=sHPd2LeYvaw">intro video</a>
+  </div>
+</footer>
+
+<div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="screenshot, full size — click anywhere to close" hidden>
+  <img alt="">
+</div>
+
+<script>
+  // Copy buttons on the command blocks; falls back silently if the clipboard
+  // API is unavailable (the text is selectable either way).
+  for (const btn of document.querySelectorAll("button[data-copy]")) {
+    btn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(btn.dataset.copy);
+        btn.textContent = "copied";
+        btn.classList.add("done");
+        setTimeout(() => { btn.textContent = "copy"; btn.classList.remove("done"); }, 1600);
+      } catch { /* selection fallback: the command text is plain text */ }
+    });
+  }
+
+  // Lightbox: any screenshot opens full-screen; any click (or Esc) closes.
+  // currentSrc reuses whichever rendition the browser already fetched.
+  const lb = document.getElementById("lightbox");
+  const lbImg = lb.querySelector("img");
+  const openLb = (img) => {
+    lbImg.src = img.currentSrc || img.src;
+    lbImg.alt = img.alt;
+    lb.hidden = false;
+    document.body.style.overflow = "hidden";
+  };
+  const closeLb = () => {
+    lb.hidden = true;
+    lbImg.removeAttribute("src");
+    document.body.style.overflow = "";
+  };
+  for (const img of document.querySelectorAll("img.shot")) {
+    img.tabIndex = 0;
+    img.setAttribute("role", "button");
+    img.addEventListener("click", () => openLb(img));
+    img.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openLb(img); }
+    });
+  }
+  lb.addEventListener("click", closeLb);
+  addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !lb.hidden) closeLb();
+  });
+</script>
+</body>
+</html>

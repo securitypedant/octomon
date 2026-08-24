@@ -1,0 +1,24 @@
+/* octomon brand tokens — sampled from the live TUI (screenshot.png) */
+
+@import url('https://fonts.googleapis.com/css2?family=Anton&family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700;800&display=swap');
+
+:root {
+  /* colour */
+  --octo-ink:      #15181D; /* terminal background, page background */
+  --octo-deep:     #0B0D11; /* cards, wells, code blocks */
+  --octo-green:    #3FCF5C; /* primary: links, prompt, healthy state */
+  --octo-magenta:  #B249B9; /* secondary accent, rules, upload traffic */
+  --octo-amber:    #E8B03A; /* warnings, the fault arm in the logo */
+  --octo-white:    #F4F7FA; /* headings, body on dark */
+  --octo-muted:    #8A96A4; /* secondary text, captions */
+  --octo-line:     #343C46; /* hairlines, card borders */
+
+  /* type */
+  --octo-display:  'Anton', 'Archivo', system-ui, sans-serif;
+  --octo-body:     'Archivo', system-ui, -apple-system, sans-serif;
+  --octo-mono:     'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* radii used across the assets */
+  --octo-radius-card: 14px;
+  --octo-radius-chip: 10px;
+}

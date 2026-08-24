@@ -39,6 +39,11 @@ pub struct Baseline {
     pub medium: String,
     /// Healthy folds so far — confidence in the baseline itself.
     pub samples: u32,
+    /// When the machine was last attached to this network (unix seconds) —
+    /// orders the locations overlay by recency. Stamped on every attach and
+    /// fold; absent in files from before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<i64>,
     pub gateway_ms: Option<f64>,
     pub gateway_p95_ms: Option<f64>,
     pub anchor_ms: Option<f64>,
@@ -132,6 +137,7 @@ impl Baseline {
         self.dns_ms = ewma(self.dns_ms, sample.dns_ms);
         self.rssi_dbm = ewma(self.rssi_dbm, sample.rssi_dbm);
         self.samples += 1;
+        self.last_seen = Some(chrono::Utc::now().timestamp());
     }
 }
 

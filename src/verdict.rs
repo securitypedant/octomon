@@ -569,6 +569,17 @@ pub fn evaluate(s: &AppState) -> Triage {
         .collect();
     let fine = with_data.len() - bad.len();
     let gw_fine = matches!(gw_health, Health::Good | Health::Warn);
+    // Every anchor packet transits the gateway, so ≥2 clean anchors with none
+    // failing *prove* it forwards — an "unresponsive" gateway in that state is
+    // dropping ICMP addressed to itself as policy (airport/hotel Wi-Fi does
+    // this routinely), not failing. The rules below must not read it as dead:
+    // it is not a cause, and nothing else is its symptom.
+    let gw_drops_icmp = gw.is_some_and(|g| {
+        g.recent_loss_pct(th::RECENT) >= th::LOSS_DOWN_PCT
+            && gw_health == Health::Bad
+            && fine >= 2
+            && bad.is_empty()
+    });
     // A baseline with enough healthy minutes behind it turns absolute numbers
     // into "vs your normal here" — evidence and confidence, never a gate:
     // absolute thresholds still work on the first visit to a network.
@@ -643,7 +654,14 @@ pub fn evaluate(s: &AppState) -> Triage {
         let raise = gw_health == Health::Bad
             || (gw_health != Health::NoData && inflated(g) && !baseline_says_normal);
         if raise {
-            let severity = if loss >= th::LOSS_DOWN_PCT {
+            // An ICMP-dropping-but-forwarding gateway flips the claim from an
+            // alarm to a note: the clean anchors stop being a contradiction of
+            // "gateway down" and become the corroboration of "gateway drops
+            // ICMP". A real gateway death takes the anchors with it within a
+            // probe round, so that state never survives an actual outage.
+            let severity = if gw_drops_icmp {
+                Severity::Info
+            } else if loss >= th::LOSS_DOWN_PCT {
                 Severity::Down
             } else {
                 Severity::Degraded
@@ -651,11 +669,14 @@ pub fn evaluate(s: &AppState) -> Triage {
             // Corroboration: everything behind a dead gateway fails, so bad
             // anchors make the story consistent. Fine anchors *contradict* it —
             // many gateways deprioritise ICMP while forwarding perfectly.
-            // Contrast: the gateway itself is failing. Corroboration: what is
-            // behind it fails too. Contradiction: anchors fine — many gateways
-            // deprioritise ICMP while forwarding perfectly.
-            let mut confidence = judge(true, bad.len() >= 2, fine >= 2 && bad.is_empty());
-            let summary = if loss >= th::LOSS_DOWN_PCT {
+            let mut confidence = if gw_drops_icmp {
+                judge(true, fine >= 3, false)
+            } else {
+                judge(true, bad.len() >= 2, fine >= 2 && bad.is_empty())
+            };
+            let summary = if gw_drops_icmp {
+                "gateway drops ICMP (forwarding fine)".to_string()
+            } else if loss >= th::LOSS_DOWN_PCT {
                 format!("gateway unresponsive ({loss:.0}% loss)")
             } else if loss >= th::LOSS_BAD_PCT {
                 format!("gateway losing packets ({loss:.0}% loss)")
@@ -672,7 +693,9 @@ pub fn evaluate(s: &AppState) -> Triage {
                 loss,
                 fmt_ms(g.last_rtt_ms)
             )];
-            evidence.push(if fine >= 2 && bad.is_empty() {
+            evidence.push(if gw_drops_icmp {
+                format!("{fine} anchors reachable through it — it forwards, it just won't answer pings")
+            } else if fine >= 2 && bad.is_empty() {
                 format!("but {fine} anchors reachable — gateway may just deprioritise ICMP")
             } else {
                 format!("anchors: {} ok, {} failing", fine, bad.len())
@@ -716,7 +739,7 @@ pub fn evaluate(s: &AppState) -> Triage {
             .is_some_and(|noise| rssi - noise < th::SNR_MIN_DB);
         let weak = rssi <= th::RSSI_BAD_DBM || low_snr;
         if weak || err_pct > th::LINK_ERR_BAD_PCT {
-            let hurting = !gw_fine && gw_health != Health::NoData;
+            let hurting = !gw_fine && gw_health != Health::NoData && !gw_drops_icmp;
             let mut evidence = vec![format!(
                 "rssi {rssi} dBm{}, tx {:.0} Mbps",
                 s.signal
@@ -810,7 +833,8 @@ pub fn evaluate(s: &AppState) -> Triage {
             || matches!(s.http.v6, crate::app::FamilyProbe::Ok(_));
         let http_failing = matches!(s.http.v4, crate::app::FamilyProbe::Fail(_))
             && !matches!(s.http.v6, crate::app::FamilyProbe::Ok(_));
-        let dns_symptom = no_link || gw_health == Health::Bad || bad.len() >= 2;
+        let dns_symptom =
+            no_link || (gw_health == Health::Bad && !gw_drops_icmp) || bad.len() >= 2;
         let confidence = judge(fine >= 2, http_failing, dns_symptom);
         let mut evidence: Vec<String> = probes
             .iter()
@@ -1180,13 +1204,18 @@ pub fn evaluate(s: &AppState) -> Triage {
             continue;
         }
         let loss = t.recent_loss_pct(th::RECENT);
-        // If the whole LAN is unreachable this is the gateway's story.
-        let symptom = no_link || gw_health == Health::Bad;
+        // If the whole LAN is unreachable this is the gateway's story — unless
+        // the "unreachable" gateway is demonstrably forwarding (ICMP policy).
+        let symptom = no_link || (gw_health == Health::Bad && !gw_drops_icmp);
         findings.push(Finding {
             cause: Cause::SingleDestination,
             severity: Severity::Degraded,
-            confidence: judge(gw_fine, gw_fine && fine >= 2, symptom),
-            summary: format!("{} (on your LAN) unreachable — {loss:.0}% loss", t.label),
+            confidence: judge(
+                gw_fine || gw_drops_icmp,
+                (gw_fine || gw_drops_icmp) && fine >= 2,
+                symptom,
+            ),
+            summary: format!("{} (on your local network) unreachable — {loss:.0}% loss", t.label),
             evidence: vec![
                 format!(
                     "{} ({}) is on this network, not across the internet",
@@ -1194,6 +1223,9 @@ pub fn evaluate(s: &AppState) -> Triage {
                 ),
                 if gw_fine {
                     "gateway answers, so the LAN itself is up — that device is the place to look"
+                        .to_string()
+                } else if gw_drops_icmp {
+                    "gateway drops ICMP but forwards fine, so the LAN is up — that device is the place to look"
                         .to_string()
                 } else {
                     "gateway not answering either".to_string()
@@ -1644,7 +1676,17 @@ pub fn evaluate(s: &AppState) -> Triage {
     }
 
     rank(&mut findings);
-    let rungs = build_rungs(s, link, gw, gw_health, &with_data, &bad, fine);
+    let rungs = build_rungs(
+        s,
+        link,
+        gw,
+        gw_health,
+        gw_drops_icmp,
+        &with_data,
+        &bad,
+        fine,
+        self_load,
+    );
     let checks = checks(s);
     Triage {
         rungs,
@@ -1656,14 +1698,17 @@ pub fn evaluate(s: &AppState) -> Triage {
 /// The ladder itself: every area, always present, in blame order. Healthy rungs
 /// carry their data — "we checked" is the difference between a verdict and an
 /// assertion.
+#[allow(clippy::too_many_arguments)] // one call site; the args are the one evaluation's facts
 fn build_rungs(
     s: &AppState,
     link: LinkState,
     gw: Option<&TargetStat>,
     gw_health: Health,
+    gw_drops_icmp: bool,
     with_data: &[&TargetStat],
     bad: &[&TargetStat],
     fine: usize,
+    self_load: bool,
 ) -> Vec<Rung> {
     let mut rungs = Vec::with_capacity(7);
     let health_status = |h: Health| match h {
@@ -1779,16 +1824,31 @@ fn build_rungs(
             {
                 detail.push_str(&format!(" · ~{normal:.0}ms normal here"));
             }
+            // Proven to forward by the clean anchors behind it: a red rung
+            // would contradict the note-class finding saying it is fine.
+            if gw_drops_icmp {
+                detail.push_str(" · drops ICMP, forwards fine");
+            }
             Rung {
                 area: Area::Gateway,
-                status: health_status(gw_health),
+                status: if gw_drops_icmp {
+                    RungStatus::Ok
+                } else {
+                    health_status(gw_health)
+                },
                 detail,
             }
         }
         _ => Rung {
             area: Area::Gateway,
             status: RungStatus::Unknown,
-            detail: "not discovered yet".to_string(),
+            // The routing table usually names the gateway before any probe
+            // has an opinion on it — say what is known rather than nothing.
+            detail: if s.netinfo.gateway_ip.is_empty() || s.netinfo.gateway_ip == "-" {
+                "not discovered yet".to_string()
+            } else {
+                format!("{} (from the routing table) — probing…", s.netinfo.gateway_ip)
+            },
         },
     });
 
@@ -1844,31 +1904,61 @@ fn build_rungs(
         }
     });
 
-    // ISP path (first hops beyond the gateway, via the hop monitor when running).
-    let early: Vec<(&crate::app::MonitoredHop, f64)> = s
+    // ISP path (first hops beyond the gateway, via the hop monitor when
+    // running). A hop that answers *nothing* while a later hop — or the
+    // destination — still answers is ICMP policy, not loss: the packets
+    // demonstrably pass through it. Those hops are counted as silent instead
+    // of being allowed to paint the rung red with a loss no one experiences.
+    let mut silent = 0usize;
+    let early: Vec<f64> = s
         .hop_monitor
         .as_ref()
         .map(|m| {
+            let answers_beyond = |ttl: u8| {
+                m.hops.iter().any(|o| {
+                    o.ttl > ttl
+                        && o.stat.as_ref().is_some_and(|st| {
+                            st.window.len() >= th::MIN_SAMPLES
+                                && st.recent_loss_pct(th::RECENT) < th::LOSS_BAD_PCT
+                        })
+                })
+            };
             m.hops
                 .iter()
                 .filter(|h| h.ttl >= 2 && h.ttl <= 4)
                 .filter_map(|h| {
-                    h.stat
+                    let st = h
+                        .stat
                         .as_ref()
-                        .filter(|st| st.window.len() >= th::MIN_SAMPLES)
-                        .map(|st| (h, st.recent_loss_pct(th::RECENT)))
+                        .filter(|st| st.window.len() >= th::MIN_SAMPLES)?;
+                    let loss = st.recent_loss_pct(th::RECENT);
+                    if loss >= 100.0 && answers_beyond(h.ttl) {
+                        silent += 1;
+                        return None;
+                    }
+                    Some(loss)
                 })
                 .collect()
         })
         .unwrap_or_default();
-    rungs.push(if early.is_empty() {
+    rungs.push(if early.is_empty() && silent == 0 {
         Rung {
             area: Area::IspPath,
             status: RungStatus::Unknown,
             detail: "no path monitor — [m] to watch every hop".to_string(),
         }
+    } else if early.is_empty() {
+        // Every measured early hop is ICMP-silent while the path forwards.
+        Rung {
+            area: Area::IspPath,
+            status: RungStatus::Ok,
+            detail: format!(
+                "{silent} hop{} silent (ICMP policy) · path forwards",
+                if silent == 1 { "" } else { "s" }
+            ),
+        }
     } else {
-        let worst = early.iter().map(|(_, l)| *l).fold(0.0_f64, f64::max);
+        let worst = early.iter().copied().fold(0.0_f64, f64::max);
         let status = if worst >= th::LOSS_BAD_PCT {
             RungStatus::Bad
         } else if worst >= th::LOSS_WARN_PCT {
@@ -1879,7 +1969,15 @@ fn build_rungs(
         Rung {
             area: Area::IspPath,
             status,
-            detail: format!("hops 2-{} · worst loss {worst:.0}%", 2 + early.len() - 1),
+            detail: format!(
+                "hops 2-{} · worst loss {worst:.0}%{}",
+                2 + early.len() + silent - 1,
+                if silent > 0 {
+                    format!(" · {silent} silent")
+                } else {
+                    String::new()
+                }
+            ),
         }
     });
 
@@ -1957,39 +2055,56 @@ fn build_rungs(
             status: RungStatus::Unknown,
             detail: "no data yet".to_string(),
         }
-    } else if !bad.is_empty() && fine >= 2 && bad.len() * 2 < with_data.len() {
-        let names: Vec<&str> = bad.iter().map(|t| t.label.as_str()).collect();
-        // Red only for a destination that has gone entirely; loss to one far
-        // end while the rest answer is a caution about that place.
-        let any_unreachable = bad
-            .iter()
-            .any(|t| t.recent_loss_pct(th::RECENT) >= th::LOSS_DOWN_PCT);
-        Rung {
-            area: Area::Destinations,
-            status: if any_unreachable {
-                RungStatus::Bad
-            } else {
-                RungStatus::Warn
-            },
-            detail: format!("struggling: {}", names.join(", ")),
-        }
     } else {
-        let warn: Vec<&str> = with_data
-            .iter()
-            .filter(|t| probe_health(t) == Health::Warn)
-            .map(|t| t.label.as_str())
-            .collect();
-        if warn.is_empty() {
+        // Name a few, count the rest: under a speed test every target reads
+        // lossy at once, and a ten-name list is noise where a number tells
+        // the story. The load attribution says whose fault the numbers are.
+        let list = |names: &[&str]| -> String {
+            if names.len() <= 3 {
+                names.join(", ")
+            } else {
+                format!("{} of {} targets", names.len(), with_data.len())
+            }
+        };
+        let load = if self_load {
+            " — speed-test load, not the network"
+        } else {
+            ""
+        };
+        if !bad.is_empty() && fine >= 2 && bad.len() * 2 < with_data.len() {
+            let names: Vec<&str> = bad.iter().map(|t| t.label.as_str()).collect();
+            // Red only for a destination that has gone entirely; loss to one
+            // far end while the rest answer is a caution about that place.
+            let any_unreachable = bad
+                .iter()
+                .any(|t| t.recent_loss_pct(th::RECENT) >= th::LOSS_DOWN_PCT);
             Rung {
                 area: Area::Destinations,
-                status: RungStatus::Ok,
-                detail: "all targets reachable".to_string(),
+                status: if any_unreachable {
+                    RungStatus::Bad
+                } else {
+                    RungStatus::Warn
+                },
+                detail: format!("struggling: {}{load}", list(&names)),
             }
         } else {
-            Rung {
-                area: Area::Destinations,
-                status: RungStatus::Warn,
-                detail: format!("reachable · slow or lossy: {}", warn.join(", ")),
+            let warn: Vec<&str> = with_data
+                .iter()
+                .filter(|t| probe_health(t) == Health::Warn)
+                .map(|t| t.label.as_str())
+                .collect();
+            if warn.is_empty() {
+                Rung {
+                    area: Area::Destinations,
+                    status: RungStatus::Ok,
+                    detail: "all targets reachable".to_string(),
+                }
+            } else {
+                Rung {
+                    area: Area::Destinations,
+                    status: RungStatus::Warn,
+                    detail: format!("reachable · slow or lossy: {}{load}", list(&warn)),
+                }
             }
         }
     });
@@ -2029,7 +2144,12 @@ pub fn checks(s: &AppState) -> Vec<Check> {
         } else {
             RungStatus::Unknown
         },
-        if gw {
+        if gw && hops == 0 {
+            // The walk got nothing but the routing table named the gateway:
+            // normal on phone hotspots and CGNAT, worth saying so.
+            "gateway from the routing table · no hops answered the walk (normal on hotspots)"
+                .to_string()
+        } else if gw {
             format!(
                 "gateway + {hops} hop{} traced",
                 if hops == 1 { "" } else { "s" }
@@ -2491,7 +2611,17 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
             BaselineIo::Load { key, label } => {
                 let loaded = tokio::task::spawn_blocking({
                     let key = key.clone();
-                    move || crate::baseline::load_one(&key)
+                    move || {
+                        let mut b = crate::baseline::load_one(&key);
+                        // Stamp the visit and write it back, so recency
+                        // ordering survives visits that never reach a
+                        // healthy minute (which is when folds would save).
+                        if let Some(b) = b.as_mut() {
+                            b.last_seen = Some(chrono::Utc::now().timestamp());
+                            crate::baseline::save_one(&key, b);
+                        }
+                        b
+                    }
                 })
                 .await
                 .ok()
@@ -2499,8 +2629,45 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
                 let mut s = state.lock().unwrap();
                 // The network may have moved again while we read the file.
                 if crate::baseline::fingerprint(&s.netinfo).map(|f| f.0) == Some(key.clone()) {
+                    // A stored baseline means this is a location we have been
+                    // to before: say so, by name, in the histories — the
+                    // network-changed entry preceding this fired before the
+                    // identity was recognisable (and the SSID may be hidden).
+                    if let Some(b) = &loaded {
+                        let message = if b.established() {
+                            format!(
+                                "known location → {} — judging against its learned normal",
+                                b.display_name()
+                            )
+                        } else {
+                            format!("known location → {}", b.display_name())
+                        };
+                        s.push_event(
+                            Severity::Info,
+                            crate::app::EventCategory::Network,
+                            message.clone(),
+                        );
+                        let detail = vec![format!(
+                            "seen before · {} healthy minute{} learned{}",
+                            b.samples,
+                            if b.samples == 1 { "" } else { "s" },
+                            if b.medium.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" · {}", b.medium)
+                            }
+                        )];
+                        let iface = s.netinfo.iface.clone();
+                        s.push_net_change(
+                            crate::app::NetChangeKind::LocationKnown,
+                            iface,
+                            message,
+                            detail,
+                        );
+                    }
                     s.baseline = Some(loaded.unwrap_or(crate::baseline::Baseline {
                         label,
+                        last_seen: Some(chrono::Utc::now().timestamp()),
                         ..Default::default()
                     }));
                     s.baseline_key = Some(key);
@@ -2571,9 +2738,18 @@ fn baseline_step(
         }
     }
 
-    // The fold gate: only a *fully* healthy verdict — any active finding, even
-    // an Info note, skips the update. An incident must never teach the baseline.
-    let fully_healthy = matches!(s.verdict.current, Verdict::Healthy);
+    // The fold gate: no Degraded-or-worse finding. Note-class findings don't
+    // block, because a note can be a *permanent* trait of a location — a
+    // gateway that drops ICMP as policy — and gating on literally zero
+    // findings would leave such locations "learning from scratch" forever.
+    // Degraded and Down still veto every fold: an incident must never teach
+    // the baseline. (Notes describe healthy measurements by construction;
+    // anything that skews numbers is Degraded or worse.)
+    let fully_healthy = match &s.verdict.current {
+        Verdict::Healthy => true,
+        Verdict::Problems(f) => f.iter().all(|x| x.severity < Severity::Degraded),
+        Verdict::Insufficient(_) => false,
+    };
     if !fully_healthy {
         *healthy_run = 0;
     } else {
@@ -2679,7 +2855,7 @@ mod tests {
     }
 
     #[test]
-    fn lossy_gateway_with_fine_anchors_is_only_a_weak_claim() {
+    fn icmp_dropping_gateway_with_fine_anchors_is_a_note_not_an_alarm() {
         let mut s = healthy_state();
         let gw = s.targets.iter_mut().find(|t| t.discovered).unwrap();
         for _ in 0..15 {
@@ -2691,8 +2867,34 @@ mod tests {
             .iter()
             .find(|f| f.cause == Cause::GatewayLan)
             .unwrap();
-        // The internet is reachable *through* this "dead" gateway — it is
-        // probably just deprioritising ICMP, and the verdict must not shout.
+        // The internet is reachable *through* this "unresponsive" gateway, so
+        // it demonstrably forwards — ICMP policy, not an outage. A note, and
+        // never the red headline (airport Wi-Fi does this for hours on end).
+        assert_eq!(f.severity, Severity::Info);
+        assert!(f.summary.contains("drops ICMP"), "got: {}", f.summary);
+        assert_eq!(f.confidence, Confidence::Strong);
+        // The ladder agrees with the note instead of contradicting it.
+        let rung = t.rungs.iter().find(|r| r.area == Area::Gateway).unwrap();
+        assert_eq!(rung.status, RungStatus::Ok);
+        assert!(rung.detail.contains("drops ICMP"), "got: {}", rung.detail);
+    }
+
+    #[test]
+    fn partially_lossy_gateway_with_fine_anchors_is_only_a_weak_claim() {
+        let mut s = healthy_state();
+        let gw = s.targets.iter_mut().find(|t| t.discovered).unwrap();
+        for _ in 0..4 {
+            gw.record_loss();
+        }
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::GatewayLan)
+            .unwrap();
+        // Partial loss is not the ICMP-policy signature (that answers nothing
+        // at all) — still raised, but contradicted by the fine anchors.
+        assert_eq!(f.severity, Severity::Degraded);
         assert_eq!(f.confidence, Confidence::Weak);
         assert!(f.evidence.iter().any(|e| e.contains("deprioritise")));
     }
@@ -2991,7 +3193,7 @@ mod tests {
         s.targets.push(probe("printer", [192, 168, 1, 50], 0, 20));
         let t = evaluate(&s);
         let f = t.findings.iter().find(|f| f.subject == "printer").unwrap();
-        assert!(f.summary.contains("on your LAN"));
+        assert!(f.summary.contains("on your local network"));
         assert!(!causes(&t).contains(&Cause::WideInternet));
         let internet = t.rungs.iter().find(|r| r.area == Area::Internet).unwrap();
         assert_eq!(

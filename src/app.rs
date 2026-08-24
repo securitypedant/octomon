@@ -696,6 +696,11 @@ pub struct NetInfo {
     /// The interface MTU, when the OS reports it — what the path-MTU probe
     /// compares against.
     pub mtu: Option<u32>,
+    /// The DHCP server that granted the current v4 lease, when the OS records
+    /// one ("10.27.88.200") — the box to blame when the *lease* is the
+    /// problem, and often not the gateway. Empty on static configs and where
+    /// no lease source can be read.
+    pub dhcp_server: String,
     /// The IPv6 default gateway, when there is one; empty otherwise. Kept apart
     /// from `gateway_ip` (v4 first) so v6 reachability can be judged on its own.
     pub gateway_ipv6: String,
@@ -727,13 +732,20 @@ impl NetInfo {
         )
     }
 
-    /// Whether `addr` sits on this machine's own LAN — inside one of the
-    /// interface's own subnets, or a loopback / link-local address. Such a
-    /// target says nothing about the internet and is judged separately.
+    /// Whether `addr` is on this network's private side — this machine's own
+    /// subnets, loopback / link-local, or any private / CGNAT range. RFC 1918
+    /// and 100.64/10 space never routes across the internet, so a target
+    /// there (the DHCP server on a management subnet, a corporate resolver)
+    /// is local infrastructure wherever it sits relative to our own subnet.
+    /// Such a target says nothing about the internet and is judged separately.
     pub fn is_lan_addr(&self, addr: IpAddr) -> bool {
         match addr {
             IpAddr::V4(a) => {
-                if a.is_loopback() || a.is_link_local() {
+                if a.is_loopback() || a.is_link_local() || a.is_private() {
+                    return true;
+                }
+                // CGNAT (100.64.0.0/10): private-side by definition too.
+                if (u32::from(a) & 0xffc0_0000) == 0x6440_0000 {
                     return true;
                 }
                 self.ipv4.iter().any(|cidr| {
@@ -754,7 +766,12 @@ impl NetInfo {
                 })
             }
             IpAddr::V6(a) => {
-                if a.is_loopback() || (a.segments()[0] & 0xffc0) == 0xfe80 {
+                // Loopback, link-local, and ULA (fc00::/7) — the v6 shapes of
+                // "never crosses the internet".
+                if a.is_loopback()
+                    || (a.segments()[0] & 0xffc0) == 0xfe80
+                    || (a.segments()[0] & 0xfe00) == 0xfc00
+                {
                     return true;
                 }
                 self.ipv6.iter().any(|cidr| {
@@ -1031,6 +1048,10 @@ pub enum NetChangeKind {
     AddressChanged,
     VpnUp,
     VpnDown,
+    /// The network we just attached to is one we have a stored baseline for —
+    /// the history names the location, so "did it reconnect to the office
+    /// Wi-Fi?" is answerable later even where the SSID is hidden.
+    LocationKnown,
 }
 
 impl NetChangeKind {
@@ -1046,6 +1067,7 @@ impl NetChangeKind {
             NetChangeKind::AddressChanged => "address",
             NetChangeKind::VpnUp => "vpn up",
             NetChangeKind::VpnDown => "vpn down",
+            NetChangeKind::LocationKnown => "location",
         }
     }
 }
@@ -1274,6 +1296,50 @@ mod tests {
         s.sub_pane = SubPane::Primary;
         s.netinfo.dns.clear();
         assert_eq!(s.selected_addr(), None, "no resolvers, nothing to ask");
+    }
+
+    #[test]
+    fn pinned_talkers_hold_the_top_whatever_the_sort_says() {
+        let proc = |name: &str, total: u64| ProcBandwidth {
+            name: name.into(),
+            total_bytes: total,
+            ..Default::default()
+        };
+        let mut s = AppState::new(vec![]);
+        s.processes = vec![proc("small", 10), proc("mid", 50), proc("big", 99)];
+        // Sort by total, descending: big, mid, small.
+        s.bw_sort = Some((1, true));
+        assert_eq!(s.process_order(), vec![2, 1, 0]);
+        // Pinning floats "small" over the sort; the rest keep their order.
+        s.pinned_procs.push("small".into());
+        assert_eq!(s.process_order(), vec![0, 2, 1]);
+        // Unpinning restores the plain sort.
+        s.pinned_procs.clear();
+        assert_eq!(s.process_order(), vec![2, 1, 0]);
+    }
+
+    #[test]
+    fn the_current_location_is_pinned_to_the_top_of_the_list() {
+        let named = |label: &str| crate::baseline::Baseline {
+            label: label.into(),
+            samples: 9,
+            ..Default::default()
+        };
+        let mut s = AppState::new(vec![]);
+        s.locations = Some(vec![
+            ("home".into(), named("Home")),
+            ("cafe".into(), named("Cafe")),
+        ]);
+        // On the cafe network: its entry moves up, carrying the live baseline
+        // (fresher than the disk copy loaded when the overlay opened).
+        s.baseline_key = Some("cafe".into());
+        let mut live = named("Cafe");
+        live.samples = 12;
+        s.baseline = Some(live);
+        let v = s.locations_view().unwrap();
+        assert_eq!(v[0].0, "cafe");
+        assert_eq!(v[0].1.samples, 12, "the live baseline, not the disk copy");
+        assert_eq!(v[1].0, "home");
     }
 
     /// Deleting a location from the overlay: a stored one is simply gone;
@@ -1665,13 +1731,15 @@ pub struct EventItem {
 }
 
 impl EventItem {
-    /// Local wall-clock time for display, e.g. "21:14:03".
+    /// Local wall-clock date and time for display, e.g. "08-23 21:14:03" —
+    /// dated (same style as [`crate::store::SpeedRecord::when`]) because a
+    /// session left running for days accumulates events from several of them.
     pub fn when(&self) -> String {
         use chrono::{Local, TimeZone};
         Local
             .timestamp_opt(self.at, 0)
             .single()
-            .map(|dt| dt.format("%H:%M:%S").to_string())
+            .map(|dt| dt.format("%m-%d %H:%M:%S").to_string())
             .unwrap_or_else(|| "—".to_string())
     }
 }
@@ -1766,6 +1834,12 @@ pub struct AppState {
     /// one is shown — so each table keeps the order you gave it across `n`.
     pub bw_sort_other: Option<(usize, bool)>,
     pub bw_col_other: usize,
+    /// Process names pinned ([p]) to hold the top of the talkers table while
+    /// the rest keeps re-sorting underneath — a watch list for this session
+    /// only, deliberately not persisted.
+    pub pinned_procs: Vec<String>,
+    /// Remote addresses pinned to the top of the remotes table, same idea.
+    pub pinned_remotes: Vec<IpAddr>,
 
     // --- Connection Quality interaction ---
     /// Cursor over the target list (Quality panel).
@@ -1794,6 +1868,8 @@ pub struct AppState {
     pub whois: Option<Whois>,
     /// Scroll offset into the whois overlay.
     pub whois_scroll: usize,
+    /// Scroll offset (lines) in the analysis overlay; clamped at draw time.
+    pub triage_scroll: usize,
     /// Which chart the panel is showing.
     pub quality_view: QualityView,
     /// Cursor location within the focused panel (cycled with 'n').
@@ -1970,6 +2046,8 @@ impl AppState {
             bw_view: BwView::Processes,
             remote_sel: 0,
             proc_sel: 0,
+            pinned_procs: Vec::new(),
+            pinned_remotes: Vec::new(),
             proc_status: ProcStatus::Probing,
             bw_col: 1,
             bw_sort: None,
@@ -1987,6 +2065,7 @@ impl AppState {
             hop_monitor: None,
             whois: None,
             whois_scroll: 0,
+            triage_scroll: 0,
             quality_view: QualityView::Graph,
             sub_pane: SubPane::Primary,
             speed_sel: 0,
@@ -2045,6 +2124,8 @@ impl AppState {
         self.proc_sel = live.proc_sel;
         self.bw_col = live.bw_col;
         self.bw_sort = live.bw_sort;
+        self.pinned_procs = live.pinned_procs.clone();
+        self.pinned_remotes = live.pinned_remotes.clone();
         self.speed_sel = live.speed_sel;
         self.speedtest_provider_idx = live.speedtest_provider_idx;
         // Overlays, entry and messages.
@@ -2058,6 +2139,7 @@ impl AppState {
         self.locations_sel = live.locations_sel;
         self.events_scroll = live.events_scroll;
         self.whois_scroll = live.whois_scroll;
+        self.triage_scroll = live.triage_scroll;
         self.net_history_sel = live.net_history_sel;
         self.dns_sel = live.dns_sel;
         self.logging_requested = live.logging_requested;
@@ -2161,20 +2243,34 @@ impl AppState {
         });
     }
 
-    /// The locations as the overlay lists them: what was on disk when it
-    /// opened, plus the network we are on *now* if it isn't there yet — a
-    /// baseline is only written after its first healthy minute, and the
-    /// overlay may be open across a network change. The live one goes first.
-    /// The cursor and rename use the same list, so indices agree.
+    /// The locations as the overlay lists them: the network we are on *now*
+    /// always first (as its live, in-session baseline — fresher than the disk
+    /// copy read when the overlay opened, and present even before the first
+    /// healthy minute writes one), then the rest in the recency order the
+    /// loader sorted them into. The cursor and rename use the same list, so
+    /// indices agree.
     pub fn locations_view(&self) -> Option<Vec<(String, crate::baseline::Baseline)>> {
         let all = self.locations.as_ref()?;
         let mut v = all.clone();
-        if let (Some(key), Some(b)) = (&self.baseline_key, &self.baseline)
-            && !v.iter().any(|(k, _)| k == key)
-        {
+        if let (Some(key), Some(b)) = (&self.baseline_key, &self.baseline) {
+            if let Some(pos) = v.iter().position(|(k, _)| k == key) {
+                v.remove(pos);
+            }
             v.insert(0, (key.clone(), b.clone()));
         }
         Some(v)
+    }
+
+    /// The current location's name, when it is one we recognise — named by
+    /// the user, or with an established baseline behind it. A baseline fresh
+    /// this session doesn't count: naming a place we only just met would make
+    /// every network read as "known". Used to name the location in join/loss
+    /// history entries.
+    pub fn known_location_name(&self) -> Option<&str> {
+        self.baseline
+            .as_ref()
+            .filter(|b| b.name.is_some() || b.established())
+            .map(|b| b.display_name())
     }
 
     /// This network's incident summary over the standard window, when the
@@ -2263,44 +2359,60 @@ impl AppState {
     /// and the cursor, so ↑/↓ walk the rows as drawn.
     pub fn process_order(&self) -> Vec<usize> {
         let mut order: Vec<usize> = (0..self.processes.len()).collect();
-        let Some((col, desc)) = self.sort_for(BwView::Processes) else {
-            return order;
-        };
-        order.sort_by(|&i, &j| {
-            let (a, b) = (&self.processes[i], &self.processes[j]);
-            let o = match col {
-                0 => a.name.cmp(&b.name),
-                2 => a.down_bytes.cmp(&b.down_bytes),
-                3 => a.up_bytes.cmp(&b.up_bytes),
-                4 => (a.down_bps + a.up_bps).total_cmp(&(b.down_bps + b.up_bps)),
-                5 => a.share.total_cmp(&b.share),
-                6 => a.retx.cmp(&b.retx),
-                _ => a.total_bytes.cmp(&b.total_bytes),
-            };
-            if desc { o.reverse() } else { o }
-        });
+        if let Some((col, desc)) = self.sort_for(BwView::Processes) {
+            order.sort_by(|&i, &j| {
+                let (a, b) = (&self.processes[i], &self.processes[j]);
+                let o = match col {
+                    0 => a.name.cmp(&b.name),
+                    2 => a.down_bytes.cmp(&b.down_bytes),
+                    3 => a.up_bytes.cmp(&b.up_bytes),
+                    4 => (a.down_bps + a.up_bps).total_cmp(&(b.down_bps + b.up_bps)),
+                    5 => a.share.total_cmp(&b.share),
+                    6 => a.retx.cmp(&b.retx),
+                    _ => a.total_bytes.cmp(&b.total_bytes),
+                };
+                if desc { o.reverse() } else { o }
+            });
+        }
+        // Pinned rows hold the top, in the order they were pinned; the sort
+        // is stable, so everything else keeps the order chosen above.
+        if !self.pinned_procs.is_empty() {
+            order.sort_by_key(|&i| {
+                self.pinned_procs
+                    .iter()
+                    .position(|n| *n == self.processes[i].name)
+                    .unwrap_or(usize::MAX)
+            });
+        }
         order
     }
 
     /// Indices into `remotes` in display order; see [`Self::process_order`].
     pub fn remote_order(&self) -> Vec<usize> {
         let mut order: Vec<usize> = (0..self.remotes.len()).collect();
-        let Some((col, desc)) = self.sort_for(BwView::Remotes) else {
-            return order;
-        };
-        order.sort_by(|&i, &j| {
-            let (a, b) = (&self.remotes[i], &self.remotes[j]);
-            let o = match col {
-                0 => a.addr.cmp(&b.addr),
-                1 => a.process.cmp(&b.process),
-                3 => a.down_bytes.cmp(&b.down_bytes),
-                4 => a.up_bytes.cmp(&b.up_bytes),
-                5 => (a.down_bps + a.up_bps).total_cmp(&(b.down_bps + b.up_bps)),
-                6 => a.share.total_cmp(&b.share),
-                _ => a.total_bytes.cmp(&b.total_bytes),
-            };
-            if desc { o.reverse() } else { o }
-        });
+        if let Some((col, desc)) = self.sort_for(BwView::Remotes) {
+            order.sort_by(|&i, &j| {
+                let (a, b) = (&self.remotes[i], &self.remotes[j]);
+                let o = match col {
+                    0 => a.addr.cmp(&b.addr),
+                    1 => a.process.cmp(&b.process),
+                    3 => a.down_bytes.cmp(&b.down_bytes),
+                    4 => a.up_bytes.cmp(&b.up_bytes),
+                    5 => (a.down_bps + a.up_bps).total_cmp(&(b.down_bps + b.up_bps)),
+                    6 => a.share.total_cmp(&b.share),
+                    _ => a.total_bytes.cmp(&b.total_bytes),
+                };
+                if desc { o.reverse() } else { o }
+            });
+        }
+        if !self.pinned_remotes.is_empty() {
+            order.sort_by_key(|&i| {
+                self.pinned_remotes
+                    .iter()
+                    .position(|a| *a == self.remotes[i].addr)
+                    .unwrap_or(usize::MAX)
+            });
+        }
         order
     }
 

@@ -126,6 +126,18 @@ brew install octomon
 
 ### Linux
 
+#### apt (Debian & Ubuntu)
+
+Signed repository at [octomon.dev](https://octomon.dev), amd64 and arm64:
+
+```sh
+curl -fsSL https://octomon.dev/apt/octomon.gpg | sudo tee /usr/share/keyrings/octomon.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/octomon.gpg] https://octomon.dev/apt stable main" | sudo tee /etc/apt/sources.list.d/octomon.list
+sudo apt update && sudo apt install octomon
+```
+
+#### Installer script (any distribution)
+
 Static musl binaries run on any distribution. The installer picks the right
 architecture and drops the binary in `~/.cargo/bin`:
 

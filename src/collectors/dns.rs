@@ -58,7 +58,11 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
             continue;
         }
         // The reference rides along unless it *is* one of the system resolvers,
-        // in which case that row already answers the question.
+        // in which case that row already answers the question — and counts as
+        // a resolver, not as the reference: a network whose DHCP hands out
+        // 1.1.1.1 has 1.1.1.1 as *its* resolver, and marking it "reference"
+        // would make every "this network's resolvers" count come up short.
+        let system = servers.clone();
         if let Some(r) = reference
             && !servers.contains(&r)
         {
@@ -94,13 +98,15 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
             let idx = match s.dns.iter().position(|p| p.server == server) {
                 Some(i) => i,
                 None => {
-                    let mut p = DnsProbe::new(server);
-                    p.reference = reference == Some(server);
-                    s.dns.push(p);
+                    s.dns.push(DnsProbe::new(server));
                     s.dns.len() - 1
                 }
             };
             let probe = &mut s.dns[idx];
+            // Re-judged every tick, not just at creation: a resolver-set
+            // change (DHCP renewal, VPN) can move the reference address in
+            // or out of the system list while the probe lives on.
+            probe.reference = reference == Some(server) && !system.contains(&server);
             match outcome {
                 Ok(answers) => {
                     probe.record(Some(elapsed));

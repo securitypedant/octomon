@@ -401,6 +401,76 @@ pub fn dns_search_domains(iface_index: u32) -> Vec<String> {
     out
 }
 
+/// The DHCP server of one adapter's current v4 lease, from
+/// `GetAdaptersAddresses` — absent (static config, expired lease, unknown
+/// index) yields `None`.
+pub fn dhcp_server(iface_index: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST,
+        GAA_FLAG_SKIP_UNICAST, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_UNSPEC, SOCKADDR_IN};
+
+    let flags = GAA_FLAG_SKIP_UNICAST
+        | GAA_FLAG_SKIP_ANYCAST
+        | GAA_FLAG_SKIP_MULTICAST
+        | GAA_FLAG_SKIP_DNS_SERVER;
+    // The API sizes its own buffer: ask, grow on overflow, ask again.
+    let mut size: u32 = 16 * 1024;
+    let mut buf: Vec<u8> = vec![0; size as usize];
+    loop {
+        // SAFETY: `buf` is at least `size` bytes and outlives the call; the
+        // API writes a linked list of adapters into it.
+        let rc = unsafe {
+            GetAdaptersAddresses(
+                AF_UNSPEC as u32,
+                flags,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
+                &mut size,
+            )
+        };
+        if rc == ERROR_BUFFER_OVERFLOW {
+            buf.resize(size as usize, 0);
+            continue;
+        }
+        if rc != ERROR_SUCCESS {
+            return None;
+        }
+        break;
+    }
+
+    let mut next = buf.as_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+    while !next.is_null() {
+        // SAFETY: the list lives inside `buf`, which the API just filled; the
+        // struct's union holds the index in its named form.
+        let adapter = unsafe { &*next };
+        let index = unsafe { adapter.Anonymous1.Anonymous.IfIndex };
+        if index == iface_index {
+            let sa = adapter.Dhcpv4Server.lpSockaddr;
+            if sa.is_null() {
+                return None;
+            }
+            // SAFETY: the sockaddr points into `buf`; the family is checked
+            // before it is read as v4.
+            unsafe {
+                if (*sa).sa_family != AF_INET {
+                    return None;
+                }
+                let sin = sa.cast::<SOCKADDR_IN>();
+                // S_addr is in network byte order; its in-memory bytes are
+                // already the four octets in printing order.
+                let b = (*sin).sin_addr.S_un.S_addr.to_ne_bytes();
+                let addr = std::net::Ipv4Addr::new(b[0], b[1], b[2], b[3]);
+                return (!addr.is_unspecified()).then(|| addr.to_string());
+            }
+        }
+        next = adapter.Next;
+    }
+    None
+}
+
 /// Whether the font this console window actually renders with contains every
 /// glyph in `chars`. `None` when it cannot be asked — output is redirected,
 /// there is no conhost window, or the font is a raster font (which

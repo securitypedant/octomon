@@ -39,6 +39,8 @@ struct Ctx {
     cfg: Config,
     /// `--demo`: draw from a disguised copy of the state.
     demo: bool,
+    /// `--demo-mac`: draw with only this machine's identifiers disguised.
+    demo_mac: bool,
 }
 
 /// Terminal dashboard for network performance.
@@ -82,6 +84,13 @@ struct Cli {
     /// consistent for the session — safe to screen-record.
     #[arg(long)]
     demo: bool,
+
+    /// Like --demo, but hides only what identifies *this machine* — its MAC
+    /// address (and any IPv6 address embedding it). The network's own details
+    /// stay real: for screenshots on a network that isn't private (a hotel,
+    /// an airport) taken from a machine that is.
+    #[arg(long, conflicts_with = "demo")]
+    demo_mac: bool,
 
     /// Add an ICMP target: `LABEL=IP` or bare `IP`. Repeatable.
     #[arg(short = 't', long = "target", value_name = "[LABEL=]IP")]
@@ -169,6 +178,18 @@ async fn main() -> Result<()> {
             .collect();
         s.privilege_notice = platform::tools::privilege_notice();
         s.notice = platform::tools::missing_notice();
+        // The timeline's opening line: an exported events CSV or a support
+        // bundle then names the version and platform that produced it without
+        // anyone having to ask.
+        s.push_event(
+            verdict::Severity::Info,
+            app::EventCategory::Logging,
+            format!(
+                "octomon {} started on {} — timeline begins",
+                crate::util::VERSION,
+                std::env::consts::OS
+            ),
+        );
     }
 
     // Triggers fired by key presses.
@@ -294,9 +315,14 @@ async fn main() -> Result<()> {
             // The macOS Wi-Fi probe (system_profiler) is slow; wait for it.
             tokio::time::sleep(Duration::from_secs(17)).await;
         }
-        if cli.demo {
+        if cli.demo || cli.demo_mac {
             let mut d = demo::Disguise::new();
-            let view = demo::disguise(&state.lock().unwrap(), &mut d);
+            let s = state.lock().unwrap();
+            let view = if cli.demo {
+                demo::disguise(&s, &mut d)
+            } else {
+                demo::disguise_machine(&s, &mut d)
+            };
             print_snapshot(&view);
         } else {
             print_snapshot(&state.lock().unwrap());
@@ -374,6 +400,7 @@ async fn main() -> Result<()> {
         ping_clients,
         cfg,
         demo: cli.demo,
+        demo_mac: cli.demo_mac,
     };
     let result = run_ui(&mut terminal, &ctx, rx).await;
     ratatui::restore();
@@ -391,9 +418,16 @@ async fn run_ui(
     // the live state underneath. What the user drives (cursors, overlays, a
     // whois they asked for) is copied across before each draw.
     let mut frozen: Option<Box<AppState>> = None;
-    // `--demo`: the mapping from real to fake, kept for the session so the
-    // fakes stay consistent frame to frame.
-    let mut disguise = ctx.demo.then(demo::Disguise::new);
+    // `--demo` / `--demo-mac`: the mapping from real to fake, kept for the
+    // session so the fakes stay consistent frame to frame.
+    let mut disguise = (ctx.demo || ctx.demo_mac).then(demo::Disguise::new);
+    let apply = |s: &AppState, d: &mut demo::Disguise, full: bool| {
+        if full {
+            demo::disguise(s, d)
+        } else {
+            demo::disguise_machine(s, d)
+        }
+    };
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
@@ -408,7 +442,7 @@ async fn run_ui(
             frozen = None;
             match disguise.as_mut() {
                 Some(d) => {
-                    let view = demo::disguise(&s, d);
+                    let view = apply(&s, d, ctx.demo);
                     terminal.draw(|f| ui::render(f, &view))?;
                 }
                 None => {
@@ -425,7 +459,7 @@ async fn run_ui(
         fr.sync_interactive_from(&s);
         match disguise.as_mut() {
             Some(d) => {
-                let view = demo::disguise(fr, d);
+                let view = apply(fr, d, ctx.demo);
                 terminal.draw(|f| ui::render(f, &view))?;
             }
             None => {
@@ -545,6 +579,10 @@ enum Side {
     /// Write the event timeline to a CSV in the config folder ([x] in the
     /// events overlay). Carries a snapshot so the file I/O runs off the lock.
     ExportEvents(Vec<app::EventItem>),
+    /// Zip everything a remote helper needs ([D]): full doctor report, event
+    /// timeline, config, and every data file. Carries a state snapshot so the
+    /// report and the file I/O run off the lock.
+    DumpBundle(Box<AppState>),
     /// Run the outbound port scan for the [c] overlay.
     EgressScan,
     /// Remove a deleted target from the config file (user-added ones only).
@@ -774,6 +812,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     };
                 }
                 KeyCode::Char('y') => {
+                    s.triage_scroll = 0;
                     s.overlay = if s.overlay == Overlay::Triage {
                         Overlay::None
                     } else {
@@ -843,6 +882,20 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 }
                 KeyCode::PageDown if s.overlay == Overlay::Whois => {
                     s.whois_scroll += 10; // clamped at draw time to the content
+                }
+                // Scroll the analysis: a network change can raise more
+                // findings than a terminal is tall.
+                KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Triage => {
+                    s.triage_scroll = s.triage_scroll.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') if s.overlay == Overlay::Triage => {
+                    s.triage_scroll += 1; // clamped at draw time to the content
+                }
+                KeyCode::PageUp if s.overlay == Overlay::Triage => {
+                    s.triage_scroll = s.triage_scroll.saturating_sub(10);
+                }
+                KeyCode::PageDown if s.overlay == Overlay::Triage => {
+                    s.triage_scroll += 10; // clamped at draw time to the content
                 }
                 // Scroll the timeline; clamped so it can't run past the oldest.
                 KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Events => {
@@ -956,7 +1009,10 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 }
                 KeyCode::Char('?') => s.overlay = Overlay::Help,
                 // 'y' answers "why does the verdict say that": the triage ladder.
-                KeyCode::Char('y') => s.overlay = Overlay::Triage,
+                KeyCode::Char('y') => {
+                    s.triage_scroll = 0;
+                    s.overlay = Overlay::Triage;
+                }
                 // 'c' scans outbound ports and shows the table.
                 KeyCode::Char('c') => {
                     let stale = s
@@ -976,6 +1032,36 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 KeyCode::Tab => s.focus = next_panel(s.focus),
                 KeyCode::BackTab => s.focus = prev_panel(s.focus),
                 KeyCode::Char('f') => s.fullscreen = !s.fullscreen,
+                // On the talkers lists, 'p' pins the row under the cursor to
+                // the top and 'u' unpins it — a session-only watch list, so
+                // one row can be tracked while the rest keeps re-sorting.
+                // (This shadows pause there; 'p' still pauses elsewhere.)
+                KeyCode::Char('p') | KeyCode::Char('u')
+                    if s.focus == Panel::Bandwidth
+                        && s.sub_pane == SubPane::Primary
+                        && s.proc_status == app::ProcStatus::Supported =>
+                {
+                    let pin = key.code == KeyCode::Char('p');
+                    match s.bw_view {
+                        BwView::Remotes => {
+                            if let Some(addr) = s.remotes.get(s.remote_sel).map(|r| r.addr) {
+                                s.pinned_remotes.retain(|a| *a != addr);
+                                if pin {
+                                    s.pinned_remotes.push(addr);
+                                }
+                            }
+                        }
+                        BwView::Processes => {
+                            if let Some(name) = s.processes.get(s.proc_sel).map(|p| p.name.clone())
+                            {
+                                s.pinned_procs.retain(|n| *n != name);
+                                if pin {
+                                    s.pinned_procs.push(name);
+                                }
+                            }
+                        }
+                    }
+                }
                 KeyCode::Char('p') => s.paused = !s.paused,
                 KeyCode::Char('r') => {
                     s.refresh_at = Some(std::time::Instant::now());
@@ -985,10 +1071,14 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 // 'l' toggles session recording; the logger task acts on this
                 // and reports back, so no file I/O happens on the key path.
                 KeyCode::Char('l') => s.logging_requested = !s.logging_requested,
+                // Shift+D dumps a support bundle: the visual-session
+                // counterpart of --doctor, for the person who was asked to
+                // "run octomon and send me what it saw".
+                KeyCode::Char('D') => side = Side::DumpBundle(Box::new(s.clone())),
                 // Shift+R resets the focused panel's accumulated data.
                 KeyCode::Char('R') => reset_panel(&mut s),
-                // Shift+L lists every stored network location (Network panel).
-                KeyCode::Char('L') if s.focus == Panel::NetInfo => {
+                // Shift+L lists every stored network location, from anywhere.
+                KeyCode::Char('L') => {
                     s.locations = None;
                     s.locations_sel = 0;
                     s.overlay = Overlay::Locations;
@@ -1248,13 +1338,19 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         .unwrap_or_default()
                         .into_iter()
                         .collect();
-                // Most-established first, named before unnamed on ties.
+                // Most recently seen first (locations_view pins the current
+                // network on top regardless). Entries from before the visit
+                // stamp existed tie at None and fall back to most-established,
+                // then name.
                 all.sort_by(|a, b| {
-                    b.1.samples.cmp(&a.1.samples).then_with(|| {
-                        a.1.display_name()
-                            .to_lowercase()
-                            .cmp(&b.1.display_name().to_lowercase())
-                    })
+                    b.1.last_seen
+                        .cmp(&a.1.last_seen)
+                        .then(b.1.samples.cmp(&a.1.samples))
+                        .then_with(|| {
+                            a.1.display_name()
+                                .to_lowercase()
+                                .cmp(&b.1.display_name().to_lowercase())
+                        })
                 });
                 state.lock().unwrap().locations = Some(all);
             });
@@ -1287,7 +1383,94 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 }
             });
         }
+        Side::DumpBundle(snap) => {
+            let state = ctx.state.clone();
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(move || write_bundle(&snap))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                let mut s = state.lock().unwrap();
+                // Lands on the timeline as well as the notice, so the file's
+                // location is still findable after the notice has gone.
+                match result {
+                    Ok(path) => s.notice_event(
+                        verdict::Severity::Info,
+                        app::EventCategory::Logging,
+                        format!(
+                            "support bundle → {} — send this file to whoever is helping",
+                            path.display()
+                        ),
+                    ),
+                    Err(e) => s.notice_event(
+                        verdict::Severity::Info,
+                        app::EventCategory::Logging,
+                        format!("could not write support bundle: {e}"),
+                    ),
+                }
+            });
+        }
     }
+}
+
+/// The [D] support bundle: everything a helper needs from a machine they
+/// cannot see, in one zip — the full doctor report (unredacted: the raw
+/// session logs beside it carry the same addresses anyway), the session's
+/// event timeline, the config, and every data file (session recordings,
+/// speed history, learned locations, incident history). Written somewhere
+/// the person at the keyboard can find (Desktop, else home). Blocking —
+/// run it off the UI path.
+fn write_bundle(s: &AppState) -> Result<std::path::PathBuf, String> {
+    let path = store::bundle_path().ok_or("no home directory")?;
+    write_bundle_to(&path, s)?;
+    Ok(path)
+}
+
+fn write_bundle_to(path: &std::path::Path, s: &AppState) -> Result<(), String> {
+    use std::io::Write as _;
+    use zip::write::SimpleFileOptions;
+
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let mut bundle = zip::ZipWriter::new(file);
+    let opt =
+        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let mut put = |name: &str, bytes: &[u8]| -> Result<(), String> {
+        bundle.start_file(name, opt).map_err(|e| e.to_string())?;
+        bundle.write_all(bytes).map_err(|e| e.to_string())
+    };
+
+    put("report.txt", doctor_report(s, true).0.as_bytes())?;
+    put(
+        "events.csv",
+        collectors::logger::format_events_export(s.events.iter().cloned()).as_bytes(),
+    )?;
+    if let Some(cfg) = config::Config::path()
+        && let Ok(bytes) = std::fs::read(&cfg)
+    {
+        put("config/config.toml", &bytes)?;
+    }
+    // The whole data folder: session log CSVs, speedtests.jsonl,
+    // baselines.json (the learned locations), incident history. Unreadable
+    // entries are skipped rather than sinking the bundle — a partial bundle
+    // still answers questions; no bundle answers none.
+    if let Some(dir) = store::data_dir()
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_file() {
+                continue;
+            }
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Ok(bytes) = std::fs::read(&p) else {
+                continue;
+            };
+            put(&format!("data/{name}"), &bytes)?;
+        }
+    }
+    bundle.finish().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Resolve a user-entered IP or DNS name, append it as a target, and start
@@ -2099,6 +2282,31 @@ mod tests {
             s.has_sub_pane(),
             "an empty history is still a pane worth focusing"
         );
+    }
+
+    /// The [D] support bundle must come out as a zip other tools can open,
+    /// with the two synthesised members present whatever is on disk.
+    #[test]
+    fn support_bundle_is_a_readable_zip_with_report_and_events() {
+        let mut s = AppState::new(vec![]);
+        s.push_event(
+            verdict::Severity::Info,
+            app::EventCategory::Network,
+            "an event for the bundle".into(),
+        );
+        let path =
+            std::env::temp_dir().join(format!("octomon-bundle-test-{}.zip", std::process::id()));
+        write_bundle_to(&path, &s).unwrap();
+
+        let mut z = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let names: Vec<String> = z.file_names().map(str::to_string).collect();
+        assert!(names.contains(&"report.txt".to_string()), "got: {names:?}");
+        assert!(names.contains(&"events.csv".to_string()), "got: {names:?}");
+        // The members decompress and carry what was put in.
+        let mut events = String::new();
+        std::io::Read::read_to_string(&mut z.by_name("events.csv").unwrap(), &mut events).unwrap();
+        assert!(events.contains("an event for the bundle"));
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The default doctor report must be safe to paste into a public ticket:

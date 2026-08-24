@@ -16,6 +16,11 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
     // table, so the answer is cached per tunnel device rather than redone every
     // tick.
     let mut vendor_cache: Option<(String, String)> = None;
+    // The DHCP server behind the current lease barely ever changes, so it is
+    // asked for once per attachment (a lease-file read or one-line shell-out)
+    // and cached — keyed on interface + gateway, which is what a new
+    // attachment changes.
+    let mut dhcp_cache: Option<(String, String)> = None;
     // Whether the default route has vanished entirely (Wi-Fi switched off,
     // cable pulled) — a different situation from moving to another network.
     let mut link_lost = false;
@@ -79,6 +84,13 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
                     m if m.is_wired() => "link lost — cable unplugged?".to_string(),
                     _ => "link lost — no default route".to_string(),
                 };
+                // Name the place that was lost, when it is one we know —
+                // "which network did it drop off?" is the question a
+                // multi-location machine's history has to answer.
+                let message = match s.known_location_name() {
+                    Some(name) => format!("{message} (was {name})"),
+                    None => message,
+                };
                 s.notice_event(
                     crate::verdict::Severity::Down,
                     crate::app::EventCategory::Network,
@@ -120,6 +132,21 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
             } else {
                 vendor_cache = None;
             }
+            // `Some(false)` is an explicit static config; `None` (the OS
+            // didn't say) still gets asked — a lease found is proof of DHCP.
+            if iface.dhcp_v4_enabled != Some(false) {
+                let key = format!("{}|{}", info.iface, info.gateway_ip);
+                info.dhcp_server = match &dhcp_cache {
+                    Some((k, v)) if *k == key => v.clone(),
+                    _ => {
+                        let v = crate::platform::dhcp_server(&info.iface, info.iface_index)
+                            .await
+                            .unwrap_or_default();
+                        dhcp_cache = Some((key, v.clone()));
+                        v
+                    }
+                };
+            }
             // Preserve Wi-Fi details, which are populated on a slower cadence by
             // the dedicated wifi collector, across these frequent base refreshes.
             let mut s = state.lock().unwrap();
@@ -140,8 +167,20 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
                 // while it was down describe the outage, not the path — left
                 // alone they'd keep the panel red for minutes.
                 s.reset_quality_stats();
+                // If the identity didn't move, this is the same location back
+                // again — name it when known. When it *did* move, the stale
+                // baseline would name the wrong place; the network-changed
+                // entry below (and the recognised-location one, if any)
+                // carries the story instead.
+                let location = if moved {
+                    String::new()
+                } else {
+                    s.known_location_name()
+                        .map(|n| format!(" ({n})"))
+                        .unwrap_or_default()
+                };
                 let message = format!(
-                    "link restored → {} — connection stats reset",
+                    "link restored → {}{location} — connection stats reset",
                     s.netinfo.iface
                 );
                 s.push_event(
@@ -167,21 +206,30 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
                 // A tunnel coming up or down changes the identity too; name the
                 // VPN rather than reporting a bare interface swap.
                 let message = match (had_tunnel, s.netinfo.tunnel.is_some()) {
-                    (false, true) => {
-                        format!("VPN up — {}", s.netinfo.tunnel_label().unwrap_or_default())
+                    (false, true) => format!(
+                        "VPN up — {} now carries the traffic",
+                        s.netinfo.tunnel_label().unwrap_or_default()
+                    ),
+                    (true, false) => {
+                        "VPN down — traffic no longer goes through the tunnel".to_string()
                     }
-                    (true, false) => "VPN down".to_string(),
                     // The SSID isn't known yet (the Wi-Fi probe is slow); the
                     // gateway is the most identifying fact available now, and
                     // the wifi collector names the network moments later.
+                    // The baseline still belongs to the network being left
+                    // (the verdict task swaps it moments later), so it names
+                    // the departed location while that is still knowable.
                     _ => format!(
-                        "network changed → {}{}",
+                        "network changed → {}{}{}",
                         s.netinfo.iface,
                         if s.netinfo.gateway_ip != "-" && !s.netinfo.gateway_ip.is_empty() {
                             format!(" · gateway {}", s.netinfo.gateway_ip)
                         } else {
                             String::new()
-                        }
+                        },
+                        s.known_location_name()
+                            .map(|n| format!(" · was {n}"))
+                            .unwrap_or_default()
                     ),
                 };
                 s.notice_event(
@@ -208,7 +256,10 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
             } else if had_info && s.netinfo.dns != prev_dns {
                 // Same network, new resolvers (DHCP renewal, profile change) —
                 // invisible in any average, classic "it broke at 3pm" material.
-                let message = format!("DNS servers changed → {}", s.netinfo.dns.join(", "));
+                let message = format!(
+                    "DNS servers changed → {} — same network, new resolvers (lease renewal or a pushed profile)",
+                    s.netinfo.dns.join(", ")
+                );
                 s.push_event(
                     crate::verdict::Severity::Info,
                     crate::app::EventCategory::Network,
@@ -269,6 +320,10 @@ fn build(iface: &netdev::Interface) -> NetInfo {
     }
     if iface.dhcp_v4_enabled == Some(true) {
         detail.push("DHCP".to_string());
+    } else if iface.dhcp_v4_enabled == Some(false) {
+        // A static config is worth a word of its own: "why is this machine
+        // ignoring the DHCP plan" starts exactly here.
+        detail.push("static".to_string());
     }
 
     let dns = iface.dns_servers.iter().map(|d| d.to_string()).collect();
@@ -287,6 +342,7 @@ fn build(iface: &netdev::Interface) -> NetInfo {
         dns,
         dns_search,
         link_detail: detail.join(" · "),
+        dhcp_server: String::new(), // filled by the caller (a lease probe)
         medium,
         link_speed_bps,
         mtu: iface.mtu,

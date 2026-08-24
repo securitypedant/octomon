@@ -70,8 +70,10 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>) {
                     && prev_ch != w.channel
                     && !w.channel.is_empty()
                 {
-                    let message =
-                        format!("Wi-Fi roamed — {} ch {} → {}", w.ssid, prev_ch, w.channel);
+                    let message = format!(
+                        "Wi-Fi roamed to another access point — {} ch {} → {}",
+                        w.ssid, prev_ch, w.channel
+                    );
                     s.push_event(
                         crate::verdict::Severity::Info,
                         crate::app::EventCategory::Wifi,

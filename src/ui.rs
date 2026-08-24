@@ -610,7 +610,7 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     // Border and padding cost 4 columns; messages wrap inside their own
     // column, indented clear of the timestamp and category.
     let text_w = rect.width.saturating_sub(4) as usize;
-    const INDENT: usize = 21; // " HH:MM:SS  " + "{:<9} "
+    const INDENT: usize = 27; // " MM-DD HH:MM:SS  " + "{:<9} "
 
     let mut lines: Vec<Line> = Vec::new();
     if s.events.is_empty() {
@@ -626,6 +626,16 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         if lines.len() >= visible {
             break;
         }
+        // A cleared finding ("✓ … ended after …") is good news and reads as
+        // such; a raise is a warning even when its class is only a note, so
+        // ▲ never renders grey; plain events stay grey.
+        let color = if e.message.starts_with('✓') {
+            Color::Green
+        } else if e.message.starts_with('▲') && e.severity == Severity::Info {
+            Color::Yellow
+        } else {
+            severity_color(e.severity)
+        };
         lines.extend(column_lines(
             vec![
                 Span::styled(format!(" {}  ", e.when()), Style::new().fg(Color::DarkGray)),
@@ -635,7 +645,7 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                 ),
             ],
             &e.message,
-            Style::new().fg(severity_color(e.severity)),
+            Style::new().fg(color),
             INDENT,
             text_w,
         ));
@@ -1240,18 +1250,30 @@ fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         height: h,
     };
     f.render_widget(Clear, rect);
+    let overflows = lines.len() as u16 + 2 > area.height;
     let outer = Block::bordered()
         .padding(Padding::new(1, 1, 0, 0))
         .title(Span::styled(" octomon · analysis ", Style::new().bold()))
         .title_bottom(Span::styled(
-            " press y or Esc to close, e for past events ",
+            if overflows {
+                " ↑↓ scroll · press y or Esc to close, e for past events "
+            } else {
+                " press y or Esc to close, e for past events "
+            },
             Style::new().fg(Color::DarkGray),
         ))
         .border_style(Style::new().fg(Color::Cyan));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
     // Pre-wrapped above; Paragraph-level wrap would only mangle the indents.
-    f.render_widget(Paragraph::new(lines), inner);
+    // More content than the box holds scrolls line-wise, cursor keys in the
+    // handler, clamped here so the last page always fills the box.
+    let total = lines.len();
+    let visible = (inner.height as usize).max(1);
+    let first = s.triage_scroll.min(total.saturating_sub(visible));
+    let shown: Vec<Line> = lines.into_iter().skip(first).take(visible).collect();
+    let content = scroll_cue(f, inner, total, first, shown.len().max(1));
+    f.render_widget(Paragraph::new(shown), content);
 }
 
 fn block(title: &str, focused: bool) -> Block<'static> {
@@ -2492,7 +2514,10 @@ fn top_talkers_view(f: &mut Frame, s: &AppState, area: Rect, view: BwView) {
             Cell::from(Span::styled(retx, retx_style)),
         ];
         cells.truncate(ncols);
-        Row::new(cells).style(row_style(cursor_on && idx == s.proc_sel))
+        Row::new(cells).style(row_style(
+            cursor_on && idx == s.proc_sel,
+            s.pinned_procs.contains(&p.name),
+        ))
     });
     let widths: Vec<Constraint> = WIDTHS[..ncols]
         .iter()
@@ -2501,14 +2526,21 @@ fn top_talkers_view(f: &mut Frame, s: &AppState, area: Rect, view: BwView) {
     f.render_widget(Table::new(rows, widths).header(header), inner);
 }
 
-/// Cursor-row highlight shared by the talkers tables.
-fn row_style(selected: bool) -> Style {
-    if selected {
-        Style::new()
+/// Cursor-row and pinned-row backgrounds shared by the talkers tables. A pin
+/// is a background wash, not a marker glyph — no column is spent on it — in a
+/// cold teal so it can't be mistaken for the cursor's blue-grey; the cursor
+/// on a pinned row lifts that teal and goes bold, so both facts stay visible
+/// at once.
+fn row_style(selected: bool, pinned: bool) -> Style {
+    match (selected, pinned) {
+        (true, true) => Style::new()
+            .bg(Color::Rgb(30, 62, 62))
+            .add_modifier(Modifier::BOLD),
+        (true, false) => Style::new()
             .bg(Color::Rgb(40, 40, 55))
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::new()
+            .add_modifier(Modifier::BOLD),
+        (false, true) => Style::new().bg(Color::Rgb(16, 40, 40)),
+        (false, false) => Style::new(),
     }
 }
 
@@ -2670,7 +2702,7 @@ fn top_remotes(f: &mut Frame, s: &AppState, area: Rect) {
             )),
         ];
         cells.truncate(ncols);
-        Row::new(cells).style(row_style(selected))
+        Row::new(cells).style(row_style(selected, s.pinned_remotes.contains(&r.addr)))
     });
     let widths: Vec<Constraint> = WIDTHS[..ncols]
         .iter()
@@ -2708,7 +2740,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("p", "pause / resume the display"),
         row("r", "re-probe network info"),
         row("w", "stats window 1m/5m/15m"),
-        row("l", "start / stop CSV recording"),
+        row("l / D", "CSV recording / zip bundle"),
         row("y", "connection analysis"),
         row("e / c", "event timeline / port scan"),
         row("?", "toggle this help"),
@@ -2736,6 +2768,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("v", "cycle speed-test provider"),
         row("n", "procs → remotes → history"),
         row("W / a", "whois / add sel. remote"),
+        row("p / u", "pin / unpin row at the top"),
         Line::from(""),
         head("Network"),
         row("r", "re-probe"),
@@ -2892,10 +2925,12 @@ fn net_history_pane(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         .enumerate()
         .map(|(i, c)| {
             let selected = focused && i == s.net_history_sel;
+            // Dated, not just timed: this history routinely spans days of
+            // uptime, where "09:14:02" alone no longer says which morning.
             let when = chrono::Local
                 .timestamp_opt(c.at, 0)
                 .single()
-                .map(|dt| dt.format("%H:%M:%S").to_string())
+                .map(|dt| dt.format("%m-%d %H:%M:%S").to_string())
                 .unwrap_or_else(|| "—".to_string());
             let style = if selected {
                 Style::new().fg(Color::Black).bg(Color::Cyan)
@@ -2919,7 +2954,7 @@ fn net_history_pane(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
                 ],
                 &c.summary,
                 style,
-                21,
+                27, // " MM-DD HH:MM:SS " + "{:<10} "
                 text_w,
             )
         })
@@ -3008,6 +3043,17 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
             Style::new().fg(Color::Gray),
         ));
     }
+    if !n.dhcp_server.is_empty() {
+        // A lease was found even when the OS didn't say "DHCP" — the lease
+        // is the proof, so the word appears with it.
+        if !n.link_detail.contains("DHCP") {
+            type_row.push(Span::styled(" · DHCP", Style::new().fg(Color::Gray)));
+        }
+        type_row.push(Span::styled(
+            format!(" ({})", n.dhcp_server),
+            Style::new().fg(Color::Gray),
+        ));
+    }
 
     let text_w = inner.width as usize;
     let label = |k: &str| Span::styled(format!("{k:<9}"), Style::new().fg(Color::DarkGray));
@@ -3075,6 +3121,23 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
             row.push_str(&format!("  · v6 {}", n.gateway_ipv6));
         }
         lines.extend(kv_wrapped("gateway", &row));
+    }
+
+    // How the internet sees this machine — the address beyond the NAT. It is
+    // discovered, not configured, so it appears once known.
+    if let Some(t) = s
+        .targets
+        .iter()
+        .find(|t| t.discovered && t.label.contains("public"))
+    {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<9}", "public"), Style::new().fg(Color::DarkGray)),
+            Span::raw(t.addr.to_string()),
+            Span::styled(
+                "  · how the internet sees you",
+                Style::new().fg(Color::DarkGray),
+            ),
+        ]));
     }
 
     // The clock, only when it is wrong: right is the expected state.
@@ -5457,6 +5520,8 @@ mod tests {
             "N",
             "W",
             "W / a",
+            "l / D",
+            "p / u",
         ] {
             assert!(out.contains(key), "help is missing a binding for {key:?}");
         }
@@ -5472,8 +5537,9 @@ mod tests {
             "add target (remembered)",
             "full-screen focused panel",
             "back / exit full-screen",
-            "start / stop CSV recording",
+            "CSV recording / zip bundle",
             "monitor every hop (MTR)",
+            "pin / unpin row at the top",
             "whois: who owns address",
             "cycle speed-test provider",
             "procs → remotes → history",

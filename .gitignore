@@ -4,3 +4,6 @@
 .DS_Store
 # Local debug-binary copy for manual testing (`cp target/debug/octomon .`)
 /octomon
+
+# Wrangler local state (octomon.dev site deploys)
+/.wrangler

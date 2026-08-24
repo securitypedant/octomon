@@ -64,6 +64,40 @@ pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Confi
             ping::spawn_for(state.clone(), clients.clone(), cfg.clone(), id, addr);
         }
     }
+
+    // A gateway that answers nothing at all — not even the TTL-exceeded
+    // replies the walk listens for (phone hotspots, hardened firewalls) —
+    // never appears above, but the routing table still names it. Probe it
+    // anyway: beside clean anchors, its 100% loss is exactly the evidence the
+    // drops-ICMP judgement turns into "fine, just silent", and without a
+    // probe the gateway rung would read "not discovered" forever. netinfo
+    // populates on its own 5 s cadence, so wait briefly for it.
+    for _ in 0..10 {
+        let gw_ip = state.lock().unwrap().netinfo.gateway_ip.clone();
+        if let Ok(addr) = gw_ip.parse::<IpAddr>() {
+            let (id, added) = {
+                let mut s = state.lock().unwrap();
+                let have = s
+                    .targets
+                    .iter()
+                    .any(|t| t.addr == addr || (t.discovered && t.label == "gateway"));
+                if have {
+                    (0, false)
+                } else {
+                    let mut t = TargetStat::new("gateway".to_string(), addr);
+                    t.discovered = true;
+                    let id = t.id;
+                    s.targets.push(t);
+                    (id, true)
+                }
+            };
+            if added {
+                ping::spawn_for(state.clone(), clients.clone(), cfg.clone(), id, addr);
+            }
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
 }
 
 /// Re-run discovery after the machine moved to a different network: the old

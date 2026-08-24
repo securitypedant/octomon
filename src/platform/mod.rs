@@ -159,6 +159,41 @@ pub fn dns_search_domains(iface_index: u32) -> Vec<String> {
     windows::dns_search_domains(iface_index)
 }
 
+/// The DHCP server that granted the current v4 lease on `iface`, when the OS
+/// records one. `None` on static configs and where no lease source can be
+/// read.
+#[cfg(target_os = "macos")]
+pub async fn dhcp_server(iface: &str, _iface_index: u32) -> Option<String> {
+    // `ipconfig getoption` prints DHCP option 54 (the server identifier) from
+    // the live lease — one line, no privileges needed. Anything that is not
+    // an IPv4 address (errors land on stderr, but belt and braces) is "none".
+    let out = tokio::process::Command::new("ipconfig")
+        .args(["getoption", iface, "server_identifier"])
+        .output()
+        .await
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<std::net::Ipv4Addr>()
+        .ok()
+        .map(|a| a.to_string())
+}
+
+#[cfg(target_os = "linux")]
+pub async fn dhcp_server(iface: &str, iface_index: u32) -> Option<String> {
+    linux::dhcp_server(iface, iface_index).await
+}
+
+#[cfg(windows)]
+pub async fn dhcp_server(_iface: &str, iface_index: u32) -> Option<String> {
+    windows::dhcp_server(iface_index)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+pub async fn dhcp_server(_iface: &str, _iface_index: u32) -> Option<String> {
+    None
+}
+
 /// `search` / `domain` directives out of resolv.conf text.
 #[cfg_attr(windows, allow(dead_code))]
 pub fn parse_resolv_search(text: &str) -> Vec<String> {
@@ -702,6 +737,38 @@ mod linux {
                 // /proc/net/wireless has no bitrate; filled in by wifi_details.
                 tx_rate_mbps: 0.0,
             });
+        }
+        None
+    }
+
+    /// The DHCP server of the current v4 lease, from whichever lease store
+    /// this distribution keeps: systemd-networkd's per-index lease file
+    /// (readable by anyone), else NetworkManager via `nmcli`.
+    pub async fn dhcp_server(iface: &str, iface_index: u32) -> Option<String> {
+        if let Ok(text) =
+            tokio::fs::read_to_string(format!("/run/systemd/netif/leases/{iface_index}")).await
+        {
+            for line in text.lines() {
+                if let Some(v) = line.strip_prefix("SERVER_ADDRESS=") {
+                    let v = v.trim();
+                    if !v.is_empty() {
+                        return Some(v.to_string());
+                    }
+                }
+            }
+        }
+        let out = tokio::process::Command::new("nmcli")
+            .args(["-g", "DHCP4.OPTION", "device", "show", iface])
+            .output()
+            .await
+            .ok()?;
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            // Lines look like "dhcp_server_identifier = 192.168.1.1".
+            if let Some((k, v)) = line.split_once('=')
+                && k.trim().ends_with("dhcp_server_identifier")
+            {
+                return Some(v.trim().to_string());
+            }
         }
         None
     }

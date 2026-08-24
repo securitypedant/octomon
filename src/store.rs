@@ -54,6 +54,19 @@ pub fn data_dir() -> Option<PathBuf> {
     }
 }
 
+/// Where a support bundle ([D]) lands: somewhere the person at the keyboard
+/// can actually find to attach to a message — the Desktop when the platform
+/// has one, else the home directory. Stamped so repeats never overwrite.
+pub fn bundle_path() -> Option<PathBuf> {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let dirs = directories::UserDirs::new()?;
+    let dir = dirs
+        .desktop_dir()
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(|| dirs.home_dir().to_path_buf());
+    Some(dir.join(format!("octomon-bundle-{stamp}.zip")))
+}
+
 /// Path for a new session log, named for the moment recording started.
 pub fn session_log_path() -> Option<PathBuf> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");

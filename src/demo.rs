@@ -220,6 +220,9 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
         v.netinfo.gateway_ipv6 = d.cidr(&v.netinfo.gateway_ipv6);
     }
     v.netinfo.dns = v.netinfo.dns.iter().map(|a| d.cidr(a)).collect();
+    if !v.netinfo.dhcp_server.is_empty() {
+        v.netinfo.dhcp_server = d.cidr(&v.netinfo.dhcp_server);
+    }
     if let Some(w) = v.netinfo.wifi.as_mut() {
         w.ssid = d.ssid(&w.ssid);
     }
@@ -253,6 +256,10 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
     for r in v.remotes.iter_mut() {
         r.addr = d.ip(r.addr);
     }
+    // Pinned remotes follow their rows' fakes, or the pin highlight would
+    // vanish in demo mode — and the drawn copy would still hold a real
+    // address. (Pinned process names are left alone, like process names.)
+    v.pinned_remotes = v.pinned_remotes.iter().map(|a| d.ip(*a)).collect();
     if let Some(m) = v.hop_monitor.as_mut() {
         for h in m.hops.iter_mut() {
             h.addr = h.addr.map(|a| d.ip(a));
@@ -342,6 +349,72 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
     v
 }
 
+/// A copy of `s` with only what identifies *this machine* rewritten — its MAC
+/// address, plus any IPv6 address that embeds that MAC (EUI-64). Everything
+/// about the network itself — gateway, SSID, resolvers, addresses, hops —
+/// stays real. This is `--demo-mac`: for screenshots of a network that isn't
+/// private (a hotel, an airport) taken from a machine that is.
+pub fn disguise_machine(s: &AppState, d: &mut Disguise) -> AppState {
+    let mut v = s.clone();
+    let real_mac = v.netinfo.mac.clone();
+    v.netinfo.mac = d.mac(&real_mac);
+    // An EUI-64 interface identifier is the MAC, byte for byte, inside the
+    // address. Modern macOS and Windows randomise theirs; older stacks and
+    // plenty of Linux configs do not, so hiding the MAC while printing such
+    // an address would hide nothing.
+    v.netinfo.ipv6 = v
+        .netinfo
+        .ipv6
+        .iter()
+        .map(|a| {
+            if embeds_mac(a, &real_mac) {
+                d.cidr(a)
+            } else {
+                a.clone()
+            }
+        })
+        .collect();
+    // The free-text pass replaces only what is in the mapping — here, just
+    // the machine's own identifiers — so network history entries like
+    // "before: … mac 22:dd:…" stop carrying the real hardware address.
+    for e in v.events.iter_mut() {
+        e.message = d.text(&e.message);
+    }
+    for c in v.net_history.iter_mut() {
+        c.summary = d.text(&c.summary);
+        c.detail = c.detail.iter().map(|l| d.text(l)).collect();
+    }
+    if let Some(n) = v.notice.as_mut() {
+        *n = d.text(n);
+    }
+    v
+}
+
+/// Whether a v6 address (bare or CIDR) carries `mac` as its EUI-64
+/// interface identifier: `..:{m0^02}{m1}:{m2}ff:fe{m3}:{m4}{m5}`.
+fn embeds_mac(cidr: &str, mac: &str) -> bool {
+    let ip = cidr.split('/').next().unwrap_or(cidr);
+    let Ok(v6) = ip.parse::<Ipv6Addr>() else {
+        return false;
+    };
+    let bytes: Vec<u8> = mac
+        .split(':')
+        .filter_map(|p| u8::from_str_radix(p, 16).ok())
+        .collect();
+    if bytes.len() != 6 {
+        return false;
+    }
+    let o = v6.octets();
+    o[8] == bytes[0] ^ 0x02
+        && o[9] == bytes[1]
+        && o[10] == bytes[2]
+        && o[11] == 0xff
+        && o[12] == 0xfe
+        && o[13] == bytes[3]
+        && o[14] == bytes[4]
+        && o[15] == bytes[5]
+}
+
 impl Disguise {
     /// A baseline label is the SSID, or the gateway address for a wired
     /// network: whichever it is, it identifies the place.
@@ -392,6 +465,47 @@ mod tests {
     }
 
     #[test]
+    fn demo_mac_hides_the_machine_and_nothing_else() {
+        let mut s = AppState::new(vec![]);
+        s.netinfo.mac = "22:dd:6a:a3:0d:f9".into();
+        s.netinfo.gateway_ip = "172.31.0.1".into();
+        s.netinfo.gateway_mac = "b4:0c:25:e3:00:10".into();
+        s.netinfo.dns = vec!["8.8.8.8".into(), "1.1.1.1".into()];
+        s.netinfo.ipv6 = vec![
+            // EUI-64 of the MAC above (22^02=20, then dd:6a, ff:fe, a3:0d:f9):
+            // embeds the hardware address and must be rewritten…
+            "fe80::20dd:6aff:fea3:df9/64".into(),
+            // …while a randomised (privacy) address says nothing and stays.
+            "fe80::1031:259c:bc37:2a61/64".into(),
+        ];
+        s.netinfo.wifi = Some(crate::app::WifiInfo {
+            ssid: "Hotel Guest".into(),
+            ..Default::default()
+        });
+        s.push_event(
+            crate::verdict::Severity::Info,
+            crate::app::EventCategory::Network,
+            "interface en0 up · mac 22:dd:6a:a3:0d:f9".into(),
+        );
+
+        let mut d = Disguise::new();
+        let v = disguise_machine(&s, &mut d);
+        // The machine: gone.
+        assert!(v.netinfo.mac.starts_with("02:"));
+        assert_ne!(v.netinfo.ipv6[0], s.netinfo.ipv6[0], "EUI-64 v6 rewritten");
+        assert!(
+            !v.events.back().unwrap().message.contains("22:dd:6a"),
+            "MAC scrubbed from free text"
+        );
+        // The network: exactly as measured.
+        assert_eq!(v.netinfo.gateway_ip, "172.31.0.1");
+        assert_eq!(v.netinfo.gateway_mac, "b4:0c:25:e3:00:10");
+        assert_eq!(v.netinfo.dns[0], "8.8.8.8");
+        assert_eq!(v.netinfo.wifi.unwrap().ssid, "Hotel Guest");
+        assert_eq!(v.netinfo.ipv6[1], s.netinfo.ipv6[1], "privacy v6 kept");
+    }
+
+    #[test]
     fn a_state_comes_out_with_nothing_real_left() {
         let mut s = AppState::new(vec![TargetStat::new(
             "Cloudflare".into(),
@@ -407,6 +521,8 @@ mod tests {
             ssid: "SecretNet".into(),
             ..Default::default()
         });
+        s.netinfo.dhcp_server = "10.27.88.200".into();
+        s.pinned_remotes.push("23.93.34.5".parse().unwrap());
         let mut hop = TargetStat::new("hop 2→1.1.1.1".into(), "76.14.0.9".parse().unwrap());
         hop.discovered = true;
         s.targets.push(hop);
@@ -414,6 +530,12 @@ mod tests {
             crate::verdict::Severity::Info,
             crate::app::EventCategory::Network,
             "network changed → en0 · gateway 10.20.30.1".into(),
+        );
+        // A location named by its SSID label, as the join/loss history writes.
+        s.push_event(
+            crate::verdict::Severity::Info,
+            crate::app::EventCategory::Network,
+            "known location → SecretNet".into(),
         );
         let mut d = Disguise::new();
         let v = disguise(&s, &mut d);
@@ -428,7 +550,29 @@ mod tests {
         assert_eq!(v.netinfo.dns[1], "1.1.1.1");
         assert_eq!(v.targets[0].addr.to_string(), "1.1.1.1", "anchor kept");
         assert!(!v.targets[1].addr.to_string().starts_with("76.14."));
-        assert!(v.events.back().unwrap().message.contains("192.168.0.1"));
+        assert!(
+            v.netinfo.dhcp_server.starts_with("192.168.0."),
+            "{}",
+            v.netinfo.dhcp_server
+        );
+        assert_ne!(v.pinned_remotes[0].to_string(), "23.93.34.5");
+        assert_eq!(
+            v.pinned_remotes[0],
+            d.ip("23.93.34.5".parse().unwrap()),
+            "pins carry the same fake as their rows"
+        );
+        assert!(
+            v.events
+                .iter()
+                .all(|e| !e.message.contains("SecretNet") && !e.message.contains("10.20.30.1")),
+            "location names and addresses scrubbed from event text"
+        );
+        assert!(
+            v.events
+                .iter()
+                .any(|e| e.message.contains("192.168.0.1")),
+            "the substitution, not deletion"
+        );
         // The live state is untouched.
         assert_eq!(s.netinfo.gateway_ip, "10.20.30.1");
     }

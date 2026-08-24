@@ -75,7 +75,10 @@ pub async fn run(
                 };
                 t.addr = new; // the ping task notices and rebinds
                 t.reset();
-                let message = format!("{host} → {new} (was {current}) — stats reset");
+                // Scope stated plainly: only the renamed target starts over —
+                // "did everything just reset?" is the natural misreading.
+                let message =
+                    format!("{host} → {new} (was {current}) — DNS moved it; this target's stats reset");
                 s.push_event(
                     crate::verdict::Severity::Info,
                     crate::app::EventCategory::Network,

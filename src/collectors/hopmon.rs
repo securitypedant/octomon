@@ -117,7 +117,10 @@ async fn discover(
         s.notice_event(
             crate::verdict::Severity::Info,
             crate::app::EventCategory::Path,
-            format!("{} unavailable", tr::PROGRAM),
+            format!(
+                "{} could not be run — cannot discover the hops toward the target",
+                tr::PROGRAM
+            ),
         );
         return;
     };
