@@ -31,7 +31,10 @@
     font-family: var(--octo-body);
     font-size: 17px;
     line-height: 1.6;
+    /* wide content must scroll inside its own container, never the page */
+    overflow-x: clip;
   }
+  .install-card, .cmd { min-width: 0; }
   a { color: var(--octo-green); text-decoration: none; }
   a:hover { text-decoration: underline; }
   :focus-visible {
@@ -259,8 +262,11 @@
     .hero-inner { max-width: 100%; min-height: 0; padding: 56px 0; }
     /* keep the headline readable over the art on small screens */
     .hero h1, .hero p.sub { text-shadow: 0 1px 14px var(--octo-deep), 0 0 34px var(--octo-deep); }
-    .installs { grid-template-columns: 1fr; }
-    .panel, .analysis { grid-template-columns: 1fr; gap: 16px; }
+    /* minmax(0, …), never bare 1fr: a bare 1fr track can't shrink below the
+       longest command line, and the whole page scrolls sideways on phones —
+       the inner .cmd-scroll only gets to scroll once its card can shrink. */
+    .installs { grid-template-columns: minmax(0, 1fr); }
+    .panel, .analysis { grid-template-columns: minmax(0, 1fr); gap: 16px; }
     .panel:nth-of-type(even) .panel-text { order: 0; }
   }
   /* phones */

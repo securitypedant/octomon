@@ -31,6 +31,8 @@
     font-family: var(--octo-body);
     font-size: 17px;
     line-height: 1.6;
+    /* wide content must scroll inside its own container, never the page */
+    overflow-x: clip;
   }
   a { color: var(--octo-green); text-decoration: none; }
   a:hover { text-decoration: underline; }
@@ -146,7 +148,8 @@
   footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; }
 
   @media (max-width: 860px) {
-    .terms { grid-template-columns: 1fr; }
+    /* minmax(0, …), never bare 1fr — see index.html's install grid. */
+    .terms { grid-template-columns: minmax(0, 1fr); }
   }
   /* phones */
   @media (max-width: 600px) {
