@@ -625,6 +625,21 @@ fn delete_selected_target(s: &mut AppState) {
 
 /// Move whichever cursor holds focus: the sub-pane's when one is active,
 /// otherwise the panel's primary list.
+/// Delete the selected speed test from the in-memory history, returning the
+/// side effect that removes it from the file. The pane lists newest-first;
+/// storage is oldest-first.
+fn delete_selected_speedtest(s: &mut AppState) -> Side {
+    let len = s.speed_history.len();
+    if len == 0 {
+        return Side::None;
+    }
+    let sel = s.speed_sel.min(len - 1);
+    let rec = s.speed_history.remove(len - 1 - sel);
+    s.speed_total = s.speed_total.saturating_sub(1);
+    s.speed_sel = s.speed_sel.min(s.speed_history.len().saturating_sub(1));
+    Side::ForgetSpeedtest(Box::new(rec))
+}
+
 /// Move the zoom overlay's cursor: the same row cursors the tables use, so
 /// the selection survives closing the zoom.
 fn zoom_move(s: &mut AppState, delta: isize) {
@@ -987,6 +1002,14 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 }
                 KeyCode::PageUp if s.overlay == Overlay::Zoom => zoom_move(&mut s, -10),
                 KeyCode::PageDown if s.overlay == Overlay::Zoom => zoom_move(&mut s, 10),
+                // Deleting a bad result works zoomed too — the zoom is where
+                // one actually reads the history closely enough to curate it.
+                KeyCode::Char('d') | KeyCode::Delete
+                    if s.overlay == Overlay::Zoom
+                        && s.zoom_view == app::ZoomView::Speedtests =>
+                {
+                    side = delete_selected_speedtest(&mut s);
+                }
                 KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Whois => {
                     s.whois_scroll = s.whois_scroll.saturating_sub(1);
                 }
@@ -1280,15 +1303,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 KeyCode::Char('d') | KeyCode::Delete
                     if s.focus == Panel::Bandwidth && s.sub_pane == SubPane::Secondary =>
                 {
-                    let len = s.speed_history.len();
-                    if len > 0 {
-                        let sel = s.speed_sel.min(len - 1);
-                        // The pane lists newest-first; storage is oldest-first.
-                        let rec = s.speed_history.remove(len - 1 - sel);
-                        s.speed_total = s.speed_total.saturating_sub(1);
-                        s.speed_sel = s.speed_sel.min(s.speed_history.len().saturating_sub(1));
-                        side = Side::ForgetSpeedtest(Box::new(rec));
-                    }
+                    side = delete_selected_speedtest(&mut s);
                 }
                 // Bandwidth: move the top-talkers column cursor and sort.
                 KeyCode::Left if s.focus == Panel::Bandwidth => {
