@@ -68,6 +68,21 @@ pub mod thresholds {
     /// recent window — 1 of 20 is exactly LOSS_BAD_PCT, and one dropped ping
     /// is not an outage.
     pub const LOSS_MIN_LOST: usize = 2;
+    /// Loss grading against a learned normal: within this factor of the
+    /// location's usual loss is fine, up to LOSS_NORMAL_BAD_FACTOR is a
+    /// caution, beyond is bad. Mirrors the relative RTT bands — a plane or
+    /// hotel network runs 20–40% ICMP loss as its permanent weather, and
+    /// judging it by office-LAN absolutes paints a working link solid red.
+    pub const LOSS_NORMAL_WARN_FACTOR: f64 = 1.5;
+    pub const LOSS_NORMAL_BAD_FACTOR: f64 = 2.0;
+    /// Above this much loss to the probe's own target, the path-MTU probe is
+    /// meaningless: it reads a timeout as "too big", and on a path dropping
+    /// packets of *every* size that conclusion is loss, not MTU.
+    pub const PMTU_LOSS_GATE_PCT: f64 = 20.0;
+    /// Own traffic (bytes/s, both directions) above which this machine is
+    /// "busy" — moving enough (2 Mb/s: an ISO download, a backup) to be part
+    /// of a congestion story on a modest link, whatever the nominal capacity.
+    pub const OWN_BUSY_BPS: f64 = 250_000.0;
     /// A finding raises when present in ≥ RAISE_HITS of the last RAISE_WINDOW
     /// ticks, and clears after CLEAR_TICKS consecutive quiet ticks.
     pub const RAISE_HITS: usize = 4;
@@ -96,6 +111,11 @@ pub enum Cause {
     NoLink,
     /// Nothing else matters until the sign-in page is dealt with.
     CaptivePortal,
+    /// ICMP paints an outage while the web demonstrably works: the summary
+    /// state of a plane/hotel-grade network. Note-class — it replaces the
+    /// ping-driven alarms it demoted, and ranks above other notes so the
+    /// footer names the connection's real state rather than a busy CPU.
+    UsableDegraded,
     GatewayLan,
     WifiLink,
     Dns,
@@ -132,6 +152,7 @@ impl Cause {
         match self {
             Cause::NoLink => "no-link",
             Cause::CaptivePortal => "captive-portal",
+            Cause::UsableDegraded => "degraded-usable",
             Cause::GatewayLan => "gateway",
             Cause::WifiLink => "link",
             Cause::Dns => "dns",
@@ -341,7 +362,10 @@ enum Health {
     Bad,
 }
 
-fn probe_health(t: &TargetStat) -> Health {
+/// `normal_loss` is the learned loss for this kind of path on this network,
+/// when there is one — a plane's 30% is its weather, an office's 30% is an
+/// incident, and this is where the two stop being judged by the same number.
+fn probe_health(t: &TargetStat, normal_loss: Option<f64>) -> Health {
     if t.window.len() < th::MIN_SAMPLES {
         return Health::NoData;
     }
@@ -353,10 +377,12 @@ fn probe_health(t: &TargetStat) -> Health {
         .take(th::RECENT)
         .filter(|ok| !**ok)
         .count();
-    if loss >= th::LOSS_BAD_PCT && lost >= th::LOSS_MIN_LOST {
-        return Health::Bad;
+    match loss_grade(loss, normal_loss) {
+        RttGrade::Bad if lost >= th::LOSS_MIN_LOST => return Health::Bad,
+        RttGrade::Bad | RttGrade::Warn => return Health::Warn,
+        RttGrade::Good => {}
     }
-    if loss >= th::LOSS_WARN_PCT || inflated(t) {
+    if inflated(t) {
         return Health::Warn;
     }
     Health::Good
@@ -392,10 +418,13 @@ pub fn rtt_grade(ms: f64, reference_ms: Option<f64>) -> RttGrade {
     }
 }
 
-/// The reference floor for a target: its own idle minimum this session,
-/// lowered to this network's learned normal for that kind of target when a
-/// baseline is established — so a session that *starts* degraded still has
-/// something honest to be judged against.
+/// The reference floor for a target: its usual best this session (see
+/// [`TargetStat::floor_ms`]), lowered to this network's learned normal for
+/// that kind of target when a baseline is established — so a session that
+/// *starts* degraded still has something honest to be judged against. The one
+/// reference every latency judgement shares — table colours, rung statuses
+/// and findings — so the surfaces move together instead of grading the same
+/// signal against three different bars.
 pub fn rtt_reference(t: &TargetStat, s: &AppState) -> Option<f64> {
     let learned = s
         .baseline
@@ -410,20 +439,124 @@ pub fn rtt_reference(t: &TargetStat, s: &AppState) -> Option<f64> {
                 None
             }
         });
-    match (t.min_ever_ms, learned) {
+    match (t.floor_ms(), learned) {
         (Some(m), Some(l)) => Some(m.min(l)),
         (Some(m), None) => Some(m),
         (None, l) => l,
     }
 }
 
-/// Recent mean RTT well above the all-time idle floor.
+/// Grade `loss` against `normal`, this network's learned loss for the same
+/// kind of path. Relative bands with the absolute thresholds kept as floors,
+/// exactly like [`rtt_grade`]: with no learned normal (or a clean one) the
+/// absolute scale stands unchanged, so first visits and healthy networks are
+/// judged as before.
+pub fn loss_grade(loss: f64, normal: Option<f64>) -> RttGrade {
+    let n = normal.unwrap_or(0.0).max(0.0);
+    let good_max = (n * th::LOSS_NORMAL_WARN_FACTOR).max(th::LOSS_WARN_PCT);
+    let bad_min = (n * th::LOSS_NORMAL_BAD_FACTOR).max(th::LOSS_BAD_PCT);
+    if loss >= bad_min {
+        RttGrade::Bad
+    } else if loss >= good_max {
+        RttGrade::Warn
+    } else {
+        RttGrade::Good
+    }
+}
+
+/// The learned-normal loss to grade this target against: the gateway's for
+/// the gateway, the anchors' for an endpoint target, nothing for a mid-path
+/// hop (routers deprioritise ICMP as policy; their loss has no "normal").
+pub fn loss_reference(t: &TargetStat, s: &AppState) -> Option<f64> {
+    let b = s.baseline.as_ref().filter(|b| b.established())?;
+    if t.hop_ttl() == Some(1) {
+        b.gateway_loss_pct
+    } else if !t.discovered {
+        b.anchor_loss_pct
+    } else {
+        None
+    }
+}
+
+/// Recent mean RTT well above the path's usual floor.
 fn inflated(t: &TargetStat) -> bool {
-    match (t.stats(th::RECENT).mean, t.min_ever_ms) {
+    match (t.stats(th::RECENT).mean, t.floor_ms()) {
         (Some(mean), Some(min)) => {
             mean > (min * th::RTT_INFLATED_FACTOR).max(th::RTT_INFLATED_FLOOR_MS)
         }
         _ => false,
+    }
+}
+
+/// How much of the congestion story this machine's own traffic could be.
+enum OwnLoad {
+    /// Nothing meaningful moving: congestion, if any, is someone else's.
+    Quiet,
+    /// Real traffic (an ISO download, a backup) but not provably saturating —
+    /// on a shared hotel link the true capacity is unknown and often *is*
+    /// whatever the download is getting, so the claim stays hedged.
+    Busy(String),
+    /// Above half the WAN capacity a speed test learned here (or 30% of the
+    /// negotiated link speed): saturation, claimable outright.
+    Loaded(String),
+}
+
+/// Judge this machine's own traffic, naming the top talker so a finding can
+/// say *whose* load it is. The capacity comparison uses what actually
+/// saturates — the learned WAN speed, else the negotiated link speed (a poor
+/// bound: a 130 Mb/s radio into a 10 Mb/s hotel uplink never looks loaded by
+/// it, which is why Busy exists as a band below Loaded).
+fn own_load(s: &AppState) -> OwnLoad {
+    let total = s.throughput.down_bps + s.throughput.up_bps;
+    if total < th::OWN_BUSY_BPS {
+        return OwnLoad::Quiet;
+    }
+    let top = s
+        .processes
+        .iter()
+        .max_by(|a, b| (a.down_bps + a.up_bps).total_cmp(&(b.down_bps + b.up_bps)))
+        .filter(|p| p.down_bps + p.up_bps > 50_000.0 && !p.name.is_empty());
+    let desc = format!(
+        "↓{:.1} ↑{:.1} Mb/s{}",
+        s.throughput.down_bps * 8.0 / 1e6,
+        s.throughput.up_bps * 8.0 / 1e6,
+        top.map(|p| format!(" — mostly {}", p.name))
+            .unwrap_or_default()
+    );
+    // WAN capacity, best source first: the baseline's (folded from clean-time
+    // tests), else the newest recorded speed test at this location — the [s]
+    // the user just ran is exactly what this link had to give, whatever the
+    // baseline was allowed to keep.
+    let baseline = s.baseline.as_ref().filter(|b| b.established());
+    let network = s
+        .baseline
+        .as_ref()
+        .map(|b| b.display_name().to_string())
+        .or_else(|| crate::baseline::fingerprint(&s.netinfo).map(|(_, l)| l));
+    let recent = network.as_deref().and_then(|n| {
+        s.speed_history
+            .iter()
+            .rev()
+            .find(|r| r.network.as_deref() == Some(n))
+    });
+    let down_cap = baseline
+        .and_then(|b| b.down_mbps)
+        .or(recent.map(|r| r.down_mbps))
+        .map(|m| m * 1e6);
+    let up_cap = baseline
+        .and_then(|b| b.up_mbps)
+        .or(recent.map(|r| r.up_mbps))
+        .map(|m| m * 1e6);
+    let wan_loaded = down_cap.is_some_and(|c| s.throughput.down_bps * 8.0 > 0.5 * c)
+        || up_cap.is_some_and(|c| s.throughput.up_bps * 8.0 > 0.5 * c);
+    let link_loaded = s
+        .netinfo
+        .link_speed_bps
+        .is_some_and(|cap| total * 8.0 > 0.3 * cap as f64);
+    if wan_loaded || link_loaded {
+        OwnLoad::Loaded(desc)
+    } else {
+        OwnLoad::Busy(desc)
     }
 }
 
@@ -519,6 +652,32 @@ pub fn link_state(s: &AppState) -> LinkState {
     LinkState::Up
 }
 
+/// Why the path-MTU reading cannot be trusted right now, when it can't be.
+/// The DF probe distinguishes packet sizes by which ones get answers; while
+/// the path drops a large share of packets of *every* size, a timeout says
+/// nothing about size, and a black-hole conclusion drawn from timeouts is
+/// noise. Judged on the ping loss to the probe's own target when that address
+/// is being pinged, else on the best-behaved anchor (if even the cleanest
+/// path is above the gate, everything is).
+pub fn pmtu_gated(s: &AppState) -> Option<String> {
+    let p = s.pmtu.as_ref().filter(|p| p.blackhole)?;
+    let loss = s
+        .targets
+        .iter()
+        .find(|t| t.addr == p.target && t.window.len() >= th::MIN_SAMPLES)
+        .map(|t| t.recent_loss_pct(th::RECENT))
+        .or_else(|| {
+            s.targets
+                .iter()
+                .filter(|t| !t.discovered && t.window.len() >= th::MIN_SAMPLES)
+                .map(|t| t.recent_loss_pct(th::RECENT))
+                .min_by(f64::total_cmp)
+        })?;
+    (loss >= th::PMTU_LOSS_GATE_PCT).then(|| {
+        format!("path drops {loss:.0}% of even small packets — can't judge sizes until that clears")
+    })
+}
+
 /// One definition of confidence, so the word means the same in every rule:
 /// `contradicted` (evidence against, or the finding is a symptom of something
 /// upstream) → Weak; `contrast` (the discriminating comparison holds — ping
@@ -541,7 +700,18 @@ fn judge(contrast: bool, corroborated: bool, contradicted: bool) -> Confidence {
 pub fn evaluate(s: &AppState) -> Triage {
     let link = link_state(s);
     let gw = gateway_target(s);
-    let gw_health = gw.map(probe_health).unwrap_or(Health::NoData);
+    // A baseline with enough healthy minutes behind it turns absolute numbers
+    // into "vs your normal here" — evidence and confidence, never a gate:
+    // absolute thresholds still work on the first visit to a network.
+    let baseline = s.baseline.as_ref().filter(|b| b.established());
+    // Learned loss normals scale the loss judgement itself (see loss_grade):
+    // on a network whose permanent weather is lossy ICMP, only loss *worse
+    // than usual here* is a fault.
+    let gw_norm = baseline.and_then(|b| b.gateway_loss_pct);
+    let anchor_norm = baseline.and_then(|b| b.anchor_loss_pct);
+    let gw_health = gw
+        .map(|g| probe_health(g, gw_norm))
+        .unwrap_or(Health::NoData);
     // Anchors: the user's endpoint targets (defaults: Cloudflare/Google/Quad9).
     // Discovered mid-path hops are excluded — routers deprioritise ICMP, and a
     // lossy hop that forwards fine is not a destination problem.
@@ -560,12 +730,12 @@ pub fn evaluate(s: &AppState) -> Triage {
     let with_data: Vec<&TargetStat> = anchors
         .iter()
         .copied()
-        .filter(|t| probe_health(t) != Health::NoData)
+        .filter(|t| probe_health(t, anchor_norm) != Health::NoData)
         .collect();
     let bad: Vec<&TargetStat> = with_data
         .iter()
         .copied()
-        .filter(|t| probe_health(t) == Health::Bad)
+        .filter(|t| probe_health(t, anchor_norm) == Health::Bad)
         .collect();
     let fine = with_data.len() - bad.len();
     let gw_fine = matches!(gw_health, Health::Good | Health::Warn);
@@ -580,10 +750,6 @@ pub fn evaluate(s: &AppState) -> Triage {
             && fine >= 2
             && bad.is_empty()
     });
-    // A baseline with enough healthy minutes behind it turns absolute numbers
-    // into "vs your normal here" — evidence and confidence, never a gate:
-    // absolute thresholds still work on the first visit to a network.
-    let baseline = s.baseline.as_ref().filter(|b| b.established());
 
     // Self-inflicted load: the speed test saturates the link on purpose, so
     // while it runs — and until its samples have left the recent window the
@@ -646,7 +812,9 @@ pub fn evaluate(s: &AppState) -> Triage {
         // An established baseline gets a veto over the *inflation* claim: on a
         // network whose learned normal already sits near the current reading,
         // absolute thresholds are the wrong judge and would flap all day.
-        // Loss-based raises are never vetoed — packets don't have a "normal".
+        // Loss-based raises are scaled the same way inside probe_health: loss
+        // *does* have a normal per location (a plane's gateway drops packets
+        // as policy), and only loss worse than usual here reaches Bad.
         let baseline_says_normal = baseline
             .and_then(|b| b.gateway_ms)
             .zip(g.stats(th::RECENT).mean)
@@ -674,17 +842,32 @@ pub fn evaluate(s: &AppState) -> Triage {
             } else {
                 judge(true, bad.len() >= 2, fine >= 2 && bad.is_empty())
             };
+            // Latency inflation is localised by consensus, the way loss is:
+            // when the anchors are inflated *with* the gateway, every measured
+            // path shares only the first hop, so the story is the access link
+            // (the radio's airtime, the uplink's queue) — not the gateway box
+            // failing, and not the wide internet. Only the gateway inflated is
+            // the gateway's own claim.
+            let inflated_anchors = with_data.iter().filter(|t| inflated(t)).count();
+            let uniform =
+                inflated(g) && with_data.len() >= 2 && inflated_anchors * 2 >= with_data.len();
             let summary = if gw_drops_icmp {
                 "gateway drops ICMP (forwarding fine)".to_string()
             } else if loss >= th::LOSS_DOWN_PCT {
                 format!("gateway unresponsive ({loss:.0}% loss)")
             } else if loss >= th::LOSS_BAD_PCT {
                 format!("gateway losing packets ({loss:.0}% loss)")
+            } else if uniform {
+                format!(
+                    "access link congested — latency inflated on every path ({} vs {} floor)",
+                    fmt_ms(g.stats(th::RECENT).mean),
+                    fmt_ms(g.floor_ms())
+                )
             } else {
                 format!(
-                    "gateway latency inflated ({} vs {} idle)",
+                    "gateway latency inflated ({} vs {} floor)",
                     fmt_ms(g.stats(th::RECENT).mean),
-                    fmt_ms(g.min_ever_ms)
+                    fmt_ms(g.floor_ms())
                 )
             };
             let mut evidence = vec![format!(
@@ -697,11 +880,53 @@ pub fn evaluate(s: &AppState) -> Triage {
                 format!(
                     "{fine} anchors reachable through it — it forwards, it just won't answer pings"
                 )
+            } else if uniform {
+                format!(
+                    "{inflated_anchors} of {} anchors inflated with it — the shared first hop, not the gateway box or the internet",
+                    with_data.len()
+                )
             } else if fine >= 2 && bad.is_empty() {
                 format!("but {fine} anchors reachable — gateway may just deprioritise ICMP")
             } else {
                 format!("anchors: {} ok, {} failing", fine, bad.len())
             });
+            // Whose load is it? The same attribution honesty the speed test
+            // gets: when this machine is saturating the link, say so instead
+            // of blaming the network — and when it is quiet, say that too,
+            // because then the congestion is other users or the AP.
+            if !gw_drops_icmp && loss < th::LOSS_BAD_PCT {
+                match own_load(s) {
+                    OwnLoad::Loaded(load) => evidence.push(format!(
+                        "this machine is loading the link ({load}) — likely self-induced bufferbloat"
+                    )),
+                    // Capacity here may be unknown or shared, so the claim
+                    // stays hedged — but "quiet" would be a lie during an
+                    // ISO download.
+                    OwnLoad::Busy(load) => evidence.push(format!(
+                        "this machine is moving {load} — its own traffic may be part of the congestion"
+                    )),
+                    OwnLoad::Quiet if uniform => evidence.push(
+                        "this machine is quiet — congestion from other users or the AP".to_string(),
+                    ),
+                    OwnLoad::Quiet => {}
+                }
+                // A location that does this every evening should say so: the
+                // incident history already knows when episodes cluster here.
+                if let Some(h) = s.history_summary()
+                    && let Some((hour, n)) = h.cluster
+                {
+                    use chrono::Timelike;
+                    let now_hour = chrono::Local::now().hour();
+                    if (0..3).any(|k| (hour + k) % 24 == now_hour) {
+                        evidence.push(format!(
+                            "the usual pattern here — {n} of {} past episodes started {:02}–{:02}h",
+                            h.episodes,
+                            hour,
+                            (hour + 3) % 24
+                        ));
+                    }
+                }
+            }
             // "vs your normal here" — the baseline agreeing hardens the claim.
             if let Some(b) = baseline
                 && let (Some(cur), Some(normal)) = (g.stats(th::RECENT).mean, b.gateway_ms)
@@ -743,7 +968,7 @@ pub fn evaluate(s: &AppState) -> Triage {
         if weak || err_pct > th::LINK_ERR_BAD_PCT {
             let hurting = !gw_fine && gw_health != Health::NoData && !gw_drops_icmp;
             let mut evidence = vec![format!(
-                "rssi {rssi} dBm{}, tx {:.0} Mbps",
+                "rssi {rssi} dBm{}, tx {:.0} Mb/s",
                 s.signal
                     .noise_dbm
                     .map(|n| format!(" (noise {n}, SNR {})", rssi - n))
@@ -1201,7 +1426,7 @@ pub fn evaluate(s: &AppState) -> Triage {
 
     // --- devices on the LAN: never an internet question ---
     for t in &lan_targets {
-        if probe_health(t) != Health::Bad {
+        if probe_health(t, None) != Health::Bad {
             continue;
         }
         let loss = t.recent_loss_pct(th::RECENT);
@@ -1406,7 +1631,7 @@ pub fn evaluate(s: &AppState) -> Triage {
         for t in s.targets.iter().filter(|t| !t.discovered) {
             if t.web.status == crate::app::WebStatus::Web
                 && t.web.fails >= 2
-                && matches!(probe_health(t), Health::Good | Health::Warn)
+                && matches!(probe_health(t, anchor_norm), Health::Good | Health::Warn)
             {
                 findings.push(Finding {
                     cause: Cause::WebTarget,
@@ -1499,9 +1724,15 @@ pub fn evaluate(s: &AppState) -> Triage {
     }
 
     // --- path MTU black hole: big packets vanish, small ones sail through ---
+    // Gated on the path actually delivering small packets: the probe reads a
+    // timeout as "too big", so on a network dropping a large share of
+    // *everything* (plane Wi-Fi at 90% loss) "black hole" is just loss
+    // wearing a costume — and it sends the user chasing a firewall that
+    // doesn't exist.
     if let Some(p) = &s.pmtu
         && p.blackhole
         && !no_link
+        && pmtu_gated(s).is_none()
     {
         findings.push(Finding {
             cause: Cause::PathMtu,
@@ -1647,6 +1878,69 @@ pub fn evaluate(s: &AppState) -> Triage {
         });
     }
 
+    // --- degraded but usable: ICMP paints an outage while the web works ---
+    // Plane, hotel and hotspot networks starve or filter ICMP so hard that
+    // the ping-driven rules above read "down" while TCP sails through — the
+    // user is browsing over the very link the findings call unreachable. A
+    // successful web check (DNS + TCP + TLS, end to end, within the last probe
+    // round) is direct contradiction no amount of ICMP *loss* outweighs: fold
+    // those alarms into one note-class finding. Note-class is also what lets
+    // the baseline learn what normal looks like on such a network at all —
+    // Degraded-or-worse vetoes every fold, and a location that is *always*
+    // "degraded" by absolute standards would otherwise learn nothing forever.
+    //
+    // Only loss-driven outage claims fold. A latency-inflation claim is not
+    // an outage and a working web check does not refute congestion — the
+    // gateway's alarm folds only when its health is loss-Bad; the wide
+    // internet and ISP-hop claims are loss-driven by construction.
+    let web_ok_ms = match (&s.http.v4, &s.http.v6) {
+        (crate::app::FamilyProbe::Ok(ms), _) | (_, crate::app::FamilyProbe::Ok(ms)) => Some(*ms),
+        _ => None,
+    };
+    let demotable = |f: &Finding| {
+        f.severity >= Severity::Degraded
+            && match f.cause {
+                Cause::GatewayLan => gw_health == Health::Bad,
+                Cause::IspHop | Cause::WideInternet => true,
+                _ => false,
+            }
+    };
+    // An established baseline that says this location is normally clean turns
+    // the rule off: at home, loss like this is an incident to report loudly —
+    // and to keep out of the learned normal — not weather to soften.
+    let normally_clean = baseline.is_some_and(|b| {
+        b.anchor_loss_pct.unwrap_or(0.0) < th::LOSS_BAD_PCT
+            && b.gateway_loss_pct.unwrap_or(0.0) < th::LOSS_BAD_PCT
+    });
+    let mut usable = false;
+    if let Some(ms) = web_ok_ms
+        && !no_link
+        && !normally_clean
+        && findings.iter().any(&demotable)
+    {
+        usable = true;
+        let mut evidence = vec![format!(
+            "web check ok ({ms:.0}ms) — names resolve and pages load over this link"
+        )];
+        for f in findings.iter().filter(|f| demotable(f)) {
+            evidence.push(format!("the ICMP view read: {}", f.summary));
+        }
+        evidence.push("expect slow pages and stalling calls, not an outage".to_string());
+        findings.retain(|f| !demotable(f));
+        findings.push(Finding {
+            cause: Cause::UsableDegraded,
+            severity: Severity::Info,
+            // Contrast: ping says down, the web demonstrably works.
+            // Corroboration: the web check exercises DNS and TCP end to end.
+            confidence: judge(true, true, false),
+            summary: "connection degraded but usable — heavy packet loss, web traffic still getting through".to_string(),
+            evidence,
+            subject: String::new(),
+            symptom: false,
+            since: None,
+        });
+    }
+
     // --- VPN caveat: everything above was measured through the tunnel ---
     if let Some(vendor) = s.netinfo.tunnel_label()
         && findings.iter().any(|f| !f.cause.is_caveat())
@@ -1687,6 +1981,8 @@ pub fn evaluate(s: &AppState) -> Triage {
         &bad,
         fine,
         self_load,
+        anchor_norm,
+        usable,
     );
     let checks = checks(s);
     Triage {
@@ -1710,6 +2006,8 @@ fn build_rungs(
     bad: &[&TargetStat],
     fine: usize,
     self_load: bool,
+    anchor_norm: Option<f64>,
+    usable: bool,
 ) -> Vec<Rung> {
     let mut rungs = Vec::with_capacity(7);
     let health_status = |h: Health| match h {
@@ -1776,7 +2074,7 @@ fn build_rungs(
             (
                 status,
                 format!(
-                    "Wi-Fi rssi {rssi} dBm · tx {:.0} Mbps · errors {err_pct:.1}%",
+                    "Wi-Fi rssi {rssi} dBm · tx {:.0} Mb/s · errors {err_pct:.1}%",
                     s.signal.tx_rate_mbps
                 ),
             )
@@ -1820,23 +2118,34 @@ fn build_rungs(
                 fmt_ms(st.p95),
                 g.recent_loss_pct(th::RECENT)
             );
-            if let Some(b) = s.baseline.as_ref().filter(|b| b.established())
-                && let Some(normal) = b.gateway_ms
-            {
-                detail.push_str(&format!(" · ~{normal:.0}ms normal here"));
+            if let Some(b) = s.baseline.as_ref().filter(|b| b.established()) {
+                if let Some(normal) = b.gateway_ms {
+                    detail.push_str(&format!(" · ~{normal:.0}ms normal here"));
+                }
+                // Only worth a word when the norm is itself abnormal — a
+                // clean network's ~0% would be noise.
+                if let Some(normal) = b.gateway_loss_pct.filter(|n| *n >= th::LOSS_BAD_PCT) {
+                    detail.push_str(&format!(" · ~{normal:.0}% loss normal here"));
+                }
             }
             // Proven to forward by the clean anchors behind it: a red rung
             // would contradict the note-class finding saying it is fine.
             if gw_drops_icmp {
                 detail.push_str(" · drops ICMP, forwards fine");
             }
+            let status = if gw_drops_icmp {
+                RungStatus::Ok
+            } else if usable && gw_health == Health::Bad {
+                // The web check proves traffic crosses it; red would say
+                // "outage" about a link the user is browsing over.
+                detail.push_str(" · web traffic still flows");
+                RungStatus::Warn
+            } else {
+                health_status(gw_health)
+            };
             Rung {
                 area: Area::Gateway,
-                status: if gw_drops_icmp {
-                    RungStatus::Ok
-                } else {
-                    health_status(gw_health)
-                },
+                status,
                 detail,
             }
         }
@@ -2001,21 +2310,42 @@ fn build_rungs(
             .iter()
             .filter_map(|t| t.stats(th::RECENT).p95)
             .fold(0.0_f64, f64::max);
+        // Latency counts too: a green check beside "worst p95 504ms" was the
+        // rung grading only loss while the table graded the same anchors red.
+        let inflated_majority = with_data.len() >= 2
+            && with_data.iter().filter(|t| inflated(t)).count() * 2 >= with_data.len();
         let status = if bad.len() >= 2 {
-            RungStatus::Bad
-        } else if bad.len() == 1 || worst_loss >= th::LOSS_WARN_PCT {
+            if usable {
+                RungStatus::Warn
+            } else {
+                RungStatus::Bad
+            }
+        } else if bad.len() == 1
+            || loss_grade(worst_loss, anchor_norm) != RttGrade::Good
+            || inflated_majority
+        {
             RungStatus::Warn
         } else {
             RungStatus::Ok
         };
+        let mut detail = format!(
+            "{} anchor{} · worst p95 {worst_p95:.0}ms · worst loss {worst_loss:.0}%",
+            with_data.len(),
+            if with_data.len() == 1 { "" } else { "s" }
+        );
+        if inflated_majority {
+            detail.push_str(" · latency inflated");
+        }
+        if let Some(normal) = anchor_norm.filter(|n| *n >= th::LOSS_BAD_PCT) {
+            detail.push_str(&format!(" · ~{normal:.0}% loss normal here"));
+        }
+        if usable && bad.len() >= 2 {
+            detail.push_str(" · web traffic still flows");
+        }
         Rung {
             area: Area::Internet,
             status,
-            detail: format!(
-                "{} anchor{} · worst p95 {worst_p95:.0}ms · worst loss {worst_loss:.0}%",
-                with_data.len(),
-                if with_data.len() == 1 { "" } else { "s" }
-            ),
+            detail,
         }
     });
 
@@ -2091,10 +2421,36 @@ fn build_rungs(
                 },
                 detail: format!("struggling: {}{load}", list(&names)),
             }
+        } else if !bad.is_empty() {
+            // Most or all targets failing at once: the cause was judged at the
+            // gateway / internet rungs, and there is nothing destination-
+            // specific to add — but "all targets reachable" would be a lie.
+            let n = bad.len();
+            let (status, detail) = if usable {
+                (
+                    RungStatus::Warn,
+                    "pings mostly lost — web traffic still flows".to_string(),
+                )
+            } else if n == with_data.len() {
+                (
+                    RungStatus::Bad,
+                    "none reachable — cause judged upstream".to_string(),
+                )
+            } else {
+                (
+                    RungStatus::Warn,
+                    format!("{n} of {} failing — cause judged upstream", with_data.len()),
+                )
+            };
+            Rung {
+                area: Area::Destinations,
+                status,
+                detail,
+            }
         } else {
             let warn: Vec<&str> = with_data
                 .iter()
-                .filter(|t| probe_health(t) == Health::Warn)
+                .filter(|t| probe_health(t, anchor_norm) == Health::Warn)
                 .map(|t| t.label.as_str())
                 .collect();
             if warn.is_empty() {
@@ -2232,8 +2588,14 @@ pub fn checks(s: &AppState) -> Vec<Check> {
         ),
         None => push("proxy", RungStatus::Ok, "none configured".into()),
     }
-    // Path MTU.
+    // Path MTU. A black-hole reading taken while the path drops most packets
+    // is loss, not MTU — present it as unmeasurable, not as an alarm.
     match (&s.pmtu, &s.pmtu_error) {
+        (Some(_), _) if pmtu_gated(s).is_some() => push(
+            "path MTU",
+            RungStatus::Unknown,
+            format!("not judged — {}", pmtu_gated(s).unwrap_or_default()),
+        ),
         (Some(p), _) => push(
             "path MTU",
             if p.blackhole {
@@ -2537,10 +2899,11 @@ enum BaselineIo {
         key: String,
         label: String,
     },
-    /// A healthy minute was folded in: persist.
+    /// A healthy minute was folded in: persist. Boxed: the baseline dwarfs
+    /// the other variants, and this enum is moved around every tick.
     Save {
         key: String,
-        baseline: crate::baseline::Baseline,
+        baseline: Box<crate::baseline::Baseline>,
     },
 }
 
@@ -2553,6 +2916,9 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
     let mut tick = tokio::time::interval(cfg.sample_interval());
     // Consecutive fully-healthy ticks; a fold happens each time this hits 60.
     let mut healthy_run: u32 = 0;
+    // Whether any second of the current healthy run had latency-suspect
+    // conditions (see baseline_step): such a minute folds latency-blind.
+    let mut run_suspect = false;
     let mut last_speed_total: Option<usize> = None;
     loop {
         tick.tick().await;
@@ -2597,7 +2963,12 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
                 s.push_event(severity, crate::app::EventCategory::Analysis, message);
             }
 
-            baseline_step(&mut s, &mut healthy_run, &mut last_speed_total)
+            baseline_step(
+                &mut s,
+                &mut healthy_run,
+                &mut run_suspect,
+                &mut last_speed_total,
+            )
         };
 
         if !episodes.is_empty() {
@@ -2688,9 +3059,20 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
 
 /// One tick of baseline bookkeeping. Decides what disk work is needed; does
 /// none of it here (the caller holds the state lock).
+/// A finding whose only skewed measurements are round trips: bufferbloat and
+/// the gateway/access-link *inflation* claims. Loss-flavoured gateway claims
+/// ("unresponsive", "losing packets") are not latency-shaped — loss numbers
+/// are exactly what they would poison. The GatewayLan flavour is read off the
+/// summary; `congestion_wordings_stay_latency_shaped` pins the coupling.
+fn latency_shaped(f: &Finding) -> bool {
+    f.cause == Cause::Bufferbloat
+        || (f.cause == Cause::GatewayLan && f.summary.contains("latency inflated"))
+}
+
 fn baseline_step(
     s: &mut AppState,
     healthy_run: &mut u32,
+    run_suspect: &mut bool,
     last_speed_total: &mut Option<usize>,
 ) -> BaselineIo {
     // Network fingerprint changed (or never resolved): swap baselines.
@@ -2732,7 +3114,14 @@ fn baseline_step(
             Verdict::Insufficient(_) => true,
             Verdict::Healthy => false,
         };
-        if !severe
+        // A congested-time test is a lower bound, not the capacity — but a
+        // lower bound beats judging load against nothing at all, so it may
+        // fill an *empty* slot. The next clean-time test overwrites it.
+        let first_reading = s
+            .baseline
+            .as_ref()
+            .is_some_and(|b| b.down_mbps.is_none() && b.up_mbps.is_none());
+        if (!severe || first_reading)
             && let (Some(d), Some(u)) = (s.speedtest.down_mbps, s.speedtest.up_mbps)
             && let Some(b) = s.baseline.as_mut()
         {
@@ -2742,26 +3131,64 @@ fn baseline_step(
         }
     }
 
-    // The fold gate: no Degraded-or-worse finding. Note-class findings don't
-    // block, because a note can be a *permanent* trait of a location — a
-    // gateway that drops ICMP as policy — and gating on literally zero
-    // findings would leave such locations "learning from scratch" forever.
-    // Degraded and Down still veto every fold: an incident must never teach
-    // the baseline. (Notes describe healthy measurements by construction;
-    // anything that skews numbers is Degraded or worse.)
-    let fully_healthy = match &s.verdict.current {
-        Verdict::Healthy => true,
-        Verdict::Problems(f) => f.iter().all(|x| x.severity < Severity::Degraded),
-        Verdict::Insufficient(_) => false,
-    };
-    if !fully_healthy {
+    // The fold gate, refined twice by field failures. Rule one: an incident
+    // must never teach the baseline. Rule two (the refinement): an incident
+    // only blocks the numbers it actually *skews* — a congested evening or a
+    // loaded machine skews latency while leaving loss, signal and medium
+    // honest, and a hotel that is congested all evening (or a machine that
+    // always has agents running) would otherwise sit at "learning from
+    // scratch" forever, never able to establish at all. So:
+    //   - Down-class findings, or non-latency Degraded ones (loss, DNS,
+    //     captive…): nothing folds.
+    //   - only latency-shaped trouble (inflation/bufferbloat findings, or
+    //     own load visibly inflating the paths): fold with the latency
+    //     fields blanked — the location still establishes, and its latency
+    //     normals fill in during genuinely clean minutes.
+    // Note-class findings never block: a note can be a permanent trait of a
+    // location (a gateway that drops ICMP as policy).
+    let mut blocked = false;
+    let mut latency_suspect = false;
+    match &s.verdict.current {
+        Verdict::Healthy => {}
+        Verdict::Insufficient(_) => blocked = true,
+        Verdict::Problems(fs) => {
+            for f in fs.iter().filter(|f| f.severity >= Severity::Degraded) {
+                if f.severity >= Severity::Down || !latency_shaped(f) {
+                    blocked = true;
+                } else {
+                    latency_suspect = true;
+                }
+            }
+        }
+    }
+    // Own load inflating the gateway/anchors skews the same latency fields,
+    // finding or not. Judged on the paths whose numbers fold — not LAN
+    // devices or mid-path hops.
+    let load_biased = !matches!(own_load(s), OwnLoad::Quiet)
+        && s.targets.iter().any(|t| {
+            (t.hop_ttl() == Some(1) || (!t.discovered && !s.is_lan_addr(t.addr))) && inflated(t)
+        });
+    latency_suspect |= load_biased;
+
+    if blocked {
         *healthy_run = 0;
+        *run_suspect = false;
     } else {
+        // One suspect second taints the whole minute: the sample aggregates
+        // the window, and a spike inside it lands in the mean.
+        *run_suspect |= latency_suspect;
         *healthy_run += 1;
         let uptime_ok = s.started.elapsed().as_secs() > 120;
         if *healthy_run >= 60 && uptime_ok {
             *healthy_run = 0;
-            let sample = crate::baseline::Sample::take(s);
+            let mut sample = crate::baseline::Sample::take(s);
+            if *run_suspect {
+                sample.gateway_ms = None;
+                sample.gateway_p95_ms = None;
+                sample.anchor_ms = None;
+                sample.dns_ms = None;
+            }
+            *run_suspect = false;
             if let Some(b) = s.baseline.as_mut() {
                 b.fold(sample);
                 changed = true;
@@ -2770,7 +3197,10 @@ fn baseline_step(
     }
 
     match (changed, s.baseline.clone()) {
-        (true, Some(baseline)) => BaselineIo::Save { key, baseline },
+        (true, Some(baseline)) => BaselineIo::Save {
+            key,
+            baseline: Box::new(baseline),
+        },
         _ => BaselineIo::None,
     }
 }
@@ -3777,8 +4207,9 @@ mod tests {
         s.verdict.current = Verdict::Healthy;
 
         let mut healthy_run = 59;
+        let mut run_suspect = false;
         let mut last_speed = Some(0);
-        let io = baseline_step(&mut s, &mut healthy_run, &mut last_speed);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
         assert!(
             matches!(io, BaselineIo::Save { .. }),
             "60th healthy tick folds"
@@ -3789,7 +4220,7 @@ mod tests {
         // and the healthy streak starts over.
         s.verdict.current = Verdict::Problems(vec![fake(Cause::GatewayLan)]);
         healthy_run = 59;
-        let io = baseline_step(&mut s, &mut healthy_run, &mut last_speed);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
         assert!(matches!(io, BaselineIo::None));
         assert_eq!(healthy_run, 0, "the streak resets");
         assert_eq!(s.baseline.as_ref().unwrap().samples, 1, "nothing learned");
@@ -4043,5 +4474,557 @@ mod tests {
         let out = vs.ingest(Triage::default(), Some("measuring…".into()), now);
         assert!(out.is_empty());
         assert!(matches!(vs.current, Verdict::Insufficient(_)));
+    }
+
+    /// The plane-Wi-Fi state: everything ICMP reads dead or dying.
+    fn icmp_wall() -> AppState {
+        let mut s = healthy_state();
+        for t in &mut s.targets {
+            for _ in 0..15 {
+                t.record_loss();
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn all_targets_down_never_reads_all_reachable() {
+        // The destinations rung answers "which targets are the odd ones out";
+        // with every target down the honest answer is "none reachable", not
+        // the vacuous "all targets reachable" it used to fall through to.
+        let t = evaluate(&icmp_wall());
+        let rung = t
+            .rungs
+            .iter()
+            .find(|r| r.area == Area::Destinations)
+            .unwrap();
+        assert_eq!(rung.status, RungStatus::Bad);
+        assert!(
+            !rung.detail.contains("all targets reachable"),
+            "got: {}",
+            rung.detail
+        );
+        assert!(
+            rung.detail.contains("none reachable"),
+            "got: {}",
+            rung.detail
+        );
+    }
+
+    #[test]
+    fn an_icmp_wall_with_a_working_web_check_is_degraded_but_usable() {
+        let mut s = icmp_wall();
+        s.http.v4 = crate::app::FamilyProbe::Ok(1578.0);
+        let t = evaluate(&s);
+        // The ping-derived outage claims are folded into one note-class
+        // finding: the user is browsing over this "unreachable" link.
+        assert!(
+            t.findings.iter().all(|f| f.severity < Severity::Degraded),
+            "outage-severity findings survived: {:?}",
+            causes(&t)
+        );
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::UsableDegraded)
+            .expect("degraded-but-usable note");
+        assert_eq!(f.confidence, Confidence::Strong);
+        assert!(
+            f.evidence.iter().any(|e| e.contains("web check ok")),
+            "evidence: {:?}",
+            f.evidence
+        );
+        // Note-class means the baseline may fold: this is what lets a plane
+        // network ever learn its own normal.
+        assert_eq!(exit_code(&t, false), 0);
+        // The ladder softens with it: yellow, not an outage-red ladder under
+        // a "usable" headline.
+        for area in [Area::Gateway, Area::Internet, Area::Destinations] {
+            let rung = t.rungs.iter().find(|r| r.area == area).unwrap();
+            assert_eq!(rung.status, RungStatus::Warn, "{area:?}: {}", rung.detail);
+        }
+    }
+
+    #[test]
+    fn latency_inflation_is_not_softened_by_a_working_web_check() {
+        // 0% loss, latency 8× the idle floor: hotel-evening congestion. The
+        // web answering does not refute congestion — the inflation claim is
+        // the accurate one and must survive (found in the field: a Sheraton
+        // read "heavy packet loss" while the actual story was bufferbloat).
+        let mut s = healthy_state();
+        let gw = s.targets.iter_mut().find(|t| t.discovered).unwrap();
+        for _ in 0..20 {
+            gw.record_reply(160.0);
+        }
+        gw.min_ever_ms = Some(19.0);
+        s.http.v4 = crate::app::FamilyProbe::Ok(73.0);
+        let t = evaluate(&s);
+        assert!(!causes(&t).contains(&Cause::UsableDegraded));
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::GatewayLan)
+            .expect("inflation finding survives");
+        assert!(f.summary.contains("inflated"), "got: {}", f.summary);
+    }
+
+    #[test]
+    fn a_normally_clean_location_reports_loss_as_an_incident_not_weather() {
+        // The same ICMP wall + working web, but at a location whose learned
+        // normal is clean: this is an incident at home, not plane weather —
+        // report it loudly and keep it out of the baseline.
+        let mut s = icmp_wall();
+        s.http.v4 = crate::app::FamilyProbe::Ok(300.0);
+        s.baseline = Some(crate::baseline::Baseline {
+            samples: crate::baseline::MIN_SAMPLES,
+            anchor_loss_pct: Some(0.4),
+            gateway_loss_pct: Some(0.1),
+            ..Default::default()
+        });
+        let t = evaluate(&s);
+        assert!(!causes(&t).contains(&Cause::UsableDegraded));
+        assert!(t.findings.iter().any(|f| f.severity >= Severity::Degraded));
+    }
+
+    #[test]
+    fn without_a_working_web_check_the_wall_stays_an_outage() {
+        // http NotRun (default): nothing contradicts the ICMP story.
+        let t = evaluate(&icmp_wall());
+        assert!(causes(&t).contains(&Cause::GatewayLan));
+        assert!(t.findings.iter().any(|f| f.severity == Severity::Down));
+        assert!(!causes(&t).contains(&Cause::UsableDegraded));
+    }
+
+    #[test]
+    fn a_blackhole_read_through_heavy_loss_is_not_a_finding() {
+        let mut s = icmp_wall();
+        s.pmtu = Some(crate::app::PmtuResult {
+            target: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            iface_mtu: Some(1500),
+            path_mtu: None,
+            blackhole: true,
+            pmtud_works: false,
+        });
+        let t = evaluate(&s);
+        // The probe reads timeouts as "too big"; at 43% loss to its own
+        // target a timeout means nothing about size.
+        assert!(
+            !causes(&t).contains(&Cause::PathMtu),
+            "got: {:?}",
+            causes(&t)
+        );
+        let check = t.checks.iter().find(|c| c.name == "path MTU").unwrap();
+        assert_eq!(check.status, RungStatus::Unknown);
+        assert!(check.detail.contains("not judged"), "got: {}", check.detail);
+
+        // The same reading on a clean network is the real thing.
+        let mut s = healthy_state();
+        s.pmtu = Some(crate::app::PmtuResult {
+            target: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            iface_mtu: Some(1500),
+            path_mtu: Some(1200),
+            blackhole: true,
+            pmtud_works: false,
+        });
+        let t = evaluate(&s);
+        assert!(causes(&t).contains(&Cause::PathMtu));
+    }
+
+    /// A target whose recent readings sit far above its established floor.
+    fn inflated_probe(label: &str, addr: [u8; 4]) -> TargetStat {
+        let mut t = probe(label, addr, 30, 0); // 30 × 10 ms: the floor
+        for _ in 0..20 {
+            t.record_reply(300.0);
+        }
+        t
+    }
+
+    #[test]
+    fn the_floor_is_the_usual_best_not_one_lucky_reply() {
+        let mut t = probe("x", [1, 1, 1, 1], 40, 0); // 40 × 10 ms
+        t.record_reply(2.0);
+        assert_eq!(t.min_ever_ms, Some(2.0));
+        let f = t.floor_ms().unwrap();
+        assert!(f >= 9.9, "p10 grades against the usual best, got {f}");
+        // Too little history: the absolute minimum stands in.
+        let t2 = probe("y", [2, 2, 2, 2], 5, 0);
+        assert_eq!(t2.floor_ms(), t2.min_ever_ms);
+    }
+
+    #[test]
+    fn uniform_inflation_blames_the_access_link_not_the_gateway() {
+        // Gateway and every anchor inflated together, zero loss: hotel-evening
+        // congestion. The only shared segment is the first hop.
+        let mut s = AppState::new(vec![
+            inflated_probe("Cloudflare", [1, 1, 1, 1]),
+            inflated_probe("Google", [8, 8, 8, 8]),
+            inflated_probe("Quad9", [9, 9, 9, 9]),
+        ]);
+        let mut gw = inflated_probe("gateway", [192, 168, 1, 1]);
+        gw.discovered = true;
+        s.targets.push(gw);
+        s.netinfo.gateway_ip = "192.168.1.1".into();
+        s.vitals.cores = vec![10.0; 8];
+
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::GatewayLan)
+            .expect("congestion finding");
+        assert!(
+            f.summary.contains("access link congested"),
+            "got: {}",
+            f.summary
+        );
+        assert!(
+            f.evidence.iter().any(|e| e.contains("anchors inflated")),
+            "evidence: {:?}",
+            f.evidence
+        );
+        // Nothing says the machine is loading the link: the congestion is
+        // attributed outward, not left implicit.
+        assert!(
+            f.evidence
+                .iter()
+                .any(|e| e.contains("this machine is quiet")),
+            "evidence: {:?}",
+            f.evidence
+        );
+        // The internet rung agrees instead of printing a green check beside a
+        // half-second p95.
+        let rung = t.rungs.iter().find(|r| r.area == Area::Internet).unwrap();
+        assert_eq!(rung.status, RungStatus::Warn);
+        assert!(rung.detail.contains("latency inflated"), "{}", rung.detail);
+    }
+
+    #[test]
+    fn own_upload_is_named_when_latency_inflates_under_it() {
+        let mut s = AppState::new(vec![
+            inflated_probe("Cloudflare", [1, 1, 1, 1]),
+            inflated_probe("Google", [8, 8, 8, 8]),
+        ]);
+        let mut gw = inflated_probe("gateway", [192, 168, 1, 1]);
+        gw.discovered = true;
+        s.targets.push(gw);
+        s.netinfo.gateway_ip = "192.168.1.1".into();
+        s.vitals.cores = vec![10.0; 8];
+        // A 10 Mb link with 4 Mb/s of our own upload on it.
+        s.netinfo.link_speed_bps = Some(10_000_000);
+        s.throughput.up_bps = 500_000.0;
+        s.processes.push(crate::app::ProcBandwidth {
+            name: "claude".into(),
+            up_bps: 450_000.0,
+            ..Default::default()
+        });
+
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::GatewayLan)
+            .expect("congestion finding");
+        let load = f
+            .evidence
+            .iter()
+            .find(|e| e.contains("this machine is loading the link"))
+            .expect("load attribution");
+        assert!(load.contains("claude"), "names the talker: {load}");
+        assert!(load.contains("bufferbloat"), "{load}");
+    }
+
+    #[test]
+    fn a_real_download_is_never_called_quiet() {
+        // Two browser downloads totalling ~6.5 Mb/s on a hotel link whose true
+        // capacity is unknown (no speed test learned, and the radio's nominal
+        // 130 Mb/s is not it). Saturation can't be proven — but "this machine
+        // is quiet" would be a lie. Found in the field: an Ubuntu ISO at
+        // 800 KB/s read as "quiet" against the link-speed gate.
+        let mut s = AppState::new(vec![
+            inflated_probe("Cloudflare", [1, 1, 1, 1]),
+            inflated_probe("Google", [8, 8, 8, 8]),
+        ]);
+        let mut gw = inflated_probe("gateway", [192, 168, 1, 1]);
+        gw.discovered = true;
+        s.targets.push(gw);
+        s.netinfo.gateway_ip = "192.168.1.1".into();
+        s.vitals.cores = vec![10.0; 8];
+        s.throughput.down_bps = 800_000.0;
+        s.processes.push(crate::app::ProcBandwidth {
+            name: "firefox".into(),
+            down_bps: 435_000.0,
+            ..Default::default()
+        });
+
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::GatewayLan)
+            .expect("congestion finding");
+        assert!(
+            !f.evidence.iter().any(|e| e.contains("machine is quiet")),
+            "evidence: {:?}",
+            f.evidence
+        );
+        let hedged = f
+            .evidence
+            .iter()
+            .find(|e| e.contains("may be part of the congestion"))
+            .expect("hedged attribution");
+        assert!(hedged.contains("firefox"), "names the talker: {hedged}");
+    }
+
+    #[test]
+    fn a_recorded_speed_test_teaches_the_capacity_the_baseline_lacks() {
+        // Same download as above, but the user has run [s] here: the recorded
+        // 5.8 Mb/s is what this link has to give, so 6.4 Mb/s of own traffic
+        // is saturation — claimable outright, not hedged.
+        let mut s = AppState::new(vec![
+            inflated_probe("Cloudflare", [1, 1, 1, 1]),
+            inflated_probe("Google", [8, 8, 8, 8]),
+        ]);
+        let mut gw = inflated_probe("gateway", [192, 168, 1, 1]);
+        gw.discovered = true;
+        s.targets.push(gw);
+        s.netinfo.gateway_ip = "192.168.1.1".into();
+        s.vitals.cores = vec![10.0; 8];
+        s.throughput.down_bps = 800_000.0;
+        let (_, label) = crate::baseline::fingerprint(&s.netinfo).expect("fingerprintable");
+        s.speed_history.push(crate::store::SpeedRecord {
+            at: 1_700_000_000,
+            provider: "Cloudflare".into(),
+            down_mbps: 5.8,
+            up_mbps: 5.2,
+            idle_ms: None,
+            loaded_ms: None,
+            network: Some(label),
+            medium: None,
+            server: None,
+        });
+
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::GatewayLan)
+            .expect("congestion finding");
+        assert!(
+            f.evidence
+                .iter()
+                .any(|e| e.contains("loading the link") && e.contains("bufferbloat")),
+            "evidence: {:?}",
+            f.evidence
+        );
+    }
+
+    #[test]
+    fn a_recurring_evening_pattern_is_cited_from_the_history() {
+        let mut s = healthy_state();
+        let gw = s.targets.iter_mut().find(|t| t.discovered).unwrap();
+        for _ in 0..10 {
+            gw.record_reply(10.0);
+        }
+        for _ in 0..20 {
+            gw.record_reply(300.0);
+        }
+        let (key, _) = crate::baseline::fingerprint(&s.netinfo).expect("fingerprintable");
+        s.baseline_key = Some(key.clone());
+        // Three past episodes, all starting at this hour on previous days —
+        // built relative to now so the test holds at any time of day.
+        let now = chrono::Utc::now().timestamp();
+        for day in 0..3 {
+            s.history.push(crate::history::Episode {
+                network: key.clone(),
+                at: now - day * 86_400,
+                duration_secs: 600,
+                cause: "gateway".into(),
+                severity: "degraded".into(),
+                summary: "gateway latency inflated".into(),
+            });
+        }
+
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::GatewayLan)
+            .expect("inflation finding");
+        assert!(
+            f.evidence
+                .iter()
+                .any(|e| e.contains("the usual pattern here")),
+            "evidence: {:?}",
+            f.evidence
+        );
+    }
+
+    #[test]
+    fn load_blocks_the_fold_only_while_it_biases_the_numbers() {
+        let mut s = healthy_state();
+        if let Some(earlier) = Instant::now().checked_sub(Duration::from_secs(300)) {
+            s.started = earlier;
+        }
+        let (key, label) = crate::baseline::fingerprint(&s.netinfo).expect("fingerprintable");
+        s.baseline_key = Some(key);
+        s.baseline = Some(crate::baseline::Baseline {
+            label,
+            ..Default::default()
+        });
+        s.verdict.current = Verdict::Healthy;
+        // Saturating its own link, but latency is clean: honest numbers, and
+        // a machine that always has *some* traffic must not starve the
+        // baseline forever (the "learning from scratch for hours" bug).
+        s.netinfo.link_speed_bps = Some(10_000_000);
+        s.throughput.up_bps = 500_000.0;
+
+        let mut healthy_run = 59;
+        let mut run_suspect = false;
+        let mut last_speed = Some(0);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        assert!(
+            matches!(io, BaselineIo::Save { .. }),
+            "clean latency under load still folds"
+        );
+
+        // The same load with latency visibly inflated: the round trips are
+        // the load's, not the network's — the minute still folds (loss and
+        // signal are honest, and the location must be able to establish),
+        // but latency-blind.
+        let gw = s.targets.iter_mut().find(|t| t.discovered).unwrap();
+        for _ in 0..20 {
+            gw.record_reply(300.0);
+        }
+        healthy_run = 59;
+        let before = s.baseline.as_ref().unwrap().samples;
+        let clean_ms = s.baseline.as_ref().unwrap().gateway_ms;
+        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        assert!(matches!(io, BaselineIo::Save { .. }));
+        let b = s.baseline.as_ref().unwrap();
+        assert_eq!(b.samples, before + 1, "the location still establishes");
+        // The first (clean) fold's 10 ms stands; the inflated 300 ms minute
+        // moved it nowhere.
+        assert_eq!(b.gateway_ms, clean_ms, "inflated round trips not learned");
+        assert!(b.gateway_loss_pct.is_some(), "honest loss is learned");
+    }
+
+    #[test]
+    fn a_congested_evening_folds_latency_blind_instead_of_never() {
+        // The Sheraton bug, round three: with the congestion finding active
+        // for hours, requiring a fully-healthy minute meant "learning from
+        // scratch" forever. A latency-shaped finding folds latency-blind;
+        // a loss-shaped one still blocks everything.
+        let mut s = healthy_state();
+        if let Some(earlier) = Instant::now().checked_sub(Duration::from_secs(300)) {
+            s.started = earlier;
+        }
+        let (key, label) = crate::baseline::fingerprint(&s.netinfo).expect("fingerprintable");
+        s.baseline_key = Some(key);
+        s.baseline = Some(crate::baseline::Baseline {
+            label,
+            ..Default::default()
+        });
+        let mut congested = fake(Cause::GatewayLan);
+        congested.summary =
+            "access link congested — latency inflated on every path (205ms vs 51ms floor)".into();
+        s.verdict.current = Verdict::Problems(vec![congested]);
+
+        let mut healthy_run = 59;
+        let mut run_suspect = false;
+        let mut last_speed = Some(0);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        assert!(matches!(io, BaselineIo::Save { .. }), "establishes anyway");
+        let b = s.baseline.as_ref().unwrap();
+        assert_eq!(b.samples, 1);
+        assert_eq!(b.gateway_ms, None, "congested round trips not learned");
+
+        // A loss-flavoured gateway finding is not latency-shaped: blocked.
+        s.verdict.current = Verdict::Problems(vec![Finding {
+            summary: "gateway losing packets (12% loss)".into(),
+            ..fake(Cause::GatewayLan)
+        }]);
+        healthy_run = 59;
+        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        assert!(matches!(io, BaselineIo::None));
+        assert_eq!(healthy_run, 0);
+    }
+
+    #[test]
+    fn congestion_wordings_stay_latency_shaped() {
+        // latency_shaped reads the GatewayLan flavour off the summary; this
+        // pins the real wordings to the match so a reword can't silently
+        // turn congested evenings back into "learning from scratch".
+        let mut s = healthy_state();
+        let gw = s.targets.iter_mut().find(|t| t.discovered).unwrap();
+        for _ in 0..10 {
+            gw.record_reply(10.0);
+        }
+        for _ in 0..20 {
+            gw.record_reply(300.0);
+        }
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::GatewayLan)
+            .expect("inflation finding");
+        assert!(latency_shaped(f), "gateway flavour: {}", f.summary);
+
+        let t = evaluate(&icmp_wall());
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::GatewayLan)
+            .expect("loss finding");
+        assert!(!latency_shaped(f), "loss flavour: {}", f.summary);
+    }
+
+    #[test]
+    fn loss_is_graded_against_the_location_normal_with_absolute_floors() {
+        // No learned normal: the absolute scale stands.
+        assert_eq!(loss_grade(0.0, None), RttGrade::Good);
+        assert_eq!(loss_grade(3.0, None), RttGrade::Warn);
+        assert_eq!(loss_grade(10.0, None), RttGrade::Bad);
+        // A location whose weather is 30% loss: within 1.5× is its normal,
+        // beyond 2× is genuinely worse than even that network's usual.
+        assert_eq!(loss_grade(40.0, Some(30.0)), RttGrade::Good);
+        assert_eq!(loss_grade(50.0, Some(30.0)), RttGrade::Warn);
+        assert_eq!(loss_grade(70.0, Some(30.0)), RttGrade::Bad);
+        // A clean location's ~0% normal must not shrink the floors.
+        assert_eq!(loss_grade(0.5, Some(0.1)), RttGrade::Good);
+    }
+
+    #[test]
+    fn learned_lossy_anchors_stop_reading_as_an_internet_outage() {
+        // 8 of 20 recent lost = 40% loss on every anchor: an outage by
+        // office standards, a normal Tuesday on this learned network.
+        let mut s = AppState::new(vec![
+            probe("Cloudflare", [1, 1, 1, 1], 12, 8),
+            probe("Google", [8, 8, 8, 8], 12, 8),
+            probe("Quad9", [9, 9, 9, 9], 12, 8),
+        ]);
+        let mut gw = probe("gateway", [192, 168, 1, 1], 20, 0);
+        gw.discovered = true;
+        s.targets.push(gw);
+        s.netinfo.gateway_ip = "192.168.1.1".into();
+        s.vitals.cores = vec![10.0; 8];
+
+        // First visit, no baseline: this is an internet problem.
+        let t = evaluate(&s);
+        assert!(causes(&t).contains(&Cause::WideInternet));
+
+        // Same numbers with the location's learned normal: no finding.
+        s.baseline = Some(crate::baseline::Baseline {
+            samples: crate::baseline::MIN_SAMPLES,
+            anchor_loss_pct: Some(35.0),
+            gateway_loss_pct: Some(0.0),
+            ..Default::default()
+        });
+        let t = evaluate(&s);
+        assert!(
+            !causes(&t).contains(&Cause::WideInternet),
+            "got: {:?}",
+            causes(&t)
+        );
     }
 }

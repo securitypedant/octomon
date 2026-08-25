@@ -47,6 +47,14 @@ pub struct Baseline {
     pub gateway_ms: Option<f64>,
     pub gateway_p95_ms: Option<f64>,
     pub anchor_ms: Option<f64>,
+    /// Learned ICMP loss (per cent). Plane, hotel and hotspot networks run
+    /// double-digit loss as their permanent weather; grading against these
+    /// keeps their colours meaningful instead of solid red. Absent in files
+    /// from before the fields existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_loss_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_loss_pct: Option<f64>,
     pub dns_ms: Option<f64>,
     pub rssi_dbm: Option<f64>,
     pub down_mbps: Option<f64>,
@@ -72,6 +80,8 @@ pub struct Sample {
     pub gateway_ms: Option<f64>,
     pub gateway_p95_ms: Option<f64>,
     pub anchor_ms: Option<f64>,
+    pub gateway_loss_pct: Option<f64>,
+    pub anchor_loss_pct: Option<f64>,
     pub dns_ms: Option<f64>,
     pub rssi_dbm: Option<f64>,
 }
@@ -90,12 +100,23 @@ impl Sample {
                 (st.mean, st.p95)
             })
             .unwrap_or_default();
+        let gateway_loss_pct = gw
+            .filter(|g| !g.window.is_empty())
+            .map(|g| g.recent_loss_pct(n));
         // Best (lowest-mean) anchor: "how far away is the internet at its best".
         let anchor_ms = s
             .targets
             .iter()
             .filter(|t| !t.discovered)
             .filter_map(|t| t.stats(n).mean)
+            .min_by(f64::total_cmp);
+        // Best (lowest-loss) anchor, same reasoning: on a network whose *best*
+        // path still drops packets, that loss is the location's weather.
+        let anchor_loss_pct = s
+            .targets
+            .iter()
+            .filter(|t| !t.discovered && !t.window.is_empty())
+            .map(|t| t.recent_loss_pct(n))
             .min_by(f64::total_cmp);
         // This network's own resolvers; the reference resolver is contrast.
         let dns: Vec<f64> = s
@@ -111,6 +132,8 @@ impl Sample {
             gateway_ms,
             gateway_p95_ms,
             anchor_ms,
+            gateway_loss_pct,
+            anchor_loss_pct,
             dns_ms,
             rssi_dbm,
         }
@@ -134,6 +157,8 @@ impl Baseline {
         self.gateway_ms = ewma(self.gateway_ms, sample.gateway_ms);
         self.gateway_p95_ms = ewma(self.gateway_p95_ms, sample.gateway_p95_ms);
         self.anchor_ms = ewma(self.anchor_ms, sample.anchor_ms);
+        self.gateway_loss_pct = ewma(self.gateway_loss_pct, sample.gateway_loss_pct);
+        self.anchor_loss_pct = ewma(self.anchor_loss_pct, sample.anchor_loss_pct);
         self.dns_ms = ewma(self.dns_ms, sample.dns_ms);
         self.rssi_dbm = ewma(self.rssi_dbm, sample.rssi_dbm);
         self.samples += 1;
@@ -356,6 +381,37 @@ mod tests {
         // A fold with no gateway reading must not wipe what was learned.
         b.fold(Sample::default());
         assert!((b.gateway_ms.unwrap() - 10.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn loss_is_learned_like_any_other_normal_and_old_files_still_parse() {
+        let mut b = Baseline::default();
+        b.fold(Sample {
+            medium: "Wi-Fi (wireless)".into(),
+            gateway_loss_pct: Some(100.0),
+            anchor_loss_pct: Some(30.0),
+            ..Default::default()
+        });
+        assert_eq!(b.gateway_loss_pct, Some(100.0));
+        assert_eq!(b.anchor_loss_pct, Some(30.0));
+        // The EWMA moves toward new weather instead of snapping.
+        b.fold(Sample {
+            anchor_loss_pct: Some(10.0),
+            ..Default::default()
+        });
+        let a = b.anchor_loss_pct.unwrap();
+        assert!(a < 30.0 && a > 10.0, "got {a}");
+
+        // Baseline files written before the loss fields existed load as
+        // "never measured", not as an error that drops the whole store.
+        let legacy: Baseline = serde_json::from_str(
+            r#"{"label":"Home","samples":9,"gateway_ms":2.5,"gateway_p95_ms":4.0,
+                "anchor_ms":12.0,"dns_ms":8.0,"rssi_dbm":-52.0,
+                "down_mbps":400.0,"up_mbps":40.0}"#,
+        )
+        .expect("legacy baseline parses");
+        assert_eq!(legacy.gateway_loss_pct, None);
+        assert_eq!(legacy.anchor_loss_pct, None);
     }
 
     #[test]

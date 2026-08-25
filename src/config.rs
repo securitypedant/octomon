@@ -115,6 +115,15 @@ pub struct Config {
     /// really lacks the glyphs (the font itself is asked, so a conhost set
     /// to Cascadia Mono keeps the fine set).
     pub bar_glyphs: String,
+    /// How live traffic rates are displayed: "bytes" (KB/s, MB/s — the
+    /// default, what file transfers read as) or "bits" (Kb/s, Mb/s — what
+    /// speed tests and ISP plans are sold in). Anything else reads as bytes.
+    #[serde(default = "default_bandwidth_units")]
+    pub bandwidth_units: String,
+}
+
+fn default_bandwidth_units() -> String {
+    "bytes".to_string()
 }
 
 /// Two-level bar glyphs for consoles whose fonts lack the eighth-blocks.
@@ -183,6 +192,15 @@ impl Default for Config {
                 t("Cloudflare", "1.1.1.1"),
                 t("Google", "8.8.8.8"),
                 t("Quad9", "9.9.9.9"),
+                // A real website behind a CDN, not just anycast resolvers:
+                // exercises DNS + HTTP the way a browser does. Carries its
+                // hostname so the resolver re-checks the address on network
+                // changes — CDN answers move.
+                Target {
+                    label: "octomon.dev".to_string(),
+                    addr: "104.21.5.170".parse().expect("valid default IP"),
+                    host: Some("octomon.dev".to_string()),
+                },
             ],
             ping_interval_ms: 1000,
             ping_timeout_ms: 1000,
@@ -207,6 +225,7 @@ impl Default for Config {
             explainer_seen: false,
             graph_marker: "auto".to_string(),
             bar_glyphs: "auto".to_string(),
+            bandwidth_units: default_bandwidth_units(),
         }
     }
 }
@@ -263,6 +282,12 @@ impl Config {
 
     /// Sparkline bar glyphs, resolved the same way as [`Config::marker`]:
     /// an explicit "fine"/"coarse" is honoured, anything else auto-detects.
+    /// Whether live rates display in bits ("bits") rather than bytes (the
+    /// default, and what any unrecognised value falls back to).
+    pub fn bits_units(&self) -> bool {
+        self.bandwidth_units.trim().eq_ignore_ascii_case("bits")
+    }
+
     pub fn bar_set(&self) -> ratatui::symbols::bar::Set<'static> {
         match self.bar_glyphs.trim().to_ascii_lowercase().as_str() {
             "fine" => ratatui::symbols::bar::NINE_LEVELS,
@@ -452,6 +477,22 @@ mod path_tests {
         let legacy = "[[targets]]\nlabel = \"Cloudflare\"\naddr = \"1.1.1.1\"\n";
         let back: Config = toml::from_str(legacy).unwrap();
         assert!(back.targets[0].host.is_none());
+    }
+
+    #[test]
+    fn bandwidth_units_default_to_bytes_and_tolerate_typos() {
+        let with = |v: &str| Config {
+            bandwidth_units: v.to_string(),
+            ..Config::default()
+        };
+        assert!(!Config::default().bits_units());
+        assert!(with("bits").bits_units());
+        assert!(with(" Bits ").bits_units());
+        // A typo in a cosmetic setting must not stop octomon starting.
+        assert!(!with("bitz").bits_units());
+        // Config files from before the key existed still parse.
+        let legacy: Config = toml::from_str("").unwrap();
+        assert!(!legacy.bits_units());
     }
 
     #[test]

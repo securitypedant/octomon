@@ -29,7 +29,7 @@ pub async fn run(
     locate_url: &str,
 ) -> Result<Report, String> {
     set_phase(state, "M-Lab · locate");
-    let (down_url, up_url) = locate(client, locate_url).await?;
+    let (down_url, up_url, machine) = locate(client, locate_url).await?;
 
     set_phase(state, "M-Lab · download");
     let down_mbps = download(state, &down_url).await?;
@@ -43,24 +43,32 @@ pub async fn run(
         up_mbps,
         idle_ms: None,
         loaded_ms: None,
+        server: machine,
     })
 }
 
-/// Ask the locate service for a server, returning (download_url, upload_url).
-async fn locate(client: &reqwest::Client, locate_url: &str) -> Result<(String, String), String> {
+/// Ask the locate service for a server, returning (download_url, upload_url,
+/// machine name). The machine ("mlab1-mia05…") is which M-Lab site actually
+/// ran the test — stored per result, since locate can pick a different site
+/// each run.
+async fn locate(
+    client: &reqwest::Client,
+    locate_url: &str,
+) -> Result<(String, String, Option<String>), String> {
     let text = crate::util::fetch_text_capped(client, locate_url, 256 * 1024)
         .await
         .map_err(|e| format!("locate: {e}"))?;
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("locate json: {e}"))?;
 
+    let machine = v["results"][0]["machine"].as_str().map(str::to_string);
     let urls = v["results"][0]["urls"]
         .as_object()
         .ok_or("locate: no server returned")?;
     let get = |k: &str| urls.get(k).and_then(|x| x.as_str()).map(str::to_string);
     let down = get("wss:///ndt/v7/download").ok_or("locate: no download url")?;
     let up = get("wss:///ndt/v7/upload").ok_or("locate: no upload url")?;
-    Ok((down, up))
+    Ok((down, up, machine))
 }
 
 async fn connect(url: &str) -> Result<Ws, String> {

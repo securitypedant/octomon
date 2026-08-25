@@ -467,6 +467,9 @@ mod tests {
             up_mbps: 941.9,
             idle_ms: Some(4.2),
             loaded_ms: Some(122.6),
+            network: Some("Home".into()),
+            medium: Some("Ethernet (wired)".into()),
+            server: None,
         });
         s.speed_total += 1;
 

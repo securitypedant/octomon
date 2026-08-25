@@ -66,7 +66,32 @@ pub async fn run(
             }),
             Err(_) => None,
         };
+        // While the path is dropping a large share of *small* packets, a
+        // timeout-read DF probe cannot tell size from loss, and a "black
+        // hole" measured now would stick for the whole re-probe period.
+        // Defer and retry once the weather clears.
         if available && let Some(target) = target {
+            use crate::verdict::thresholds as th;
+            let loss = {
+                let s = state.lock().unwrap();
+                s.targets
+                    .iter()
+                    .find(|t| t.addr == IpAddr::V4(target) && t.window.len() >= th::MIN_SAMPLES)
+                    .map(|t| t.recent_loss_pct(th::RECENT))
+            };
+            if loss.is_some_and(|l| l >= th::PMTU_LOSS_GATE_PCT) {
+                {
+                    let mut s = state.lock().unwrap();
+                    if s.pmtu.is_none() {
+                        s.pmtu_error = Some("deferred — the path is dropping packets".to_string());
+                    }
+                }
+                tokio::select! {
+                    _ = changed.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_secs(120)) => {}
+                }
+                continue;
+            }
             let result = tokio::task::spawn_blocking(move || probe(target, iface_mtu))
                 .await
                 .unwrap_or_else(|e| Err(e.to_string()));

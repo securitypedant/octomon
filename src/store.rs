@@ -19,6 +19,24 @@ pub struct SpeedRecord {
     pub idle_ms: Option<f64>,
     #[serde(default)]
     pub loaded_ms: Option<f64>,
+    /// The known network the test ran on — the location's user-given name,
+    /// else its auto label (SSID / gateway address). A snapshot at test time:
+    /// renaming the location later does not rewrite history. Absent in
+    /// records from before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
+    /// How the machine was attached ("Wi-Fi (wireless)", "Ethernet (wired)"):
+    /// the same LAN over a cable and over the radio are two different speed
+    /// stories.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medium: Option<String>,
+    /// Which far end actually served the test: the Cloudflare edge colo, the
+    /// LibreSpeed backend's listed name, the M-Lab machine. Two "LibreSpeed"
+    /// rows an hour apart can be two different servers on two different
+    /// continents — without this the history can't tell test-server variance
+    /// from network variance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
 }
 
 impl SpeedRecord {
@@ -94,6 +112,40 @@ pub fn append(rec: &SpeedRecord) {
     }
 }
 
+/// Remove one record from the history file (blocking file rewrite — call off
+/// the lock). Matched on timestamp + provider + the speeds, first match only:
+/// `at` alone can collide when two providers are raced in the same second.
+pub fn forget(rec: &SpeedRecord) {
+    let Some(path) = path() else { return };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let mut removed = false;
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|l| {
+            if removed {
+                return true;
+            }
+            let same = serde_json::from_str::<SpeedRecord>(l).is_ok_and(|r| {
+                r.at == rec.at
+                    && r.provider == rec.provider
+                    && r.down_mbps == rec.down_mbps
+                    && r.up_mbps == rec.up_mbps
+            });
+            removed |= same;
+            !same
+        })
+        .collect();
+    if removed {
+        let mut out = kept.join("\n");
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        let _ = std::fs::write(&path, out);
+    }
+}
+
 /// Load the most recent `n` records (oldest → newest), plus how many are stored
 /// in total — the UI shows both, so "showing 500 of 812" stays honest when the
 /// history outgrows what is kept in memory.
@@ -127,6 +179,34 @@ mod tests {
         let dir = data_dir().expect("a home directory");
         assert!(dir.ends_with("octomon"), "got {}", dir.display());
         assert!(path().unwrap().ends_with("octomon/speedtests.jsonl"));
+    }
+
+    #[test]
+    fn history_lines_from_before_the_network_field_still_parse() {
+        // speedtests.jsonl accumulates across versions; one unreadable line
+        // shape would silently drop a person's whole older history.
+        let legacy =
+            r#"{"at":1700000000,"provider":"Cloudflare","down_mbps":953.2,"up_mbps":941.9}"#;
+        let r: SpeedRecord = serde_json::from_str(legacy).expect("legacy line parses");
+        assert_eq!(r.network, None);
+        assert_eq!(r.medium, None);
+
+        // And a full record round-trips with its network.
+        let rec = SpeedRecord {
+            at: 1_700_000_000,
+            provider: "Cloudflare".into(),
+            down_mbps: 104.3,
+            up_mbps: 142.8,
+            idle_ms: Some(15.0),
+            loaded_ms: Some(232.0),
+            network: Some("United WiFi".into()),
+            medium: Some("Wi-Fi (wireless)".into()),
+            server: Some("MIA (edge)".into()),
+        };
+        let back: SpeedRecord =
+            serde_json::from_str(&serde_json::to_string(&rec).unwrap()).unwrap();
+        assert_eq!(back.network.as_deref(), Some("United WiFi"));
+        assert_eq!(back.medium.as_deref(), Some("Wi-Fi (wireless)"));
     }
 
     #[test]

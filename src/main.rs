@@ -162,6 +162,7 @@ async fn main() -> Result<()> {
         s.samples_per_sec = 1000.0 / cfg.ping_interval_ms.max(1) as f64;
         s.graph_marker = cfg.marker();
         s.bar_set = cfg.bar_set();
+        s.bits_units = cfg.bits_units();
         s.speedtest_provider_names = provider_names;
         s.speedtest_provider_idx = sel;
         let (history, total) = store::load_recent(500);
@@ -587,6 +588,12 @@ enum Side {
     EgressScan,
     /// Remove a deleted target from the config file (user-added ones only).
     ForgetTarget(IpAddr),
+    /// Remove one speed test from the on-disk history ([d] in the history
+    /// pane). Carries the record so the file rewrite runs off the lock.
+    ForgetSpeedtest(Box<store::SpeedRecord>),
+    /// Ask the OS what it knows about these pids (exe path, command line)
+    /// for the zoom overlay — a blocking process scan, run off the lock.
+    LoadProcDetails(Vec<u32>),
     /// Remove a deleted location's stored baseline from baselines.json.
     ForgetLocation(String),
 }
@@ -618,6 +625,25 @@ fn delete_selected_target(s: &mut AppState) {
 
 /// Move whichever cursor holds focus: the sub-pane's when one is active,
 /// otherwise the panel's primary list.
+/// Move the zoom overlay's cursor: the same row cursors the tables use, so
+/// the selection survives closing the zoom.
+fn zoom_move(s: &mut AppState, delta: isize) {
+    match s.zoom_view {
+        app::ZoomView::Processes => {
+            let order = s.process_order();
+            s.proc_sel = AppState::step_in_order(&order, s.proc_sel, delta);
+        }
+        app::ZoomView::Remotes => {
+            let order = s.remote_order();
+            s.remote_sel = AppState::step_in_order(&order, s.remote_sel, delta);
+        }
+        app::ZoomView::Speedtests => {
+            let last = s.speed_history.len().saturating_sub(1) as isize;
+            s.speed_sel = (s.speed_sel as isize + delta).clamp(0, last.max(0)) as usize;
+        }
+    }
+}
+
 fn move_cursor(s: &mut AppState, delta: isize) {
     let secondary = s.sub_pane == SubPane::Secondary;
     match s.focus {
@@ -769,6 +795,33 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 KeyCode::Char(c) if s.input_buffer.len() < 40 => s.input_buffer.push(c),
                 _ => {}
             },
+            // --- modal text entry: a marker for the event timeline ---
+            InputMode::Marker => match key.code {
+                KeyCode::Enter => {
+                    let text = s.input_buffer.trim().to_string();
+                    s.input_mode = InputMode::Normal;
+                    s.input_buffer.clear();
+                    if !text.is_empty() {
+                        // notice_event: the footer confirms the marker landed,
+                        // and the timeline keeps it.
+                        s.notice_event(
+                            verdict::Severity::Info,
+                            app::EventCategory::Marker,
+                            format!("⚑ {text}"),
+                        );
+                    }
+                }
+                KeyCode::Esc => {
+                    s.input_mode = InputMode::Normal;
+                    s.input_buffer.clear();
+                }
+                KeyCode::Backspace => {
+                    s.input_buffer.pop();
+                }
+                KeyCode::Char(c) if s.input_buffer.len() < 80 => s.input_buffer.push(c),
+                _ => {}
+            },
+
             InputMode::NameNetwork => match key.code {
                 KeyCode::Enter => {
                     let name = s.input_buffer.trim().to_string();
@@ -871,6 +924,69 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         s.overlay
                     };
                 }
+                // A marker can be dropped with an overlay up too — reading
+                // the events list is exactly when one realises it is needed.
+                KeyCode::Char('M') => {
+                    s.input_buffer.clear();
+                    s.input_mode = InputMode::Marker;
+                }
+                // The zoom's own key closes it; its cursor keys walk the
+                // zoomed table with the same order (sort + pins) it draws,
+                // and n cycles which table is zoomed, as it does unzoomed.
+                // The speed-test keys stay live too — watching the history
+                // zoomed is exactly when one wants to run another.
+                KeyCode::Char('z') if s.overlay == Overlay::Zoom => s.overlay = Overlay::None,
+                KeyCode::Char('s')
+                    if s.overlay == Overlay::Zoom
+                        && s.speedtest_enabled
+                        && !matches!(s.speedtest.status, SpeedStatus::Running) =>
+                {
+                    s.speedtest.begin();
+                    side = Side::Speedtest;
+                }
+                KeyCode::Char('v') if s.overlay == Overlay::Zoom => {
+                    let n = s.speedtest_provider_names.len();
+                    if n > 0 {
+                        s.speedtest_provider_idx = (s.speedtest_provider_idx + 1) % n;
+                        side = Side::SaveProvider(
+                            s.speedtest_provider_names[s.speedtest_provider_idx].clone(),
+                        );
+                    }
+                }
+                KeyCode::Char('n') if s.overlay == Overlay::Zoom => {
+                    s.zoom_view = match s.zoom_view {
+                        app::ZoomView::Processes => app::ZoomView::Remotes,
+                        app::ZoomView::Remotes => app::ZoomView::Speedtests,
+                        app::ZoomView::Speedtests => app::ZoomView::Processes,
+                    };
+                    // The underlying selection follows, so closing the zoom
+                    // lands on the table that was zoomed and reopening zooms
+                    // it again — with the sort and column cursor swapped
+                    // alongside, exactly as the unzoomed 'n' does.
+                    let (view, pane) = match s.zoom_view {
+                        app::ZoomView::Processes => (BwView::Processes, SubPane::Primary),
+                        app::ZoomView::Remotes => (BwView::Remotes, SubPane::Primary),
+                        app::ZoomView::Speedtests => (s.bw_view, SubPane::Secondary),
+                    };
+                    if view != s.bw_view {
+                        let st: &mut AppState = &mut s;
+                        std::mem::swap(&mut st.bw_sort, &mut st.bw_sort_other);
+                        std::mem::swap(&mut st.bw_col, &mut st.bw_col_other);
+                    }
+                    s.bw_view = view;
+                    s.sub_pane = pane;
+                    if s.zoom_view == app::ZoomView::Processes {
+                        side = Side::LoadProcDetails(s.processes.iter().map(|p| p.pid).collect());
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Zoom => {
+                    zoom_move(&mut s, -1);
+                }
+                KeyCode::Down | KeyCode::Char('j') if s.overlay == Overlay::Zoom => {
+                    zoom_move(&mut s, 1);
+                }
+                KeyCode::PageUp if s.overlay == Overlay::Zoom => zoom_move(&mut s, -10),
+                KeyCode::PageDown if s.overlay == Overlay::Zoom => zoom_move(&mut s, 10),
                 KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Whois => {
                     s.whois_scroll = s.whois_scroll.saturating_sub(1);
                 }
@@ -1094,6 +1210,35 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         .unwrap_or_default();
                     s.input_mode = InputMode::NameNetwork;
                 }
+                // Shift+M drops a marker into the event timeline: "at this
+                // moment, this is what I was experiencing" — the one thing
+                // the probes cannot record on their own.
+                KeyCode::Char('M') => {
+                    s.input_buffer.clear();
+                    s.input_mode = InputMode::Marker;
+                }
+                // z zooms the active Bandwidth table across the panel's whole
+                // bottom band (the graphs stay put): every column, full
+                // names, per-process detail — the answer to "what is that
+                // thing using my bandwidth?". From the split view it goes
+                // full-screen first; the band only exists there.
+                KeyCode::Char('z') if s.focus == Panel::Bandwidth => {
+                    s.zoom_view = if s.fullscreen && s.sub_pane == SubPane::Secondary {
+                        app::ZoomView::Speedtests
+                    } else {
+                        match s.bw_view {
+                            BwView::Processes => app::ZoomView::Processes,
+                            BwView::Remotes => app::ZoomView::Remotes,
+                        }
+                    };
+                    if s.zoom_view == app::ZoomView::Processes {
+                        // What the OS knows about each pid arrives async; the
+                        // view shows "looking up…" until it lands.
+                        side = Side::LoadProcDetails(s.processes.iter().map(|p| p.pid).collect());
+                    }
+                    s.fullscreen = true;
+                    s.overlay = Overlay::Zoom;
+                }
                 // 'v' cycles the speed-test provider (Bandwidth panel) + persists.
                 KeyCode::Char('v') if s.focus == Panel::Bandwidth => {
                     let n = s.speedtest_provider_names.len();
@@ -1128,6 +1273,22 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         side = Side::ForgetTarget(t.addr);
                     }
                     delete_selected_target(&mut s);
+                }
+                // Delete the selected speed test from the history (and its
+                // file): a test run against a rate-limited backend or in the
+                // middle of an outage poisons every later comparison.
+                KeyCode::Char('d') | KeyCode::Delete
+                    if s.focus == Panel::Bandwidth && s.sub_pane == SubPane::Secondary =>
+                {
+                    let len = s.speed_history.len();
+                    if len > 0 {
+                        let sel = s.speed_sel.min(len - 1);
+                        // The pane lists newest-first; storage is oldest-first.
+                        let rec = s.speed_history.remove(len - 1 - sel);
+                        s.speed_total = s.speed_total.saturating_sub(1);
+                        s.speed_sel = s.speed_sel.min(s.speed_history.len().saturating_sub(1));
+                        side = Side::ForgetSpeedtest(Box::new(rec));
+                    }
                 }
                 // Bandwidth: move the top-talkers column cursor and sort.
                 KeyCode::Left if s.focus == Panel::Bandwidth => {
@@ -1322,6 +1483,63 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
         }
         Side::ForgetTarget(addr) => {
             tokio::task::spawn_blocking(move || config::Config::persist_target_removed(addr));
+        }
+        Side::ForgetSpeedtest(rec) => {
+            tokio::task::spawn_blocking(move || store::forget(&rec));
+        }
+        Side::LoadProcDetails(pids) => {
+            let state = ctx.state.clone();
+            tokio::task::spawn_blocking(move || {
+                use chrono::TimeZone;
+                use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+                let mut sys = System::new();
+                sys.refresh_processes_specifics(
+                    ProcessesToUpdate::All,
+                    true,
+                    ProcessRefreshKind::nothing()
+                        .with_exe(UpdateKind::Always)
+                        .with_cmd(UpdateKind::Always)
+                        .with_user(UpdateKind::Always),
+                );
+                let users = sysinfo::Users::new_with_refreshed_list();
+                let mut map = std::collections::HashMap::new();
+                for pid in pids {
+                    if let Some(p) = sys.process(sysinfo::Pid::from_u32(pid)) {
+                        let user = p
+                            .user_id()
+                            .and_then(|uid| users.get_user_by_id(uid))
+                            .map(|u| u.name().to_string())
+                            .unwrap_or_default();
+                        // "name (pid)"; empty if the parent itself has exited.
+                        let parent = p
+                            .parent()
+                            .and_then(|pp| sys.process(pp).map(|pr| (pp, pr)))
+                            .map(|(pp, pr)| format!("{} ({pp})", pr.name().to_string_lossy()))
+                            .unwrap_or_default();
+                        let started = chrono::Local
+                            .timestamp_opt(p.start_time() as i64, 0)
+                            .single()
+                            .map(|dt| dt.format("%m-%d %H:%M").to_string())
+                            .unwrap_or_default();
+                        map.insert(
+                            pid,
+                            app::ProcDetail {
+                                exe: p.exe().map(|x| x.display().to_string()).unwrap_or_default(),
+                                cmd: p
+                                    .cmd()
+                                    .iter()
+                                    .map(|c| c.to_string_lossy())
+                                    .collect::<Vec<_>>()
+                                    .join(" "),
+                                user,
+                                parent,
+                                started,
+                            },
+                        );
+                    }
+                }
+                state.lock().unwrap().proc_details = map;
+            });
         }
         Side::ForgetLocation(key) => {
             tokio::task::spawn_blocking(move || baseline::forget(&key));
@@ -1599,10 +1817,10 @@ fn snapshot_text(s: &AppState) -> String {
             &st.provider
         },
         st.down_mbps
-            .map(|v| format!("{v:.1} Mbps"))
+            .map(|v| format!("{v:.1} Mb/s"))
             .unwrap_or_else(|| "—".into()),
         st.up_mbps
-            .map(|v| format!("{v:.1} Mbps"))
+            .map(|v| format!("{v:.1} Mb/s"))
             .unwrap_or_else(|| "—".into()),
     );
     match s.proc_status {
@@ -1732,7 +1950,7 @@ fn snapshot_text(s: &AppState) -> String {
             None => "n/a".to_string(),
         };
         println!(
-            "  live signal: rssi={} dBm  noise={noise}  tx={:.0} Mbps  ({} samples)",
+            "  live signal: rssi={} dBm  noise={noise}  tx={:.0} Mb/s  ({} samples)",
             sig.rssi_dbm,
             sig.tx_rate_mbps,
             sig.rssi_hist.data.len()
@@ -1833,7 +2051,7 @@ fn doctor_report(s: &AppState, full: bool) -> (String, i32) {
                 .map(|r| format!(" · rssi ~{r:.0} dBm"))
                 .unwrap_or_default(),
             match (b.down_mbps, b.up_mbps) {
-                (Some(d), Some(u)) => format!(" · speed ~{d:.0}↓/{u:.0}↑ Mbps"),
+                (Some(d), Some(u)) => format!(" · speed ~{d:.0}↓/{u:.0}↑ Mb/s"),
                 _ => String::new(),
             }
         );
@@ -2431,6 +2649,9 @@ mod tests {
                 up_mbps: 10.0,
                 idle_ms: None,
                 loaded_ms: None,
+                network: None,
+                medium: None,
+                server: None,
             })
             .collect();
 

@@ -60,8 +60,349 @@ pub fn render(f: &mut Frame, s: &AppState) {
         Overlay::Locations => locations_overlay(f, s, f.area()),
         Overlay::Whois => whois_overlay(f, s, f.area()),
         Overlay::Egress => egress_overlay(f, s, f.area()),
+        // Not a floating overlay: the zoom takes over the Bandwidth panel's
+        // bottom band in place (see `zoom_band`), leaving the graphs visible.
+        Overlay::Zoom => {}
         Overlay::None => {}
     }
+}
+
+/// The Bandwidth panel's bottom band as one full-width table ([z]): every
+/// column, names and addresses untruncated, and — for processes — what the
+/// OS knows about the selected one. Pure inspection: the question it answers
+/// is "what is that thing using my bandwidth?", never process management.
+fn zoom_band(f: &mut Frame, s: &AppState, area: Rect) {
+    let title = match s.zoom_view {
+        crate::app::ZoomView::Processes => format!(" Processes · zoom ({}) ", s.processes.len()),
+        crate::app::ZoomView::Remotes => {
+            format!(" Remote addresses · zoom ({}) ", s.remotes.len())
+        }
+        crate::app::ZoomView::Speedtests => {
+            format!(" Speed Test History · zoom ({}) ", s.speed_history.len())
+        }
+    };
+    let outer = Block::bordered()
+        .padding(Padding::new(1, 1, 0, 0))
+        .title(Span::styled(title, Style::new().bold()))
+        .title_bottom(Span::styled(
+            " ↑↓ scroll · n next table · press z or Esc to close ",
+            Style::new().fg(Color::DarkGray),
+        ))
+        .border_style(Style::new().fg(Color::Cyan));
+    let inner = outer.inner(area);
+    f.render_widget(outer, area);
+    if inner.height < 2 {
+        return;
+    }
+    match s.zoom_view {
+        crate::app::ZoomView::Processes => zoom_processes(f, s, inner),
+        crate::app::ZoomView::Remotes => zoom_remotes(f, s, inner),
+        crate::app::ZoomView::Speedtests => zoom_speedtests(f, s, inner),
+    }
+}
+
+/// Fixed column widths for the columns that fit, with the leftover pane
+/// width (up to `cap`) handed to column `col` — the name or address column
+/// that puts it to use; number columns would not. Returns the widths and
+/// that column's final width, for truncation.
+fn flex_col(widths: &[u16], ncols: usize, avail: u16, col: usize, cap: u16) -> (Vec<u16>, u16) {
+    let mut v: Vec<u16> = widths[..ncols].to_vec();
+    let used: u16 = v.iter().sum::<u16>() + ncols.saturating_sub(1) as u16;
+    let extra = avail.saturating_sub(used).min(cap);
+    let col = col.min(v.len() - 1);
+    v[col] += extra;
+    let flexed = v[col];
+    (v, flexed)
+}
+
+/// The "── selected ──…" rule above a detail block, bright enough that the
+/// block below it is noticed at all.
+fn selected_rule(width: usize) -> Line<'static> {
+    let tail: String = "─".repeat(width.saturating_sub(12).max(2));
+    Line::from(vec![
+        Span::styled("── ", Style::new().fg(Color::DarkGray)),
+        Span::styled("selected", Style::new().fg(Color::White).bold()),
+        Span::styled(format!(" {tail}"), Style::new().fg(Color::DarkGray)),
+    ])
+}
+
+fn zoom_processes(f: &mut Frame, s: &AppState, area: Rect) {
+    // The detail block below the table: everything known about the selected
+    // process. Reserved up front so the table scroll accounts for it; a
+    // short band gives up the who/when line before the path, and the block
+    // entirely before the table.
+    let detail_h: u16 = if area.height >= 12 {
+        6
+    } else if area.height >= 9 {
+        4
+    } else {
+        0
+    };
+    let (table_area, detail_area) = if detail_h > 0 {
+        let parts =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(detail_h)]).split(area);
+        (parts[0], Some(parts[1]))
+    } else {
+        (area, None)
+    };
+
+    const WIDTHS: [u16; 9] = [34, 7, 11, 11, 8, 8, 8, 6, 6];
+    let ncols = fitting_columns(&WIDTHS, table_area.width);
+    let (flexed, name_w) = flex_col(&WIDTHS, ncols, table_area.width, 0, 40);
+    let labels = [
+        "name", "pid", "now↓", "now↑", "total", "↓", "↑", "share", "retx",
+    ];
+    let header = Row::new(labels[..ncols].iter().map(|l| Cell::from(*l)))
+        .style(Style::new().fg(Color::DarkGray));
+    let order = s.process_order();
+    let (table_area, first, visible) = talkers_scroll(f, table_area, &order, s.proc_sel);
+    let rows = order.iter().skip(first).take(visible).map(|&idx| {
+        let p = &s.processes[idx];
+        let name: String = p.name.chars().take(name_w as usize).collect();
+        let mut cells = vec![
+            Cell::from(name),
+            Cell::from(Span::styled(
+                p.pid.to_string(),
+                Style::new().fg(Color::Gray),
+            )),
+            fmt_now(p.down_bps, s.bits_units),
+            fmt_now(p.up_bps, s.bits_units),
+            Cell::from(Span::styled(
+                fmt_bytes(p.total_bytes),
+                Style::new().fg(Color::White),
+            )),
+            Cell::from(Span::styled(
+                fmt_bytes(p.down_bytes),
+                Style::new().fg(Color::Green),
+            )),
+            Cell::from(Span::styled(
+                fmt_bytes(p.up_bytes),
+                Style::new().fg(Color::Magenta),
+            )),
+            Cell::from(Span::styled(
+                format!("{:.0}%", p.share * 100.0),
+                Style::new().fg(Color::Gray),
+            )),
+            Cell::from(Span::styled(
+                p.retx.to_string(),
+                Style::new().fg(if p.retx_per_sec >= 1.0 {
+                    Color::Red
+                } else {
+                    Color::Gray
+                }),
+            )),
+        ];
+        cells.truncate(ncols);
+        Row::new(cells).style(row_style(idx == s.proc_sel, false))
+    });
+    let widths: Vec<Constraint> = flexed.iter().map(|w| Constraint::Length(*w)).collect();
+    f.render_widget(Table::new(rows, widths).header(header), table_area);
+
+    let Some(da) = detail_area else { return };
+    let Some(p) = s.processes.get(s.proc_sel) else {
+        return;
+    };
+    let text_w = da.width as usize;
+    let mut lines = vec![
+        selected_rule(text_w),
+        Line::from(vec![
+            Span::styled(p.name.clone(), Style::new().fg(Color::White).bold()),
+            Span::styled(format!("  pid {}", p.pid), Style::new().fg(Color::Gray)),
+        ]),
+    ];
+    match s.proc_details.get(&p.pid) {
+        Some(d) => {
+            // Who runs it, what launched it, since when — often the whole
+            // answer for an opaquely-named helper.
+            let mut meta: Vec<Span> = Vec::new();
+            for (label, value) in [
+                ("user ", &d.user),
+                ("parent ", &d.parent),
+                ("started ", &d.started),
+            ] {
+                if value.is_empty() {
+                    continue;
+                }
+                if !meta.is_empty() {
+                    meta.push(Span::styled(" · ", Style::new().fg(Color::DarkGray)));
+                }
+                meta.push(Span::styled(label, Style::new().fg(Color::DarkGray)));
+                meta.push(Span::styled(value.clone(), Style::new().fg(Color::Gray)));
+            }
+            if !meta.is_empty() {
+                lines.push(Line::from(meta));
+            }
+            // Then the path — it answers "what is this?"; the command line
+            // only when it says more than the path already did.
+            let path = if d.exe.is_empty() {
+                "path withheld by the OS".to_string()
+            } else {
+                d.exe.clone()
+            };
+            lines.extend(column_lines(
+                vec![Span::styled("path ", Style::new().fg(Color::DarkGray))],
+                &path,
+                Style::new().fg(Color::Gray),
+                5,
+                text_w,
+            ));
+            if !d.cmd.is_empty() && d.cmd != d.exe {
+                lines.extend(column_lines(
+                    vec![Span::styled("cmd  ", Style::new().fg(Color::DarkGray))],
+                    &d.cmd,
+                    Style::new().fg(Color::DarkGray),
+                    5,
+                    text_w,
+                ));
+            }
+        }
+        // The scan runs off the key path; gone means exited since.
+        None => lines.push(Line::from(Span::styled(
+            "looking up… (or the process has exited)",
+            Style::new().fg(Color::DarkGray),
+        ))),
+    }
+    lines.truncate(detail_h as usize);
+    f.render_widget(Paragraph::new(lines), da);
+}
+
+fn zoom_remotes(f: &mut Frame, s: &AppState, area: Rect) {
+    // The address column is already sized for the longest realistic v6+port;
+    // the leftover width goes to the *process* column — that is the one the
+    // compact view truncates ("com.apple.WebKit.Netwo…").
+    const WIDTHS: [u16; 8] = [40, 22, 11, 11, 8, 8, 8, 6];
+    let ncols = fitting_columns(&WIDTHS, area.width);
+    let (flexed, _) = flex_col(&WIDTHS, ncols, area.width, 1, 30);
+    let labels = [
+        "remote", "process", "now↓", "now↑", "total", "↓", "↑", "share",
+    ];
+    let header = Row::new(labels[..ncols].iter().map(|l| Cell::from(*l)))
+        .style(Style::new().fg(Color::DarkGray));
+    let order = s.remote_order();
+    let (area, first, visible) = talkers_scroll(f, area, &order, s.remote_sel);
+    let rows = order.iter().skip(first).take(visible).map(|&idx| {
+        let r = &s.remotes[idx];
+        let mut remote = fmt_remote(r);
+        if r.ports > 1 {
+            remote.push_str(&format!(" (+{} ports)", r.ports - 1));
+        }
+        let mut cells = vec![
+            Cell::from(remote),
+            Cell::from(Span::styled(
+                r.process.clone(),
+                Style::new().fg(Color::Gray),
+            )),
+            fmt_now(r.down_bps, s.bits_units),
+            fmt_now(r.up_bps, s.bits_units),
+            Cell::from(Span::styled(
+                fmt_bytes(r.total_bytes),
+                Style::new().fg(Color::White),
+            )),
+            Cell::from(Span::styled(
+                fmt_bytes(r.down_bytes),
+                Style::new().fg(Color::Green),
+            )),
+            Cell::from(Span::styled(
+                fmt_bytes(r.up_bytes),
+                Style::new().fg(Color::Magenta),
+            )),
+            Cell::from(Span::styled(
+                format!("{:.0}%", r.share * 100.0),
+                Style::new().fg(Color::Gray),
+            )),
+        ];
+        cells.truncate(ncols);
+        Row::new(cells).style(row_style(idx == s.remote_sel, false))
+    });
+    let widths: Vec<Constraint> = flexed.iter().map(|w| Constraint::Length(*w)).collect();
+    f.render_widget(Table::new(rows, widths).header(header), area);
+}
+
+fn zoom_speedtests(f: &mut Frame, s: &AppState, area: Rect) {
+    if s.speed_history.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "no speed tests yet — [s] to run",
+                Style::new().fg(Color::DarkGray),
+            )),
+            area,
+        );
+        return;
+    }
+    const WIDTHS: [u16; 9] = [12, 11, 8, 8, 8, 30, 20, 18, 12];
+    let ncols = fitting_columns(&WIDTHS, area.width);
+    let labels = [
+        "time",
+        "provider",
+        "↓Mb/s",
+        "↑Mb/s",
+        "bloat",
+        "server",
+        "network",
+        "medium",
+        "idle/load",
+    ];
+    let header = Row::new(labels[..ncols].iter().map(|l| Cell::from(*l)))
+        .style(Style::new().fg(Color::DarkGray));
+    let ordered: Vec<&crate::store::SpeedRecord> = s.speed_history.iter().rev().collect();
+    let sel = s.speed_sel.min(ordered.len().saturating_sub(1));
+    let visible = area.height.saturating_sub(1) as usize;
+    let first = if visible == 0 {
+        0
+    } else {
+        sel.saturating_sub(visible - 1)
+    };
+    let body = Rect {
+        y: area.y + 1,
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    let body = scroll_cue(f, body, ordered.len(), first, visible);
+    let area = Rect {
+        width: body.width,
+        ..area
+    };
+    let dash = |v: &Option<String>| v.clone().unwrap_or_else(|| "—".to_string());
+    let rows = ordered
+        .iter()
+        .skip(first)
+        .take(visible)
+        .enumerate()
+        .map(|(i, r)| {
+            let bloat = match (r.idle_ms, r.loaded_ms) {
+                (Some(i), Some(l)) => format!("+{:.0}ms", (l - i).max(0.0)),
+                _ => "—".to_string(),
+            };
+            let idle_load = match (r.idle_ms, r.loaded_ms) {
+                (Some(i), Some(l)) => format!("{i:.0}/{l:.0}ms"),
+                (Some(i), None) => format!("{i:.0}ms/—"),
+                _ => "—".to_string(),
+            };
+            let mut cells = vec![
+                Cell::from(r.when()),
+                Cell::from(r.provider.clone()),
+                Cell::from(Span::styled(
+                    format!("{:.1}", r.down_mbps),
+                    Style::new().fg(Color::Green),
+                )),
+                Cell::from(Span::styled(
+                    format!("{:.1}", r.up_mbps),
+                    Style::new().fg(Color::Magenta),
+                )),
+                Cell::from(bloat),
+                Cell::from(Span::styled(dash(&r.server), Style::new().fg(Color::Gray))),
+                Cell::from(Span::styled(dash(&r.network), Style::new().fg(Color::Cyan))),
+                Cell::from(Span::styled(dash(&r.medium), Style::new().fg(Color::Gray))),
+                Cell::from(Span::styled(idle_load, Style::new().fg(Color::Gray))),
+            ];
+            cells.truncate(ncols);
+            Row::new(cells).style(row_style(first + i == sel, false))
+        });
+    let widths: Vec<Constraint> = WIDTHS[..ncols]
+        .iter()
+        .map(|w| Constraint::Length(*w))
+        .collect();
+    f.render_widget(Table::new(rows, widths).header(header), area);
 }
 
 /// Who owns the selected address: the registry's answer, so a bad hop can be
@@ -628,8 +969,12 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         }
         // A cleared finding ("✓ … ended after …") is good news and reads as
         // such; a raise is a warning even when its class is only a note, so
-        // ▲ never renders grey; plain events stay grey.
-        let color = if e.message.starts_with('✓') {
+        // ▲ never renders grey; plain events stay grey. User markers are
+        // magenta — they exist to be found again while scanning this list.
+        let marker = e.category == crate::app::EventCategory::Marker;
+        let color = if marker {
+            Color::Magenta
+        } else if e.message.starts_with('✓') {
             Color::Green
         } else if e.message.starts_with('▲') && e.severity == Severity::Info {
             Color::Yellow
@@ -641,7 +986,7 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                 Span::styled(format!(" {}  ", e.when()), Style::new().fg(Color::DarkGray)),
                 Span::styled(
                     format!("{:<9} ", e.category.label()),
-                    Style::new().fg(Color::Cyan),
+                    Style::new().fg(if marker { Color::Magenta } else { Color::Cyan }),
                 ),
             ],
             &e.message,
@@ -671,7 +1016,7 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         .padding(Padding::new(1, 1, 0, 0))
         .title(Span::styled(title, Style::new().bold()))
         .title_bottom(Span::styled(
-            " ↑↓ scroll · x export · C clear · press e or Esc to close ",
+            " ↑↓ scroll · M mark · x export · C clear · press e or Esc to close ",
             Style::new().fg(Color::DarkGray),
         ))
         .border_style(Style::new().fg(Color::Cyan));
@@ -908,6 +1253,8 @@ fn context_line(s: &AppState) -> Line<'static> {
                     (BwView::Remotes, SubPane::Primary) if s.fullscreen => "ext: history ",
                     _ => "ext: processes ",
                 }),
+                key("[z]"),
+                txt("oom "),
             ];
             if s.bw_view == BwView::Remotes && s.sub_pane == SubPane::Primary {
                 v.extend([key("[W]"), txt("hois "), key("[a]"), txt("dd ")]);
@@ -965,6 +1312,12 @@ fn footer(f: &mut Frame, s: &AppState, area: Rect) {
             &s.input_buffer,
             "[Enter] save  [Esc] cancel",
         )
+    } else if s.input_mode == InputMode::Marker {
+        input_line(
+            "mark event (what just happened?): ",
+            &s.input_buffer,
+            "[Enter] add  [Esc] cancel",
+        )
     } else if let Some(n) = &s.notice {
         Line::from(Span::styled(
             format!(" {n}"),
@@ -1018,6 +1371,27 @@ fn verdict_line(s: &AppState) -> Line<'static> {
         ]),
         Verdict::Problems(findings) => {
             let top = &findings[0];
+            // "Degraded but usable" is note-class (so the baseline can learn)
+            // but is the connection's real state, not a footnote — it gets a
+            // yellow headline of its own instead of "connection healthy".
+            if top.cause == crate::verdict::Cause::UsableDegraded {
+                let mut spans = vec![Span::styled(
+                    " ● degraded but usable",
+                    Style::new().fg(Color::Yellow),
+                )];
+                spans.push(Span::styled(
+                    " · heavy loss, web traffic getting through".to_string(),
+                    Style::new().fg(Color::Gray),
+                ));
+                if let Some(d) = active_for(top) {
+                    spans.push(Span::styled(
+                        format!(" · {d}"),
+                        Style::new().fg(Color::Gray),
+                    ));
+                }
+                spans.push(hint);
+                return Line::from(spans);
+            }
             // Info-class findings are notes, not problems: the line stays green
             // rather than crying wolf over a busy CPU or a weak-but-working radio.
             if top.severity == Severity::Info {
@@ -1243,9 +1617,15 @@ fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     let text_w = w.saturating_sub(4).max(1) as usize;
     let lines = build(text_w);
     let h = (lines.len() as u16 + 2).min(area.height);
+    // Sit below centre rather than on it: the graphs the analysis is read
+    // against live in the top half of the screen, and a centred box covers
+    // exactly the part of them a person is looking at. Clamped so the box
+    // never runs off the bottom.
+    let centred_y = (area.height.saturating_sub(h)) / 2;
+    let y = (centred_y + area.height / 5).min(area.height.saturating_sub(h));
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
-        y: area.y + (area.height.saturating_sub(h)) / 2,
+        y: area.y + y,
         width: w,
         height: h,
     };
@@ -1383,7 +1763,12 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         let color = if t.is_path_hop() && loss >= th::LOSS_DOWN_PCT {
             Color::DarkGray
         } else {
-            latency_color(t.last_rtt_ms, loss, crate::verdict::rtt_reference(t, s))
+            latency_color(
+                t.last_rtt_ms,
+                loss,
+                crate::verdict::rtt_reference(t, s),
+                crate::verdict::loss_reference(t, s),
+            )
         };
         let marker = if i == s.graph_target { "►" } else { "" };
         let mut style = Style::new().fg(color);
@@ -1725,7 +2110,7 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
             let loss = stat.loss_pct();
             let st = stat.stats(n);
             let mut style =
-                Style::new().fg(latency_color(stat.last_rtt_ms, loss, stat.min_ever_ms));
+                Style::new().fg(latency_color(stat.last_rtt_ms, loss, stat.floor_ms(), None));
             if selected {
                 style = style
                     .bg(Color::Rgb(40, 40, 55))
@@ -1810,7 +2195,7 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                     .zip(data.iter())
                     .map(|(&h, &raw)| {
                         SparklineBar::from(h)
-                            .style(Style::new().fg(rtt_color(raw as f64, stat.min_ever_ms)))
+                            .style(Style::new().fg(rtt_color(raw as f64, stat.floor_ms())))
                     })
                     .collect();
                 f.render_widget(
@@ -2163,7 +2548,11 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
         .bar_set(s.bar_set.clone())
         .style(Style::new().fg(Color::Green))
         .block(Block::new().title(Span::styled(
-            format!(" ↓ down  {}", fmt_rate(tp.down_bps)),
+            format!(
+                " ↓ down  {}{}",
+                fmt_rate(tp.down_bps, s.bits_units),
+                fmt_mbits(tp.down_bps, s.bits_units)
+            ),
             Style::new().fg(Color::Green).bold(),
         )));
     f.render_widget(down, graphs[0]);
@@ -2175,7 +2564,11 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
         .bar_set(s.bar_set.clone())
         .style(Style::new().fg(Color::Magenta))
         .block(Block::new().title(Span::styled(
-            format!(" ↑ up    {}", fmt_rate(tp.up_bps)),
+            format!(
+                " ↑ up    {}{}",
+                fmt_rate(tp.up_bps, s.bits_units),
+                fmt_mbits(tp.up_bps, s.bits_units)
+            ),
             Style::new().fg(Color::Magenta).bold(),
         )));
     f.render_widget(up, graphs[1]);
@@ -2185,6 +2578,12 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
     // remote addresses sit side by side and 'b' picks which one the sort and
     // row cursor belong to; otherwise 'b' switches which of the two is shown.
     if s.fullscreen {
+        // Zoomed ([z]): the bottom band becomes one full-width table — the
+        // graphs above stay where the eye already was.
+        if s.overlay == Overlay::Zoom {
+            zoom_band(f, s, rows[2]);
+            return;
+        }
         let on_history = s.focus == Panel::Bandwidth && s.sub_pane == SubPane::Secondary;
         let on_talkers = s.focus == Panel::Bandwidth && !on_history;
         let both = both_talker_tables_fit(rows[2].width);
@@ -2273,14 +2672,87 @@ fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         return;
     }
 
-    let header = Row::new(["time", "provider", "↓Mbps", "↑Mbps", "bloat"])
+    let header = Row::new(["time", "provider", "↓Mb/s", "↑Mb/s", "bloat"])
         .style(Style::new().fg(Color::DarkGray));
-    let n = (area.height.saturating_sub(1)) as usize;
     // Newest first; the cursor indexes this reversed order.
     let ordered: Vec<&crate::store::SpeedRecord> = s.speed_history.iter().rev().collect();
     let sel = s.speed_sel.min(ordered.len().saturating_sub(1));
+
+    // Detail block for the selected test at the bottom of the pane — the
+    // table's five columns can't carry the whole record (idle/loaded split,
+    // which server ran the test, which network it ran on), and "was that
+    // 104 Mbps at home or on the hotel Wi-Fi?" is the question a history
+    // exists to answer. Skipped on a pane too short to give the table room.
+    let detail: Vec<Line> = {
+        let r = ordered[sel];
+        let bloat = match (r.idle_ms, r.loaded_ms) {
+            (Some(i), Some(l)) => format!(" · bloat +{:.0}ms", (l - i).max(0.0)),
+            _ => String::new(),
+        };
+        let latency = match (r.idle_ms, r.loaded_ms) {
+            (Some(i), Some(l)) => format!("idle {i:.0}ms · loaded {l:.0}ms{bloat}"),
+            (Some(i), None) => format!("idle {i:.0}ms"),
+            _ => "latency not recorded".to_string(),
+        };
+        let network = match (&r.network, &r.medium) {
+            (Some(n), Some(m)) => format!("{n} · {m}"),
+            (Some(n), None) => n.clone(),
+            // Records from before the field existed.
+            (None, _) => "not recorded (older test)".to_string(),
+        };
+        let mut lines = vec![
+            selected_rule(area.width as usize),
+            Line::from(Span::styled(
+                format!("{} · {}", r.when(), r.provider),
+                Style::new().fg(Color::Gray),
+            )),
+            Line::from(vec![
+                Span::styled(
+                    format!("↓ {:.1}", r.down_mbps),
+                    Style::new().fg(Color::Green),
+                ),
+                Span::styled(
+                    format!("  ↑ {:.1} Mb/s", r.up_mbps),
+                    Style::new().fg(Color::Magenta),
+                ),
+            ]),
+            Line::from(Span::styled(latency, Style::new().fg(Color::Gray))),
+        ];
+        // Only when recorded: a blank "server" row on older entries is noise.
+        if let Some(server) = &r.server {
+            lines.push(Line::from(vec![
+                Span::styled("server  ", Style::new().fg(Color::DarkGray)),
+                Span::styled(server.clone(), Style::new().fg(Color::Gray)),
+            ]));
+        }
+        lines.push(Line::from(vec![
+            Span::styled("network ", Style::new().fg(Color::DarkGray)),
+            Span::styled(network, Style::new().fg(Color::Cyan)),
+        ]));
+        lines
+    };
+    let detail_h: u16 = if area.height >= 10 {
+        detail.len() as u16
+    } else {
+        0
+    };
+    let (table_area, detail_area) = if detail_h > 0 {
+        let parts =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(detail_h)]).split(area);
+        (parts[0], Some(parts[1]))
+    } else {
+        (area, None)
+    };
+    if let Some(da) = detail_area {
+        f.render_widget(Paragraph::new(detail), da);
+    }
+
+    let n = (table_area.height.saturating_sub(1)) as usize;
     // Scroll only as far as needed to bring the cursor into view.
     let first = if n == 0 { 0 } else { sel.saturating_sub(n - 1) };
+    // A cue on the right edge whenever more tests exist than fit — drawn only
+    // then; the table narrows by one column to make room for it.
+    let table_area = scroll_cue(f, table_area, ordered.len(), first, n);
 
     let rows = ordered
         .iter()
@@ -2321,7 +2793,7 @@ fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         Constraint::Length(7),
         Constraint::Length(8),
     ];
-    f.render_widget(Table::new(rows, widths).header(header), area);
+    f.render_widget(Table::new(rows, widths).header(header), table_area);
 }
 
 /// Sparkline data that guarantees any non-zero sample renders at least one
@@ -2375,7 +2847,7 @@ fn render_speedtest(f: &mut Frame, s: &AppState, area: Rect) {
     let st = &s.speedtest;
     if s.speedtest_enabled && matches!(st.status, SpeedStatus::Running) {
         let label = format!(
-            "speedtest · {} {:.0}%  {:.1} Mbps",
+            "speedtest · {} {:.0}%  {:.1} Mb/s",
             st.phase,
             st.progress * 100.0,
             st.live_mbps
@@ -2466,9 +2938,14 @@ fn top_talkers_view(f: &mut Frame, s: &AppState, area: Rect, view: BwView) {
     // Session totals lead (that is what the table ranks by); the live rate and
     // health columns follow, and go first when the panel is narrow.
     // Sized so every column fits the full-screen pane of a 120-column terminal.
-    const WIDTHS: [u16; 7] = [21, 7, 7, 7, 10, 5, 5];
+    // "now" sits beside the name: "who is using the link right now" is the
+    // question this table is opened for; session totals read second. Any
+    // leftover pane width goes to the name — a truncated name in front of
+    // blank columns answers nothing.
+    const WIDTHS: [u16; 7] = [21, 10, 7, 7, 7, 5, 5];
     let ncols = fitting_columns(&WIDTHS, inner.width);
-    let labels = ["name", "total", "↓", "↑", "now", "share", "retx"];
+    let (widths, name_w) = flex_col(&WIDTHS, ncols, inner.width, 0, 24);
+    let labels = ["name", "now", "total", "↓", "↑", "share", "retx"];
     let header = talkers_header(s, &labels[..ncols], BwView::Processes);
 
     // Rows as drawn (the sort, when one is active), scrolled to keep the
@@ -2479,7 +2956,7 @@ fn top_talkers_view(f: &mut Frame, s: &AppState, area: Rect, view: BwView) {
 
     let rows = order.iter().skip(first).take(visible).map(|&idx| {
         let p = &s.processes[idx];
-        let name: String = p.name.chars().take(WIDTHS[0] as usize).collect();
+        let name: String = p.name.chars().take(name_w as usize).collect();
         // Retransmits: red while they are happening, the session count once
         // they have, nothing when there were none.
         let (retx, retx_style) = if p.retx_per_sec >= 1.0 {
@@ -2494,6 +2971,7 @@ fn top_talkers_view(f: &mut Frame, s: &AppState, area: Rect, view: BwView) {
         };
         let mut cells = vec![
             Cell::from(name),
+            fmt_now(p.down_bps + p.up_bps, s.bits_units),
             Cell::from(Span::styled(
                 fmt_bytes(p.total_bytes),
                 Style::new().fg(Color::White),
@@ -2506,7 +2984,6 @@ fn top_talkers_view(f: &mut Frame, s: &AppState, area: Rect, view: BwView) {
                 fmt_bytes(p.up_bytes),
                 Style::new().fg(Color::Magenta),
             )),
-            fmt_now(p.down_bps + p.up_bps),
             Cell::from(Span::styled(
                 format!("{:.0}%", p.share * 100.0),
                 Style::new().fg(Color::Gray),
@@ -2519,10 +2996,7 @@ fn top_talkers_view(f: &mut Frame, s: &AppState, area: Rect, view: BwView) {
             s.pinned_procs.contains(&p.name),
         ))
     });
-    let widths: Vec<Constraint> = WIDTHS[..ncols]
-        .iter()
-        .map(|w| Constraint::Length(*w))
-        .collect();
+    let widths: Vec<Constraint> = widths.iter().map(|w| Constraint::Length(*w)).collect();
     f.render_widget(Table::new(rows, widths).header(header), inner);
 }
 
@@ -2596,9 +3070,12 @@ fn fitting_columns(widths: &[u16], width: u16) -> usize {
 
 /// The "now" column: the current combined rate, or a dim dot when idle so a
 /// quiet row reads as quiet rather than as "0 B/s".
-fn fmt_now(bps: f64) -> Cell<'static> {
+fn fmt_now(bps: f64, bits: bool) -> Cell<'static> {
     if bps > 0.0 {
-        Cell::from(Span::styled(fmt_rate(bps), Style::new().fg(Color::Cyan)))
+        Cell::from(Span::styled(
+            fmt_rate(bps, bits),
+            Style::new().fg(Color::Cyan),
+        ))
     } else {
         Cell::from(Span::styled("·", Style::new().fg(Color::DarkGray)))
     }
@@ -2656,9 +3133,12 @@ fn top_remotes(f: &mut Frame, s: &AppState, area: Rect) {
     }
     // A squeezed address column is the one thing this table must not have, so
     // trailing columns are dropped instead when the panel is narrow.
-    const WIDTHS: [u16; 7] = [24, 12, 7, 7, 7, 10, 5];
+    const WIDTHS: [u16; 7] = [24, 12, 10, 7, 7, 7, 5];
     let ncols = fitting_columns(&WIDTHS, area.width);
-    let labels = ["remote", "process", "total", "↓", "↑", "now", "share"];
+    // Leftover width goes to the address — a squeezed v6 in front of blank
+    // space answers nothing.
+    let (flexed, addr_w) = flex_col(&WIDTHS, ncols, area.width, 0, 24);
+    let labels = ["remote", "process", "now", "total", "↓", "↑", "share"];
     let header = talkers_header(s, &labels[..ncols], BwView::Remotes);
 
     let order = s.remote_order();
@@ -2673,8 +3153,9 @@ fn top_remotes(f: &mut Frame, s: &AppState, area: Rect) {
         let remote: String = {
             let full = fmt_remote(r);
             let n = full.chars().count();
-            if n > 24 {
-                format!("…{}", full.chars().skip(n - 23).collect::<String>())
+            let w = addr_w as usize;
+            if n > w {
+                format!("…{}", full.chars().skip(n + 1 - w).collect::<String>())
             } else {
                 full
             }
@@ -2683,6 +3164,7 @@ fn top_remotes(f: &mut Frame, s: &AppState, area: Rect) {
         let mut cells = vec![
             Cell::from(remote),
             Cell::from(Span::styled(process, Style::new().fg(Color::Gray))),
+            fmt_now(r.down_bps + r.up_bps, s.bits_units),
             Cell::from(Span::styled(
                 fmt_bytes(r.total_bytes),
                 Style::new().fg(Color::White),
@@ -2695,7 +3177,6 @@ fn top_remotes(f: &mut Frame, s: &AppState, area: Rect) {
                 fmt_bytes(r.up_bytes),
                 Style::new().fg(Color::Magenta),
             )),
-            fmt_now(r.down_bps + r.up_bps),
             Cell::from(Span::styled(
                 format!("{:.0}%", r.share * 100.0),
                 Style::new().fg(Color::Gray),
@@ -2704,10 +3185,7 @@ fn top_remotes(f: &mut Frame, s: &AppState, area: Rect) {
         cells.truncate(ncols);
         Row::new(cells).style(row_style(selected, s.pinned_remotes.contains(&r.addr)))
     });
-    let widths: Vec<Constraint> = WIDTHS[..ncols]
-        .iter()
-        .map(|w| Constraint::Length(*w))
-        .collect();
+    let widths: Vec<Constraint> = flexed.iter().map(|w| Constraint::Length(*w)).collect();
     f.render_widget(Table::new(rows, widths).header(header), area);
 }
 
@@ -2742,7 +3220,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("w", "stats window 1m/5m/15m"),
         row("l / D", "CSV recording / zip bundle"),
         row("y", "connection analysis"),
-        row("e / c", "event timeline / port scan"),
+        row("e / c / M", "events / ports / marker"),
         row("?", "toggle this help"),
         row("q / Ctrl+C", "quit"),
         Line::from(""),
@@ -2769,6 +3247,8 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("n", "procs → remotes → history"),
         row("W / a", "whois / add sel. remote"),
         row("p / u", "pin / unpin row at the top"),
+        row("d", "delete sel. speed test"),
+        row("z", "zoom table: all the data"),
         Line::from(""),
         head("Network"),
         row("r", "re-probe"),
@@ -2990,8 +3470,17 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
     let n = &s.netinfo;
     // The location name rides in the title, like the Bandwidth panel's iface:
     // "Network · Home". Until a baseline exists there is nothing to say.
+    // While one is still learning, the title says so with its progress —
+    // otherwise "why is nothing relative here yet" is invisible until the
+    // locations overlay is opened.
     let title = match &s.baseline {
-        Some(b) => format!("Network · {}", b.display_name()),
+        Some(b) if b.established() => format!("Network · {}", b.display_name()),
+        Some(b) => format!(
+            "Network · {} · learning {}/{}m",
+            b.display_name(),
+            b.samples,
+            crate::baseline::MIN_SAMPLES
+        ),
         None => "Network".to_string(),
     };
     let b = block(&title, focused);
@@ -3183,23 +3672,29 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         lines.push(Line::from(row));
     }
 
-    // Path MTU, only when it is narrower than the interface or broken.
+    // Path MTU, only when it is narrower than the interface or broken. A
+    // black-hole reading taken while the path drops most packets is loss
+    // wearing a costume — same gate as the analysis, so the two never argue.
     if let Some(p) = &s.pmtu
         && (p.blackhole
             || p.path_mtu
                 .zip(p.iface_mtu)
                 .is_some_and(|(path, iface)| path < iface))
     {
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<9}", "mtu"), Style::new().fg(Color::DarkGray)),
-            Span::styled(
+        let (text, color) = match crate::verdict::pmtu_gated(s) {
+            Some(reason) => (format!("not judged — {reason}"), Color::DarkGray),
+            None => (
                 crate::collectors::pmtu::describe(p),
-                Style::new().fg(if p.blackhole {
+                if p.blackhole {
                     Color::Red
                 } else {
                     Color::Yellow
-                }),
+                },
             ),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<9}", "mtu"), Style::new().fg(Color::DarkGray)),
+            Span::styled(text, Style::new().fg(color)),
         ]));
     }
 
@@ -3421,12 +3916,18 @@ fn dns_graphs(f: &mut Frame, s: &AppState, area: Rect) {
             continue;
         }
         let max = data.iter().copied().max().unwrap_or(1).max(1);
+        // Colour each bar by how slow that individual answer was, like the
+        // quality sparklines — a graph tinted wholesale by the *latest*
+        // reading repaints history it isn't entitled to.
+        let bars: Vec<SparklineBar> = data
+            .iter()
+            .map(|&v| SparklineBar::from(v).style(Style::new().fg(dns_color(v as f64))))
+            .collect();
         f.render_widget(
             Sparkline::default()
-                .data(data)
+                .data(bars)
                 .max(max)
-                .bar_set(s.bar_set.clone())
-                .style(Style::new().fg(color)),
+                .bar_set(s.bar_set.clone()),
             Rect {
                 x: spark_x,
                 y: top,
@@ -3704,7 +4205,7 @@ fn signal_graph(f: &mut Frame, s: &AppState, area: Rect) {
         return;
     }
     // Not every platform reports a bitrate — Linux's /proc/net/wireless has no
-    // such field. Drawing a flat zero line and a "tx 0 Mbps" title would read as
+    // such field. Drawing a flat zero line and a "tx 0 Mb/s" title would read as
     // a dead link rather than a missing measurement, so the series is dropped.
     let tx_max = tx.iter().copied().fold(0.0_f64, f64::max);
     let has_tx = tx_max > 0.0;
@@ -3720,7 +4221,7 @@ fn signal_graph(f: &mut Frame, s: &AppState, area: Rect) {
     if has_tx {
         title.push(Span::styled(" · tx ", Style::new().fg(Color::DarkGray)));
         title.push(Span::styled(
-            format!("{:.0} Mbps ", sig.tx_rate_mbps),
+            format!("{:.0} Mb/s ", sig.tx_rate_mbps),
             Style::new().fg(Color::Cyan).bold(),
         ));
     } else {
@@ -4048,18 +4549,43 @@ fn fmt_ms(v: Option<f64>) -> String {
 
 fn fmt_mbps(v: Option<f64>) -> String {
     match v {
-        Some(m) => format!("{m:.1} Mbps"),
+        Some(m) => format!("{m:.1} Mb/s"),
         None => "—".to_string(),
     }
 }
 
-fn fmt_rate(bps: f64) -> String {
-    if bps >= 1_000_000.0 {
-        format!("{:.1} MB/s", bps / 1_000_000.0)
-    } else if bps >= 1_000.0 {
-        format!("{:.1} KB/s", bps / 1_000.0)
+/// One live rate, in the configured unit family: bytes (KB/s, MB/s — what a
+/// file transfer reads as) or bits (Kb/s, Mb/s — what speed tests and ISP
+/// plans are sold in). `byte_rate` is always bytes/sec on the way in.
+fn fmt_rate(byte_rate: f64, bits: bool) -> String {
+    if bits {
+        let bps = byte_rate * 8.0;
+        if bps >= 1_000_000.0 {
+            format!("{:.1} Mb/s", bps / 1_000_000.0)
+        } else if bps >= 1_000.0 {
+            format!("{:.1} Kb/s", bps / 1_000.0)
+        } else {
+            format!("{bps:.0} b/s")
+        }
+    } else if byte_rate >= 1_000_000.0 {
+        format!("{:.1} MB/s", byte_rate / 1_000_000.0)
+    } else if byte_rate >= 1_000.0 {
+        format!("{:.1} KB/s", byte_rate / 1_000.0)
     } else {
-        format!("{bps:.0} B/s")
+        format!("{byte_rate:.0} B/s")
+    }
+}
+
+/// The bits-per-second twin of a byte rate, so the live traffic reads against
+/// the speed test's Mb/s ("am I using all of my 5.8?") without mental ×8.
+/// Empty below 1 Mb/s, where the comparison isn't being made — and in bits
+/// mode, where the main figure already says it.
+fn fmt_mbits(byte_rate: f64, bits: bool) -> String {
+    let mbps = byte_rate * 8.0 / 1e6;
+    if !bits && mbps >= 1.0 {
+        format!(" ({mbps:.1} Mb/s)")
+    } else {
+        String::new()
     }
 }
 
@@ -4096,15 +4622,26 @@ const JITTER_COLOR: Color = Color::LightBlue;
 
 /// A target row's colour: loss first (absolute — packets have no "normal"),
 /// then the latest round trip against the path's own reference floor.
-fn latency_color(last: Option<f64>, loss: f64, reference_ms: Option<f64>) -> Color {
-    if loss >= th::LOSS_BAD_PCT || last.is_none() {
-        return Color::Red;
-    }
-    if loss >= th::LOSS_WARN_PCT {
-        return Color::Yellow;
+/// `normal_loss` is the location's learned loss for this kind of path: on a
+/// network whose weather is lossy (plane, hotel), only loss worse than usual
+/// *here* reads as trouble — same contract as [`crate::verdict::loss_grade`].
+fn latency_color(
+    last: Option<f64>,
+    loss: f64,
+    reference_ms: Option<f64>,
+    normal_loss: Option<f64>,
+) -> Color {
+    match crate::verdict::loss_grade(loss, normal_loss) {
+        crate::verdict::RttGrade::Bad => return Color::Red,
+        crate::verdict::RttGrade::Warn => return Color::Yellow,
+        crate::verdict::RttGrade::Good => {}
     }
     match last {
         Some(ms) => rtt_color(ms, reference_ms),
+        // The very last probe went unanswered on a path whose loss is within
+        // its (lossy) normal: a gap, not an alarm — red here would repaint
+        // half the rows every tick on such a network.
+        None if normal_loss.is_some_and(|n| n >= th::LOSS_BAD_PCT) => Color::Gray,
         None => Color::Red,
     }
 }
@@ -4193,6 +4730,93 @@ mod tests {
         let out = draw(&s, 120, 24);
         assert!(out.contains("connection healthy"));
         assert!(out.contains("1 note"));
+
+        // Degraded-but-usable is note-class but is the connection's real
+        // state: its own headline, never "connection healthy".
+        let mut usable = finding(Severity::Info);
+        usable.cause = crate::verdict::Cause::UsableDegraded;
+        usable.summary =
+            "connection degraded but usable — heavy packet loss, web traffic still getting through"
+                .into();
+        s.verdict.current = Verdict::Problems(vec![usable]);
+        let out = draw(&s, 120, 24);
+        assert!(out.contains("degraded but usable"), "got: {out}");
+        assert!(!out.contains("connection healthy"));
+    }
+
+    #[test]
+    fn zoom_reveals_what_the_tables_truncate() {
+        use crate::app::{ProcBandwidth, ProcDetail, ZoomView};
+        let mut s = AppState::new(vec![]);
+        s.focus = Panel::Bandwidth;
+        s.processes = vec![ProcBandwidth {
+            name: "com.apple.WebKit.Networking".into(),
+            pid: 4242,
+            down_bps: 900_000.0,
+            down_bytes: 1_300_000_000,
+            total_bytes: 1_300_000_000,
+            ..Default::default()
+        }];
+        s.proc_details.insert(
+            4242,
+            ProcDetail {
+                exe: "/System/Library/Frameworks/WebKit.framework/XPCServices/helper".into(),
+                cmd: String::new(),
+                user: "simon".into(),
+                parent: "Safari (410)".into(),
+                started: "08-24 07:12".into(),
+            },
+        );
+        s.fullscreen = true;
+        s.overlay = Overlay::Zoom;
+        s.zoom_view = ZoomView::Processes;
+        let out = draw(&s, 160, 40);
+        // The name the split view showed as "com.apple.WebKit.Netw…".
+        assert!(out.contains("com.apple.WebKit.Networking"), "{out}");
+        assert!(out.contains("4242"), "pid: {out}");
+        assert!(out.contains("WebKit.framework"), "path: {out}");
+        // Who runs it, what launched it, since when.
+        assert!(out.contains("Safari (410)"), "parent: {out}");
+        assert!(out.contains("simon"), "user: {out}");
+        assert!(out.contains("08-24 07:12"), "started: {out}");
+        assert!(out.contains("Processes · zoom"));
+        // The band replaces the tables, not the graphs: the throughput
+        // strip's titles stay on screen.
+        assert!(out.contains("↓ down"), "graphs stay: {out}");
+
+        // Speed tests zoomed: the server and network the compact table
+        // has no room for become columns.
+        s.zoom_view = ZoomView::Speedtests;
+        s.speed_history.push(crate::store::SpeedRecord {
+            at: 1_700_000_000,
+            provider: "Cloudflare".into(),
+            down_mbps: 5.8,
+            up_mbps: 5.2,
+            idle_ms: Some(32.0),
+            loaded_ms: Some(156.0),
+            network: Some("Sheraton Orlando".into()),
+            medium: Some("Wi-Fi (wireless)".into()),
+            server: Some("MIA (edge)".into()),
+        });
+        let out = draw(&s, 160, 40);
+        assert!(out.contains("MIA (edge)"), "{out}");
+        assert!(out.contains("Sheraton Orlando"), "{out}");
+        assert!(out.contains("server"), "{out}");
+        assert!(out.contains("Speed Test History · zoom"), "{out}");
+    }
+
+    #[test]
+    fn a_marker_lands_in_the_events_overlay_with_its_category() {
+        let mut s = AppState::new(vec![]);
+        s.push_event(
+            Severity::Info,
+            crate::app::EventCategory::Marker,
+            "⚑ moved to the meeting room".into(),
+        );
+        s.overlay = Overlay::Events;
+        let out = draw(&s, 120, 24);
+        assert!(out.contains("marker"), "category column: {out}");
+        assert!(out.contains("moved to the meeting room"));
     }
 
     #[test]
@@ -5199,6 +5823,13 @@ mod tests {
         assert!(out.contains("now"), "{out}");
         assert!(out.contains("910.0 KB/s"), "{out}");
         assert!(out.contains("80%"), "{out}");
+        // bits mode: the same rate reads in the unit speed tests are sold in,
+        // and never mixes families ("Mb/s", not "Mbps" or "MB/s").
+        s.bits_units = true;
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("7.3 Mb/s"), "{out}");
+        assert!(!out.contains("910.0 KB/s"), "{out}");
+        s.bits_units = false;
         s.fullscreen = false;
 
         s.bw_view = BwView::Remotes;
@@ -5208,16 +5839,20 @@ mod tests {
             out.contains("151.101.193.111:443+"),
             "busiest port, + for more"
         );
-        // A long v6 keeps its distinctive tail rather than being squeezed.
-        assert!(out.contains("…606:4700:4700::1111]:53"));
+        // The address column takes the pane's leftover width: the long v6
+        // fits whole here (a narrower pane would keep its distinctive tail).
+        assert!(out.contains("[2606:4700:4700::1111]:53"), "{out}");
         assert!(out.contains("mDNSRespond"));
         assert!(out.contains("remote"));
-        // The split view is too narrow for every column: the byte columns go,
-        // the address does not get squeezed.
-        assert!(!out.contains("977K"), "{out}");
+        // The split view is too narrow for every column: the trailing byte
+        // columns go, the address does not get squeezed.
+        assert!(!out.contains("4M"), "{out}");
         s.fullscreen = true;
         let out = draw(&s, 120, 30);
-        assert!(out.contains("977K"), "{out}");
+        assert!(
+            out.contains("4M"),
+            "full screen brings the ↓ column back: {out}"
+        );
         assert!(out.contains("Remote addresses · n for next"));
         assert_eq!(
             s.selected_addr(),
@@ -5462,6 +6097,9 @@ mod tests {
             up_mbps: 10.0,
             idle_ms: None,
             loaded_ms: None,
+            network: Some("United WiFi".into()),
+            medium: Some("Wi-Fi (wireless)".into()),
+            server: Some("MIA (edge)".into()),
         };
 
         let mut s = AppState::new(vec![]);
@@ -5469,12 +6107,24 @@ mod tests {
         s.fullscreen = true;
         s.speed_history = (0..3).map(record).collect();
         s.speed_total = 3;
-        assert!(draw(&s, 160, 40).contains("3 saved"));
+        let out = draw(&s, 160, 40);
+        assert!(out.contains("3 saved"));
+        // The detail block names the network the selected test ran on.
+        assert!(out.contains("United WiFi"), "got: {out}");
+        assert!(out.contains("Wi-Fi (wireless)"));
 
         // When the file holds more than is loaded, both numbers are shown so
         // the older results do not look lost.
         s.speed_total = 812;
         assert!(draw(&s, 160, 40).contains("3 of 812 saved"));
+
+        // A record from before the field existed says so instead of lying.
+        let mut old = record(99);
+        old.network = None;
+        old.medium = None;
+        s.speed_history.push(old);
+        s.speed_sel = 0; // newest-first: the legacy record is now selected
+        assert!(draw(&s, 160, 40).contains("not recorded (older test)"));
 
         // Nothing recorded yet: no misleading zero.
         s.speed_history.clear();
@@ -5544,7 +6194,8 @@ mod tests {
             "cycle speed-test provider",
             "procs → remotes → history",
             "full-screen: DNS + history",
-            "event timeline / port scan",
+            "events / ports / marker",
+            "delete sel. speed test",
         ] {
             assert!(
                 out.contains(desc),

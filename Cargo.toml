@@ -1,6 +1,6 @@
 [package]
 name = "octomon"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 description = "Btop-style terminal network monitor: latency, bandwidth, and Wi-Fi signal"
 repository = "https://github.com/securitypedant/octomon"
@@ -23,6 +23,10 @@ include = [
     "LICENSE-APACHE",
     "SECURITY.md",
 ]
+
+[build-dependencies]
+# Same crate the binary already uses — only for the dirty-build timestamp.
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 
 [dependencies]
 anyhow = "1.0.104"

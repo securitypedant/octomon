@@ -58,6 +58,9 @@ pub struct Report {
     pub up_mbps: f64,
     pub idle_ms: Option<f64>,
     pub loaded_ms: Option<f64>,
+    /// Which far end served it (edge colo / backend name / machine), when the
+    /// provider exposes one — the history stores it per test.
+    pub server: Option<String>,
 }
 
 /// Endpoint shape for an HTTP provider.
@@ -68,6 +71,10 @@ struct HttpSpec {
     down_size: u64,
     up_url: String,
     probe_url: String,
+    /// Server identity when it is known up front (LibreSpeed's listed name /
+    /// configured host). Cloudflare's is discovered from the probe response
+    /// instead — see `run_http`.
+    server: Option<String>,
 }
 
 fn cloudflare_spec(base: &str) -> HttpSpec {
@@ -79,6 +86,7 @@ fn cloudflare_spec(base: &str) -> HttpSpec {
         down_size: 99_000_000, // just under the 100 MB cap
         up_url: format!("{base}/__up"),
         probe_url: format!("{base}/__down?bytes=1"),
+        server: None,
     }
 }
 
@@ -91,6 +99,14 @@ fn librespeed_spec(base: &str) -> HttpSpec {
         down_size: 90,
         up_url: format!("{base}/empty.php"),
         probe_url: format!("{base}/empty.php"),
+        // A configured backend: its host is the identity.
+        server: Some(
+            base.splitn(2, "://")
+                .last()
+                .unwrap_or(base)
+                .trim_end_matches('/')
+                .to_string(),
+        ),
     }
 }
 
@@ -141,6 +157,17 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>, cfg: crate::
         s.speedtest.last_run = Some(Instant::now());
         match result {
             Ok(r) => {
+                // Which known network this was: the location's display name
+                // when one is loaded, else the fingerprint label — so the
+                // history can answer "was that 104 Mbps at home or on the
+                // hotel Wi-Fi?".
+                let network = s
+                    .baseline
+                    .as_ref()
+                    .map(|b| b.display_name().to_string())
+                    .or_else(|| crate::baseline::fingerprint(&s.netinfo).map(|(_, label)| label));
+                let medium = (s.netinfo.medium != crate::app::LinkMedium::Unknown)
+                    .then(|| s.netinfo.medium.label().to_string());
                 let record = crate::store::SpeedRecord {
                     at: chrono::Utc::now().timestamp(),
                     provider: r.provider.clone(),
@@ -148,6 +175,9 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>, cfg: crate::
                     up_mbps: r.up_mbps,
                     idle_ms: r.idle_ms,
                     loaded_ms: r.loaded_ms,
+                    network,
+                    medium,
+                    server: r.server.clone(),
                 };
                 crate::store::append(&record);
                 s.speed_history.push(record);
@@ -164,7 +194,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>, cfg: crate::
                     crate::verdict::Severity::Info,
                     crate::app::EventCategory::Speedtest,
                     format!(
-                        "speed test: {:.0}↓ / {:.0}↑ Mbps ({})",
+                        "speed test: {:.0}↓ / {:.0}↑ Mb/s ({})",
                         r.down_mbps, r.up_mbps, r.provider
                     ),
                 );
@@ -214,16 +244,24 @@ async fn librespeed_pick(
     let list: Vec<serde_json::Value> =
         serde_json::from_str(&text).map_err(|e| format!("server list json: {e}"))?;
 
-    // (server, dlURL, ulURL, pingURL) for the first several entries.
-    let cands: Vec<(String, String, String, String)> = list
+    // (name, server, dlURL, ulURL, pingURL) for the first several entries.
+    let cands: Vec<(String, String, String, String, String)> = list
         .iter()
         .filter_map(|e| {
             let server = e["server"].as_str()?;
+            // The listed name ("Miami, FL, USA (Clouvider)") names the far
+            // end better than its URL; the host is the fallback.
+            let name = e["name"]
+                .as_str()
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or(server)
+                .to_string();
             let server = server
                 .strip_prefix("//")
                 .map(|r| format!("https://{r}"))
                 .unwrap_or_else(|| server.to_string());
             Some((
+                name,
                 server,
                 e["dlURL"].as_str()?.to_string(),
                 e["ulURL"].as_str()?.to_string(),
@@ -237,7 +275,7 @@ async fn librespeed_pick(
     }
 
     // Ping each (bounded), pick the fastest responder.
-    let latencies = futures_util::future::join_all(cands.iter().map(|(server, _, _, ping)| {
+    let latencies = futures_util::future::join_all(cands.iter().map(|(_, server, _, _, ping)| {
         let url = join_url(server, ping);
         async move {
             tokio::time::timeout(Duration::from_secs(2), probe_latency(client, &url))
@@ -254,7 +292,7 @@ async fn librespeed_pick(
         .filter_map(|(i, l)| l.map(|ms| (i, ms)))
         .min_by(|a, b| a.1.total_cmp(&b.1));
     let (i, _) = best.ok_or("no LibreSpeed server responded")?;
-    let (server, dl, ul, ping) = &cands[i];
+    let (name, server, dl, ul, ping) = &cands[i];
     Ok(HttpSpec {
         name: "LibreSpeed",
         down_url: join_url(server, dl),
@@ -262,6 +300,7 @@ async fn librespeed_pick(
         down_size: 90,
         up_url: join_url(server, ul),
         probe_url: join_url(server, ping),
+        server: Some(name.clone()),
     })
 }
 
@@ -301,6 +340,13 @@ async fn run_http(
     set_phase(state, &format!("{} · latency", spec.name));
     let idle_ms = idle_latency(client, &spec.probe_url).await;
 
+    // Cloudflare doesn't name a server up front — anycast decides — but its
+    // probe response says which edge answered (`colo: MIA`).
+    let server = match spec.server.clone() {
+        Some(s) => Some(s),
+        None => probe_colo(client, &spec.probe_url).await,
+    };
+
     let (down_mbps, mut rtts) = measure(client, state, &spec, Dir::Down).await?;
     let (up_mbps, up_rtts) = measure(client, state, &spec, Dir::Up).await?;
     rtts.extend(up_rtts);
@@ -311,7 +357,22 @@ async fn run_http(
         up_mbps,
         idle_ms,
         loaded_ms: median(&mut rtts),
+        server,
     })
+}
+
+/// Which Cloudflare edge location is serving this client, from the `colo`
+/// header on the tiny probe endpoint. `None` for any non-Cloudflare host.
+async fn probe_colo(client: &reqwest::Client, url: &str) -> Option<String> {
+    let resp = client.get(url).send().await.ok()?;
+    let colo = resp
+        .headers()
+        .get("colo")?
+        .to_str()
+        .ok()?
+        .trim()
+        .to_string();
+    (!colo.is_empty()).then(|| format!("{colo} (edge)"))
 }
 
 /// Run `STREAMS` transfers for WARMUP+MEASURE, returning steady-state Mbps and

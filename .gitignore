@@ -7,3 +7,6 @@
 
 # Wrangler local state (octomon.dev site deploys)
 /.wrangler
+# Local deploy helper: the Cloudflare account id for octomon.dev, so wrangler
+# can pick the right account non-interactively. Deliberately not committed.
+/.env

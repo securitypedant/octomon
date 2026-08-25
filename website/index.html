@@ -64,7 +64,7 @@
     background: var(--octo-ink);
   }
   .nav {
-    display: flex; align-items: center; gap: 12px;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
     padding: 14px 0;
   }
   .mark { display: flex; align-items: center; gap: 12px; color: var(--octo-white); }
@@ -76,7 +76,7 @@
     font-size: 1.35rem;
     letter-spacing: 0.023em;
   }
-  nav.links { margin-left: auto; display: flex; gap: 22px; font-family: var(--octo-mono); font-size: 0.95rem; }
+  nav.links { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px 22px; font-family: var(--octo-mono); font-size: 0.95rem; }
 
   /* hero */
   .hero {
@@ -216,6 +216,36 @@
     background: var(--octo-deep);
   }
 
+  /* the closing word: one full-width card, because it's always DNS */
+  .dns-card {
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-left: 4px solid var(--octo-amber);
+    border-radius: var(--octo-radius-card);
+    padding: 36px 40px;
+  }
+  .dns-card .haiku {
+    margin: 0 0 14px;
+    font-family: var(--octo-mono);
+    font-weight: 700;
+    font-size: clamp(1.25rem, 2.6vw, 1.8rem);
+    line-height: 1.35;
+    color: var(--octo-white);
+  }
+  .dns-card .attrib {
+    margin: 0 0 18px;
+    color: var(--octo-muted);
+    font-size: 0.9rem;
+    font-style: italic;
+  }
+  .dns-card .dns-note {
+    margin: 0;
+    color: var(--octo-muted);
+    font-size: 0.95rem;
+    max-width: 44em;
+  }
+  .dns-card .dns-note em { color: var(--octo-amber); font-style: normal; }
+
   footer {
     border-top: 2px solid var(--octo-magenta); /* decorative rule */
     padding: 28px 0 40px;
@@ -244,6 +274,7 @@
     .panel { margin-top: 32px; padding-top: 32px; }
     .analysis { margin-top: 40px; padding-top: 28px; }
     .dashboard-shot { margin-top: 24px; }
+    .dns-card { padding: 22px 20px; }
     footer .wrap { flex-direction: column; align-items: flex-start; gap: 6px; }
   }
   @media (max-width: 480px) {
@@ -280,6 +311,7 @@
       <a href="#install">install</a>
       <a href="#features">features</a>
       <a href="#video">video</a>
+      <a href="/understand">understand</a>
       <a href="https://github.com/securitypedant/octomon">github</a>
     </nav>
   </div>
@@ -465,6 +497,19 @@ sudo apt update &amp;&amp; sudo apt install octomon">copy</button>
         allow="encrypted-media; picture-in-picture; fullscreen"
         allowfullscreen
         referrerpolicy="strict-origin-when-cross-origin"></iframe>
+    </div>
+  </section>
+
+  <section id="dns" aria-label="it is always DNS">
+    <div class="wrap">
+      <div class="dns-card">
+        <p class="haiku">It's not DNS.<br>There's no way it's DNS.<br>It was DNS.</p>
+        <p class="attrib">— a haiku, traditional among people who run the internet<br>
+        (author unknown, like most root causes)</p>
+        <p class="dns-note">octomon times every resolver you use, checks their
+        honesty against a public reference, and names local DNS outages —
+        so when it <em>is</em> DNS, you'll know in one line.</p>
+      </div>
     </div>
   </section>
 </main>

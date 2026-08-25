@@ -285,6 +285,22 @@ impl TargetStat {
             _ => None,
         }
     }
+
+    /// The path's usual best: the 10th percentile of the retained round trips,
+    /// falling back to the absolute minimum until there is enough history.
+    /// This is what latency is *graded* against — on a machine that is never
+    /// idle, one lucky 7 ms reply must not set the bar every later reading is
+    /// judged red by. (Bufferbloat magnitude keeps the absolute minimum: its
+    /// question really is "how far above true idle".)
+    pub fn floor_ms(&self) -> Option<f64> {
+        const MIN_HISTORY: usize = 30;
+        if self.history.data.len() < MIN_HISTORY {
+            return self.min_ever_ms;
+        }
+        let mut v: Vec<f64> = self.history.data.iter().copied().collect();
+        v.sort_by(f64::total_cmp);
+        Some(v[v.len() / 10])
+    }
 }
 
 const WINDOW: usize = 100;
@@ -1308,7 +1324,7 @@ mod tests {
         let mut s = AppState::new(vec![]);
         s.processes = vec![proc("small", 10), proc("mid", 50), proc("big", 99)];
         // Sort by total, descending: big, mid, small.
-        s.bw_sort = Some((1, true));
+        s.bw_sort = Some((2, true));
         assert_eq!(s.process_order(), vec![2, 1, 0]);
         // Pinning floats "small" over the sort; the rest keep their order.
         s.pinned_procs.push("small".into());
@@ -1658,6 +1674,35 @@ pub enum Panel {
     Vitals,
 }
 
+/// Which table the [z] zoom overlay is showing at 80% of the screen.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum ZoomView {
+    #[default]
+    Processes,
+    Remotes,
+    Speedtests,
+}
+
+/// What the OS knows about a process beyond its name, for the zoom view's
+/// "what is this thing using my bandwidth?" question. Inspection only —
+/// octomon never manages processes. Fields stay empty where the OS withholds
+/// them (another user's process, a hardened binary).
+#[derive(Clone, Default)]
+pub struct ProcDetail {
+    /// Executable path.
+    pub exe: String,
+    /// Full command line, joined with spaces.
+    pub cmd: String,
+    /// Account the process runs as.
+    pub user: String,
+    /// What launched it: "name (pid)" — often the real answer to "what is
+    /// this?", since helpers carry opaque names and obvious parents.
+    pub parent: String,
+    /// Local start time, "MM-DD HH:MM" — read against the session byte
+    /// totals it says whether 1.3G is an hour of streaming or a week of drips.
+    pub started: String,
+}
+
 /// Keyboard input mode: normal navigation vs. modal text entry.
 #[derive(Clone, PartialEq, Eq)]
 pub enum InputMode {
@@ -1668,6 +1713,8 @@ pub enum InputMode {
     NameNetwork,
     /// Typing a name for the location selected in the [L] overlay.
     RenameLocation,
+    /// Typing a marker for the event timeline ("moved to the meeting room").
+    Marker,
 }
 
 /// Which full-screen overlay is up, if any. One at a time; the order here is
@@ -1691,6 +1738,9 @@ pub enum Overlay {
     Whois,
     /// Outbound reachability by port — which protocols this network lets out.
     Egress,
+    /// One Bandwidth table at 80% of the screen ([z]): every column, full
+    /// names and addresses, and per-process detail. See [`ZoomView`].
+    Zoom,
 }
 
 /// Category of a timeline event, for the overlay and the CSV export.
@@ -1704,6 +1754,10 @@ pub enum EventCategory {
     Speedtest,
     Path,
     Logging,
+    /// A user-typed note pinned to this moment with [M] — "moved to the
+    /// meeting room", "call dropped here" — so the timeline can be read
+    /// against what the person was experiencing at the time.
+    Marker,
 }
 
 impl EventCategory {
@@ -1715,6 +1769,7 @@ impl EventCategory {
             EventCategory::Speedtest => "speedtest",
             EventCategory::Path => "path",
             EventCategory::Logging => "logging",
+            EventCategory::Marker => "marker",
         }
     }
 }
@@ -1853,6 +1908,14 @@ pub struct AppState {
     /// Glyphs the charts plot with. Carried here because a legacy Windows
     /// console has no braille glyphs and draws every point as an empty box.
     pub graph_marker: ratatui::symbols::Marker,
+    /// Display live rates in bits (Mb/s) rather than bytes (MB/s) — the
+    /// config's `bandwidth_units`, copied here for the render path.
+    pub bits_units: bool,
+    /// Which table the [z] zoom overlay shows while `overlay == Zoom`.
+    pub zoom_view: ZoomView,
+    /// pid → what the OS knows about it, filled when the zoom opens over the
+    /// process table (a blocking scan, run off the key path).
+    pub proc_details: std::collections::HashMap<u32, ProcDetail>,
     /// Glyphs the sparkline bars are built from, for the same reason: the
     /// eighth-block glyphs are missing there too (see `Config::bar_set`).
     pub bar_set: ratatui::symbols::bar::Set<'static>,
@@ -2050,14 +2113,20 @@ impl AppState {
             pinned_remotes: Vec::new(),
             proc_status: ProcStatus::Probing,
             bw_col: 1,
-            bw_sort: None,
-            bw_sort_other: None,
+            // Both talker tables open sorted by "now", biggest first: the
+            // question the panel answers is "who is using the link right
+            // now". A column sort chosen by the user replaces it.
+            bw_sort: Some((1, true)),
+            bw_sort_other: Some((2, true)),
             bw_col_other: 1,
             selected: 0,
             graph_target: 0,
             window_secs: 60,
             samples_per_sec: 1.0,
             graph_marker: ratatui::symbols::Marker::Braille,
+            bits_units: false,
+            zoom_view: ZoomView::default(),
+            proc_details: std::collections::HashMap::new(),
             bar_set: ratatui::symbols::bar::NINE_LEVELS,
             q_col: 0,
             q_sort: None,
@@ -2362,11 +2431,12 @@ impl AppState {
         if let Some((col, desc)) = self.sort_for(BwView::Processes) {
             order.sort_by(|&i, &j| {
                 let (a, b) = (&self.processes[i], &self.processes[j]);
+                // Columns as drawn: name · now · total · ↓ · ↑ · share · retx.
                 let o = match col {
                     0 => a.name.cmp(&b.name),
-                    2 => a.down_bytes.cmp(&b.down_bytes),
-                    3 => a.up_bytes.cmp(&b.up_bytes),
-                    4 => (a.down_bps + a.up_bps).total_cmp(&(b.down_bps + b.up_bps)),
+                    1 => (a.down_bps + a.up_bps).total_cmp(&(b.down_bps + b.up_bps)),
+                    3 => a.down_bytes.cmp(&b.down_bytes),
+                    4 => a.up_bytes.cmp(&b.up_bytes),
                     5 => a.share.total_cmp(&b.share),
                     6 => a.retx.cmp(&b.retx),
                     _ => a.total_bytes.cmp(&b.total_bytes),
@@ -2393,12 +2463,13 @@ impl AppState {
         if let Some((col, desc)) = self.sort_for(BwView::Remotes) {
             order.sort_by(|&i, &j| {
                 let (a, b) = (&self.remotes[i], &self.remotes[j]);
+                // Columns as drawn: remote · process · now · total · ↓ · ↑ · share.
                 let o = match col {
                     0 => a.addr.cmp(&b.addr),
                     1 => a.process.cmp(&b.process),
-                    3 => a.down_bytes.cmp(&b.down_bytes),
-                    4 => a.up_bytes.cmp(&b.up_bytes),
-                    5 => (a.down_bps + a.up_bps).total_cmp(&(b.down_bps + b.up_bps)),
+                    2 => (a.down_bps + a.up_bps).total_cmp(&(b.down_bps + b.up_bps)),
+                    4 => a.down_bytes.cmp(&b.down_bytes),
+                    5 => a.up_bytes.cmp(&b.up_bytes),
                     6 => a.share.total_cmp(&b.share),
                     _ => a.total_bytes.cmp(&b.total_bytes),
                 };

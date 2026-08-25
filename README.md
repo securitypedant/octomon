@@ -213,6 +213,7 @@ octomon --help
 | `l` | Start / stop recording the session to CSV |
 | `y` | Connection analysis: the triage ladder and findings |
 | `e` | Event timeline; `x` inside it exports the events to a CSV in the config folder |
+| `M` | Drop a marker into the event timeline ("moved rooms", "call just dropped") |
 | `c` | Scan outbound ports (which protocols this network lets out); `r` inside it rescans |
 | `?` | Help |
 | `Esc` | Back out of a view / leave full-screen |
@@ -231,6 +232,8 @@ octomon --help
 | `v` | Cycle the speed-test provider (saved to config) |
 | `n` | Processes → remote addresses → speed-test history (full-screen) |
 | `W` / `a` | Whois the selected remote address / add it as a target |
+| `d` | Delete the selected speed test from the history (full-screen history pane) |
+| `z` | Zoom the active table to 80% of the screen: every column, full names/addresses, per-process pid + path + command line, per-test server + network |
 | **Network** | |
 | `N` | Name this network ("Home", "Office") |
 | `L` | Saved network locations, their normals and incident history |
@@ -263,7 +266,7 @@ contacts, and why:
 
 | Endpoint | When | Why | Data sent |
 |----------|------|-----|-----------|
-| Your ICMP targets (default 1.1.1.1, 8.8.8.8, 9.9.9.9), plus the gateway and first hops found by a startup `traceroute` toward `discovery_probe` | continuously | latency/loss | ICMP echo |
+| Your ICMP targets (default 1.1.1.1, 8.8.8.8, 9.9.9.9, octomon.dev), plus the gateway and first hops found by a startup `traceroute` toward `discovery_probe` | continuously | latency/loss | ICMP echo |
 | Your ICMP targets, over HTTPS | every 5 s | is the web service up (HEAD, no body, no redirects, certificate errors tolerated — a timing probe) | a `HEAD /` |
 | Your system's DNS resolvers, and the reference resolver (`dns_reference_resolver`, default 1.1.1.1) | every 5 s; once a minute a random non-existent name | resolver latency; hijack check | one A query for `dns_probe_name` (default `example.com`) |
 | Your OS's own connectivity-check URL (`captive.apple.com`, `msftconnecttest.com` or `connectivity-check.ubuntu.com`), and through the system proxy when one is set | every 12 s | HTTP reachability, captive-portal detection, clock skew fallback | a GET |
