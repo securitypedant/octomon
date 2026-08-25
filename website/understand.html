@@ -154,6 +154,9 @@
   /* phones */
   @media (max-width: 600px) {
     .wrap { padding: 0 16px; }
+    /* the nav becomes two deliberate rows: the mark, then all links on one
+       line — better than a ragged wrap with one link orphaned below. */
+    nav.links { flex-basis: 100%; margin-left: 0; justify-content: space-between; gap: 6px 8px; font-size: 0.85rem; }
     section { padding: 44px 0; }
     .pagehead { padding: 40px 0 32px; }
     summary { padding: 14px 16px; }
@@ -162,7 +165,6 @@
     footer .wrap { flex-direction: column; align-items: flex-start; gap: 6px; }
   }
   @media (max-width: 480px) {
-    nav.links { gap: 6px 14px; font-size: 0.85rem; }
     .wordmark { font-size: 1.15rem; }
   }
 </style>
