@@ -222,6 +222,7 @@ octomon --help
 | `↑` `↓` (or `j` `k`) · `PgUp` / `PgDn` | Move the cursor · by ten |
 | `←` `→` · `Enter` · `Space` | Move sort column · sort · toggle direction |
 | `Shift+R` | Reset everything this panel has accumulated |
+| `Ctrl+R` | Total reset: erase **all** octomon config and stored data (baselines, history, speed tests) — asks you to type `ERASE` to confirm |
 | **Connection Quality** | |
 | `a` / `d` | Add / delete a target (add accepts an IP or DNS name) |
 | `g` | Graph the selected target's latency |

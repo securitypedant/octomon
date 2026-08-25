@@ -594,6 +594,9 @@ enum Side {
     /// Ask the OS what it knows about these pids (exe path, command line)
     /// for the zoom overlay — a blocking process scan, run off the lock.
     LoadProcDetails(Vec<u32>),
+    /// Erase all config and stored data (Ctrl+R, confirmed by typing ERASE):
+    /// the config directory and the data directory, deleted whole.
+    TotalReset,
     /// Remove a deleted location's stored baseline from baselines.json.
     ForgetLocation(String),
 }
@@ -625,6 +628,13 @@ fn delete_selected_target(s: &mut AppState) {
 
 /// Move whichever cursor holds focus: the sub-pane's when one is active,
 /// otherwise the panel's primary list.
+/// Whether the typed confirmation authorises a total reset: the word ERASE,
+/// any case, nothing less. A destructive action should cost a word, not a
+/// keystroke.
+fn reset_confirmed(buf: &str) -> bool {
+    buf.trim().eq_ignore_ascii_case("erase")
+}
+
 /// Delete the selected speed test from the in-memory history, returning the
 /// side effect that removes it from the file. The pane lists newest-first;
 /// storage is oldest-first.
@@ -810,6 +820,40 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 KeyCode::Char(c) if s.input_buffer.len() < 40 => s.input_buffer.push(c),
                 _ => {}
             },
+            // --- modal confirmation: total reset (Ctrl+R) ---
+            InputMode::ConfirmReset => match key.code {
+                KeyCode::Enter => {
+                    let confirmed = reset_confirmed(&s.input_buffer);
+                    s.input_mode = InputMode::Normal;
+                    s.input_buffer.clear();
+                    if confirmed {
+                        // Forget everything learned, in memory as well as on
+                        // disk — the session keeps running on defaults-ish
+                        // state; a restart completes the fresh start.
+                        s.baseline = None;
+                        s.baseline_key = None;
+                        s.locations = None;
+                        s.speed_history.clear();
+                        s.speed_total = 0;
+                        s.history.clear();
+                        s.logging_requested = false;
+                        side = Side::TotalReset;
+                    } else {
+                        s.notice = Some("total reset cancelled".to_string());
+                    }
+                }
+                KeyCode::Esc => {
+                    s.input_mode = InputMode::Normal;
+                    s.input_buffer.clear();
+                    s.notice = Some("total reset cancelled".to_string());
+                }
+                KeyCode::Backspace => {
+                    s.input_buffer.pop();
+                }
+                KeyCode::Char(c) if s.input_buffer.len() < 8 => s.input_buffer.push(c),
+                _ => {}
+            },
+
             // --- modal text entry: a marker for the event timeline ---
             InputMode::Marker => match key.code {
                 KeyCode::Enter => {
@@ -871,6 +915,11 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
             InputMode::Normal if s.overlay != Overlay::None => match key.code {
                 KeyCode::Char('q') => s.should_quit = true,
                 KeyCode::Char('c') if ctrl => s.should_quit = true,
+                // Global, overlays included — before the Egress 'r' arm.
+                KeyCode::Char('r') if ctrl => {
+                    s.input_buffer.clear();
+                    s.input_mode = InputMode::ConfirmReset;
+                }
                 KeyCode::Esc => s.overlay = Overlay::None,
                 KeyCode::Char('?') => {
                     s.overlay = if s.overlay == Overlay::Help {
@@ -1005,8 +1054,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 // Deleting a bad result works zoomed too — the zoom is where
                 // one actually reads the history closely enough to curate it.
                 KeyCode::Char('d') | KeyCode::Delete
-                    if s.overlay == Overlay::Zoom
-                        && s.zoom_view == app::ZoomView::Speedtests =>
+                    if s.overlay == Overlay::Zoom && s.zoom_view == app::ZoomView::Speedtests =>
                 {
                     side = delete_selected_speedtest(&mut s);
                 }
@@ -1137,6 +1185,14 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
             InputMode::Normal => match key.code {
                 KeyCode::Char('q') => s.should_quit = true,
                 KeyCode::Char('c') if ctrl => s.should_quit = true,
+                // Ctrl+R (global): total reset — erase all config and stored
+                // data. Ordered before the plain 'r' arms, which would
+                // otherwise swallow the modified press. Confirmation is a
+                // typed word, not a keystroke: this deletes everything.
+                KeyCode::Char('r') if ctrl => {
+                    s.input_buffer.clear();
+                    s.input_mode = InputMode::ConfirmReset;
+                }
                 // Esc backs out of whatever view you're in — it must never quit,
                 // since reaching for it to leave a sub-view would kill the app.
                 KeyCode::Esc => {
@@ -1558,6 +1614,19 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
         }
         Side::ForgetLocation(key) => {
             tokio::task::spawn_blocking(move || baseline::forget(&key));
+        }
+        Side::TotalReset => {
+            let state = ctx.state.clone();
+            tokio::task::spawn_blocking(move || {
+                config::Config::erase();
+                store::erase();
+                state.lock().unwrap().notice_event(
+                    verdict::Severity::Info,
+                    app::EventCategory::Logging,
+                    "TOTAL RESET — all config and stored data erased; restart octomon for a fully fresh start"
+                        .to_string(),
+                );
+            });
         }
         Side::NameNetwork { key, label, name } => {
             tokio::task::spawn_blocking(move || baseline::name_network(&key, &label, &name));
@@ -2648,6 +2717,19 @@ mod tests {
         let (out, _) = doctor_report(&s, false);
         assert!(!out.contains("MySecretWifi"));
         assert!(out.contains("<network>"));
+    }
+
+    #[test]
+    fn a_total_reset_needs_the_whole_word() {
+        // The gate for erasing everything: the word, any case, whitespace
+        // tolerated — and nothing less.
+        assert!(reset_confirmed("ERASE"));
+        assert!(reset_confirmed("erase"));
+        assert!(reset_confirmed("  Erase "));
+        assert!(!reset_confirmed(""));
+        assert!(!reset_confirmed("e"));
+        assert!(!reset_confirmed("yes"));
+        assert!(!reset_confirmed("erase!"));
     }
 
     #[test]

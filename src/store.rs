@@ -95,6 +95,14 @@ fn path() -> Option<PathBuf> {
     Some(data_dir()?.join("speedtests.jsonl"))
 }
 
+/// Delete the whole data directory — baselines, incident history, speed-test
+/// history and session CSVs. The total-reset path; best-effort.
+pub fn erase() {
+    if let Some(dir) = data_dir() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// Append a record (best-effort; ignored on error).
 pub fn append(rec: &SpeedRecord) {
     let Some(path) = path() else { return };

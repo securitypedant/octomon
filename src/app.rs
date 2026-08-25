@@ -1715,6 +1715,9 @@ pub enum InputMode {
     RenameLocation,
     /// Typing a marker for the event timeline ("moved to the meeting room").
     Marker,
+    /// Confirming a total reset (Ctrl+R): the word ERASE must be typed in
+    /// full — a destructive action should cost more than one keystroke.
+    ConfirmReset,
 }
 
 /// Which full-screen overlay is up, if any. One at a time; the order here is

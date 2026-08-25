@@ -1318,6 +1318,17 @@ fn footer(f: &mut Frame, s: &AppState, area: Rect) {
             &s.input_buffer,
             "[Enter] add  [Esc] cancel",
         )
+    } else if s.input_mode == InputMode::ConfirmReset {
+        // Red, not the usual yellow: this one deletes everything.
+        Line::from(vec![
+            Span::styled(
+                " TOTAL RESET — deletes ALL config and stored data. type ERASE then Enter: ",
+                Style::new().fg(Color::Red).bold(),
+            ),
+            Span::styled(s.input_buffer.clone(), Style::new().fg(Color::White)),
+            Span::styled("▏", Style::new().fg(Color::Red)),
+            Span::styled("   [Esc] cancel", Style::new().fg(Color::DarkGray)),
+        ])
     } else if let Some(n) = &s.notice {
         Line::from(Span::styled(
             format!(" {n}"),
@@ -3230,7 +3241,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("←/→", "move sort-column cursor"),
         row("Enter", "sort by that column"),
         row("Space", "reverse sort direction"),
-        row("Shift+R", "reset this panel's data"),
+        row("Shift+R/^R", "panel reset / ERASE ALL"),
     ];
 
     let mut right = vec![

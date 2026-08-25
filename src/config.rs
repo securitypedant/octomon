@@ -302,6 +302,15 @@ impl Config {
         Some(Self::dir()?.join("config.toml"))
     }
 
+    /// Delete the whole config directory — the config file and any exported
+    /// event CSVs beside it. The total-reset path; best-effort like every
+    /// other persistence call, because a half-failed erase must not crash.
+    pub fn erase() {
+        if let Some(dir) = Self::dir() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
     /// Where an exported event timeline goes: beside the config, named for the
     /// moment of export, so repeated exports never overwrite one another.
     pub fn events_export_path() -> Option<PathBuf> {
