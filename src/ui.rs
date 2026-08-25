@@ -72,7 +72,7 @@ pub fn render(f: &mut Frame, s: &AppState) {
 /// OS knows about the selected one. Pure inspection: the question it answers
 /// is "what is that thing using my bandwidth?", never process management.
 fn zoom_band(f: &mut Frame, s: &AppState, area: Rect) {
-    let title = match s.zoom_view {
+    let mut title = match s.zoom_view {
         crate::app::ZoomView::Processes => format!(" Processes · zoom ({}) ", s.processes.len()),
         crate::app::ZoomView::Remotes => {
             format!(" Remote addresses · zoom ({}) ", s.remotes.len())
@@ -81,13 +81,25 @@ fn zoom_band(f: &mut Frame, s: &AppState, area: Rect) {
             format!(" Speed Test History · zoom ({}) ", s.speed_history.len())
         }
     };
+    if s.zoom_view != crate::app::ZoomView::Speedtests
+        && let Some(name) = follow_label(s)
+    {
+        title.push_str(&format!("· following {name} "));
+    }
+    // The talkers sort and follow from the zoom too; the history is curated
+    // from it.
+    let hint = match s.zoom_view {
+        crate::app::ZoomView::Speedtests => {
+            " ↑↓ scroll · d delete · n next table · press z or Esc to close "
+        }
+        _ => {
+            " ↑↓ scroll · ←→ ↵ sort · o follow · p/u pin · n next table · press z or Esc to close "
+        }
+    };
     let outer = Block::bordered()
         .padding(Padding::new(1, 1, 0, 0))
         .title(Span::styled(title, Style::new().bold()))
-        .title_bottom(Span::styled(
-            " ↑↓ scroll · n next table · press z or Esc to close ",
-            Style::new().fg(Color::DarkGray),
-        ))
+        .title_bottom(Span::styled(hint, Style::new().fg(Color::DarkGray)))
         .border_style(Style::new().fg(Color::Cyan));
     let inner = outer.inner(area);
     f.render_widget(outer, area);
@@ -113,6 +125,32 @@ fn flex_col(widths: &[u16], ncols: usize, avail: u16, col: usize, cap: u16) -> (
     v[col] += extra;
     let flexed = v[col];
     (v, flexed)
+}
+
+/// Header for a zoomed talkers table. The zoom splits some compact columns
+/// (now → now↓/now↑) and adds informational ones (pid), but the sort keeps
+/// the compact table's seven keys: `map[base]` names the zoomed column that
+/// carries each base column's cursor highlight and sort arrow — the combined
+/// "now" sort shows its arrow on now↓.
+fn zoom_header<'a>(s: &AppState, labels: &[&'a str], view: BwView, map: &[usize]) -> Row<'a> {
+    let sort = s.sort_for(view);
+    Row::new(labels.iter().enumerate().map(|(i, l)| {
+        let base = map.iter().position(|&z| z == i);
+        let mut txt = (*l).to_string();
+        if let (Some(b), Some((c, desc))) = (base, sort)
+            && c == b
+        {
+            txt.push(if desc { '▼' } else { '▲' });
+        }
+        let style = if base == Some(s.bw_col) {
+            Style::new()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::new().fg(Color::DarkGray)
+        };
+        Cell::from(Span::styled(txt, style))
+    }))
 }
 
 /// The "── selected ──…" rule above a detail block, bright enough that the
@@ -152,10 +190,15 @@ fn zoom_processes(f: &mut Frame, s: &AppState, area: Rect) {
     let labels = [
         "name", "pid", "now↓", "now↑", "total", "↓", "↑", "share", "retx",
     ];
-    let header = Row::new(labels[..ncols].iter().map(|l| Cell::from(*l)))
-        .style(Style::new().fg(Color::DarkGray));
+    let header = zoom_header(
+        s,
+        &labels[..ncols],
+        BwView::Processes,
+        &[0, 2, 4, 5, 6, 7, 8],
+    );
     let order = s.process_order();
-    let (table_area, first, visible) = talkers_scroll(f, table_area, &order, s.proc_sel);
+    let (pos, sel_idx) = s.proc_cursor();
+    let (table_area, first, visible) = talkers_scroll(f, table_area, order.len(), pos);
     let rows = order.iter().skip(first).take(visible).map(|&idx| {
         let p = &s.processes[idx];
         let name: String = p.name.chars().take(name_w as usize).collect();
@@ -193,13 +236,16 @@ fn zoom_processes(f: &mut Frame, s: &AppState, area: Rect) {
             )),
         ];
         cells.truncate(ncols);
-        Row::new(cells).style(row_style(idx == s.proc_sel, false))
+        Row::new(cells).style(row_style(
+            Some(idx) == sel_idx,
+            s.pinned_procs.contains(&p.name),
+        ))
     });
     let widths: Vec<Constraint> = flexed.iter().map(|w| Constraint::Length(*w)).collect();
     f.render_widget(Table::new(rows, widths).header(header), table_area);
 
     let Some(da) = detail_area else { return };
-    let Some(p) = s.processes.get(s.proc_sel) else {
+    let Some(p) = sel_idx.and_then(|i| s.processes.get(i)) else {
         return;
     };
     let text_w = da.width as usize;
@@ -276,10 +322,10 @@ fn zoom_remotes(f: &mut Frame, s: &AppState, area: Rect) {
     let labels = [
         "remote", "process", "now↓", "now↑", "total", "↓", "↑", "share",
     ];
-    let header = Row::new(labels[..ncols].iter().map(|l| Cell::from(*l)))
-        .style(Style::new().fg(Color::DarkGray));
+    let header = zoom_header(s, &labels[..ncols], BwView::Remotes, &[0, 1, 2, 4, 5, 6, 7]);
     let order = s.remote_order();
-    let (area, first, visible) = talkers_scroll(f, area, &order, s.remote_sel);
+    let (pos, sel_idx) = s.remote_cursor();
+    let (area, first, visible) = talkers_scroll(f, area, order.len(), pos);
     let rows = order.iter().skip(first).take(visible).map(|&idx| {
         let r = &s.remotes[idx];
         let mut remote = fmt_remote(r);
@@ -312,7 +358,10 @@ fn zoom_remotes(f: &mut Frame, s: &AppState, area: Rect) {
             )),
         ];
         cells.truncate(ncols);
-        Row::new(cells).style(row_style(idx == s.remote_sel, false))
+        Row::new(cells).style(row_style(
+            Some(idx) == sel_idx,
+            s.pinned_remotes.contains(&r.addr),
+        ))
     });
     let widths: Vec<Constraint> = flexed.iter().map(|w| Constraint::Length(*w)).collect();
     f.render_widget(Table::new(rows, widths).header(header), area);
@@ -331,6 +380,13 @@ fn zoom_speedtests(f: &mut Frame, s: &AppState, area: Rect) {
     }
     const WIDTHS: [u16; 9] = [12, 11, 8, 8, 8, 30, 20, 18, 12];
     let ncols = fitting_columns(&WIDTHS, area.width);
+    // Server names (M-Lab sites, Ookla hosts) routinely outgrow 30 columns;
+    // any width the pane has spare goes to that column rather than to air.
+    let widths: Vec<u16> = if ncols > 5 {
+        flex_col(&WIDTHS, ncols, area.width, 5, 30).0
+    } else {
+        WIDTHS[..ncols].to_vec()
+    };
     let labels = [
         "time",
         "provider",
@@ -398,10 +454,7 @@ fn zoom_speedtests(f: &mut Frame, s: &AppState, area: Rect) {
             cells.truncate(ncols);
             Row::new(cells).style(row_style(first + i == sel, false))
         });
-    let widths: Vec<Constraint> = WIDTHS[..ncols]
-        .iter()
-        .map(|w| Constraint::Length(*w))
-        .collect();
+    let widths: Vec<Constraint> = widths.iter().map(|w| Constraint::Length(*w)).collect();
     f.render_widget(Table::new(rows, widths).header(header), area);
 }
 
@@ -1259,6 +1312,27 @@ fn context_line(s: &AppState) -> Line<'static> {
             if s.bw_view == BwView::Remotes && s.sub_pane == SubPane::Primary {
                 v.extend([key("[W]"), txt("hois "), key("[a]"), txt("dd ")]);
             }
+            if s.sub_pane == SubPane::Primary {
+                v.extend([
+                    key("[o]"),
+                    txt(if follow_label(s).is_some() {
+                        "unfollow "
+                    } else {
+                        "follow "
+                    }),
+                ]);
+            }
+            // Pin/unpin exist only where per-process attribution does.
+            if s.sub_pane == SubPane::Primary && s.proc_status == ProcStatus::Supported {
+                v.extend([key("[p]"), txt("in "), key("[u]"), txt("npin ")]);
+            }
+            // With the speed-test history under the cursor (the full-screen
+            // pane or its zoom), curation is the action on offer.
+            if s.sub_pane == SubPane::Secondary
+                || (s.overlay == Overlay::Zoom && s.zoom_view == crate::app::ZoomView::Speedtests)
+            {
+                v.extend([key("[d]"), txt("elete ")]);
+            }
             v.extend([key("[R]"), txt("eset "), key("[f]"), txt("ull ")]);
             v
         }
@@ -1271,10 +1345,10 @@ fn context_line(s: &AppState) -> Line<'static> {
                 key("[L]"),
                 txt("ocations "),
             ];
-            // The resolver cursor only means something with resolvers to
+            // The address cursor only means something with addresses to
             // walk, and only while this pane (not the history) holds it.
-            if s.sub_pane == SubPane::Primary && !s.netinfo.dns.is_empty() {
-                v.extend([key("[←→]"), txt("dns "), key("[W]"), txt("hois ")]);
+            if s.sub_pane == SubPane::Primary && !s.netinfo_addrs().is_empty() {
+                v.extend([key("[↑↓]"), txt("ip "), key("[W]"), txt("hois ")]);
             }
             v
         }
@@ -1367,6 +1441,23 @@ fn footer(f: &mut Frame, s: &AppState, area: Rect) {
     }
 }
 
+/// The absolute performance grade as a footer span — the counterweight to a
+/// green headline: "healthy" grades against this location's normal, this word
+/// says what that normal is worth anywhere.
+fn perf_span(s: &AppState) -> Option<Span<'static>> {
+    use crate::verdict::PerfGrade;
+    let p = s.verdict.triage.performance.as_ref()?;
+    let color = match p.grade {
+        PerfGrade::Excellent | PerfGrade::Good => Color::Green,
+        PerfGrade::Fair => Color::Yellow,
+        PerfGrade::Poor => Color::Red,
+    };
+    Some(Span::styled(
+        format!(" · performance {}", p.grade.label()),
+        Style::new().fg(color),
+    ))
+}
+
 /// The always-visible one-liner: the verdict engine's headline. Full detail —
 /// every rung and finding — is one keypress away on [y], so this stays terse.
 fn verdict_line(s: &AppState) -> Line<'static> {
@@ -1376,10 +1467,15 @@ fn verdict_line(s: &AppState) -> Line<'static> {
             Span::styled(format!(" ● {reason}"), Style::new().fg(Color::DarkGray)),
             hint,
         ]),
-        Verdict::Healthy => Line::from(vec![
-            Span::styled(" ● connection healthy", Style::new().fg(Color::Green)),
-            hint,
-        ]),
+        Verdict::Healthy => {
+            let mut spans = vec![Span::styled(
+                " ● connection healthy",
+                Style::new().fg(Color::Green),
+            )];
+            spans.extend(perf_span(s));
+            spans.push(hint);
+            Line::from(spans)
+        }
         Verdict::Problems(findings) => {
             let top = &findings[0];
             // "Degraded but usable" is note-class (so the baseline can learn)
@@ -1400,6 +1496,7 @@ fn verdict_line(s: &AppState) -> Line<'static> {
                         Style::new().fg(Color::Gray),
                     ));
                 }
+                spans.extend(perf_span(s));
                 spans.push(hint);
                 return Line::from(spans);
             }
@@ -1407,7 +1504,7 @@ fn verdict_line(s: &AppState) -> Line<'static> {
             // rather than crying wolf over a busy CPU or a weak-but-working radio.
             if top.severity == Severity::Info {
                 let n = findings.len();
-                return Line::from(vec![
+                let mut spans = vec![
                     Span::styled(" ● connection healthy", Style::new().fg(Color::Green)),
                     Span::styled(
                         format!(
@@ -1417,8 +1514,10 @@ fn verdict_line(s: &AppState) -> Line<'static> {
                         ),
                         Style::new().fg(Color::Gray),
                     ),
-                    hint,
-                ]);
+                ];
+                spans.extend(perf_span(s));
+                spans.push(hint);
+                return Line::from(spans);
             }
             // Confidence wording lives in the [y] analysis overlay; the
             // headline keeps just the claim.
@@ -1447,8 +1546,13 @@ fn verdict_line(s: &AppState) -> Line<'static> {
 }
 
 /// "3m 12s" for a finding that has been active that long; `None` for the raw
-/// (un-hysteresised) evaluation, which carries no start time.
+/// (un-hysteresised) evaluation, which carries no start time — and for steady
+/// findings (a tunnel in the path, an ICMP-dropping gateway), where the timer
+/// would just count uptime.
 fn active_for(f: &crate::verdict::Finding) -> Option<String> {
+    if f.steady() {
+        return None;
+    }
     let since = f.since?;
     let d = since.elapsed();
     if d.as_secs() < 5 {
@@ -1519,6 +1623,36 @@ fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                     text_w,
                 ));
             }
+        }
+
+        // The absolute read, so "all green" cannot be mistaken for "fast":
+        // the rungs grade against this location's normal, this line grades
+        // the same numbers on a universal scale.
+        if let Some(p) = &s.verdict.triage.performance {
+            use crate::verdict::PerfGrade;
+            let color = match p.grade {
+                PerfGrade::Excellent | PerfGrade::Good => Color::Green,
+                PerfGrade::Fair => Color::Yellow,
+                PerfGrade::Poor => Color::Red,
+            };
+            lines.push(Line::from(""));
+            // Same column geometry as the rungs, so the readings line up.
+            lines.extend(column_lines(
+                vec![
+                    Span::styled(
+                        format!("   {:<15}", "performance"),
+                        Style::new().fg(Color::White).bold(),
+                    ),
+                    Span::styled(
+                        format!("{} — ", p.grade.label()),
+                        Style::new().fg(color).bold(),
+                    ),
+                ],
+                &p.detail,
+                Style::new().fg(Color::Gray),
+                18,
+                text_w,
+            ));
         }
 
         lines.push(Line::from(""));
@@ -1749,7 +1883,8 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         hcell(2, "avg"),
         hcell(3, "p95"),
         hcell(4, "max"),
-        hcell(5, "loss"),
+        hcell(5, "jit"),
+        hcell(6, "loss"),
     ]);
 
     let order = s.quality_order();
@@ -1802,6 +1937,7 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
             Cell::from(fmt_ms(st.mean)),
             Cell::from(fmt_ms(st.p95)),
             Cell::from(fmt_ms(st.max)),
+            Cell::from(format!("{:.1}", t.jitter_ms)),
             Cell::from(format!("{loss:.0}%")),
         ])
         .style(style)
@@ -1817,6 +1953,7 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         Constraint::Length(8),
         Constraint::Length(8),
         Constraint::Length(8),
+        Constraint::Length(6),
         Constraint::Length(6),
     ];
     // Scroll counts live in the title: overlaying them on the header row
@@ -2044,13 +2181,27 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
 
     // Column widths are fixed, so the sparklines start right after the last
     // column rather than being flung to the far right of a wide terminal.
-    const COLS: [u16; 7] = [4, 17, 6, 8, 8, 8, 7];
+    // Metric order mirrors the target table above (last · avg · p95 · max ·
+    // jitter · loss), so the eye can drop between the two without re-mapping.
+    // The split view hasn't the width for every metric: `max` is the one
+    // that goes — ratatui would otherwise squeeze every column, and p95
+    // still carries the spike story there.
+    const COLS: [u16; 8] = [4, 17, 8, 8, 8, 8, 7, 6];
+    const FULL_W: u16 = 4 + 17 + 8 + 8 + 8 + 8 + 7 + 6 + 7; // widths + gaps
+    let show_max = inner.width >= FULL_W;
+    let mut labels = vec!["ttl", "address", "last", "avg", "p95"];
+    let mut widths_u: Vec<u16> = vec![COLS[0], COLS[1], COLS[2], COLS[3], COLS[4]];
+    if show_max {
+        labels.push("max");
+        widths_u.push(COLS[5]);
+    }
+    labels.extend(["jitter", "loss"]);
+    widths_u.extend([COLS[6], COLS[7]]);
     // Table adds one cell of spacing between columns; leaving it out squeezes
     // the columns and silently truncates the address cell.
-    let table_w: u16 = COLS.iter().sum::<u16>() + COLS.len() as u16 - 1;
+    let table_w: u16 = widths_u.iter().sum::<u16>() + widths_u.len() as u16 - 1;
 
-    let header = Row::new(["ttl", "address", "loss", "last", "avg", "p95", "jitter"])
-        .style(Style::new().fg(Color::Gray).bold());
+    let header = Row::new(labels).style(Style::new().fg(Color::Gray).bold());
     // Scroll so the selected hop stays on screen. Rows are not one-to-one with
     // hops — a run of silent ones collapses to a single row — so the cursor is
     // located by hop index rather than by counting rows.
@@ -2107,16 +2258,9 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                 if selected {
                     style = style.bg(Color::Rgb(40, 40, 55));
                 }
-                return Row::new(vec![
-                    Cell::from(hop_ttl(h)),
-                    Cell::from("*"),
-                    Cell::from("—"),
-                    Cell::from("—"),
-                    Cell::from("—"),
-                    Cell::from("—"),
-                    Cell::from("—"),
-                ])
-                .style(style);
+                let mut cells = vec![Cell::from(hop_ttl(h)), Cell::from("*")];
+                cells.extend((2..widths_u.len()).map(|_| Cell::from("—")));
+                return Row::new(cells).style(style);
             };
             let loss = stat.loss_pct();
             let st = stat.stats(n);
@@ -2127,26 +2271,29 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                     .bg(Color::Rgb(40, 40, 55))
                     .add_modifier(Modifier::BOLD);
             }
-            Row::new(vec![
+            let mut cells = vec![
                 Cell::from(hop_ttl(h)),
                 Cell::from(
                     h.addr
                         .map(|a| a.to_string())
                         .unwrap_or_else(|| "*".to_string()),
                 ),
-                Cell::from(Span::styled(
-                    format!("{loss:.0}%"),
-                    Style::new().fg(loss_color(loss)),
-                )),
                 Cell::from(fmt_ms(stat.last_rtt_ms)),
                 Cell::from(fmt_ms(st.mean)),
                 Cell::from(fmt_ms(st.p95)),
-                Cell::from(format!("{:.1}", stat.jitter_ms)),
-            ])
-            .style(style)
+            ];
+            if show_max {
+                cells.push(Cell::from(fmt_ms(st.max)));
+            }
+            cells.push(Cell::from(format!("{:.1}", stat.jitter_ms)));
+            cells.push(Cell::from(Span::styled(
+                format!("{loss:.0}%"),
+                Style::new().fg(loss_color(loss)),
+            )));
+            Row::new(cells).style(style)
         }
     });
-    let widths: Vec<Constraint> = COLS.iter().map(|w| Constraint::Length(*w)).collect();
+    let widths: Vec<Constraint> = widths_u.iter().map(|w| Constraint::Length(*w)).collect();
     f.render_widget(
         Table::new(rows, widths).header(header),
         Rect {
@@ -2513,19 +2660,29 @@ fn bufferbloat_grade(bloat_ms: f64) -> (&'static str, Color) {
     }
 }
 
+/// "following firefox" — the [o] state for the active talkers table, shown
+/// in the panel titles so the mode is never invisible.
+fn follow_label(s: &AppState) -> Option<String> {
+    match s.bw_view {
+        BwView::Processes => s.follow_proc.clone(),
+        BwView::Remotes => s.follow_remote.map(|a| a.to_string()),
+    }
+}
+
 fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let tp = &s.throughput;
-    let b = block(
-        &format!(
-            "Bandwidth · {}",
-            if tp.iface.is_empty() {
-                "…"
-            } else {
-                &tp.iface
-            }
-        ),
-        s.focus == Panel::Bandwidth,
+    let mut title = format!(
+        "Bandwidth · {}",
+        if tp.iface.is_empty() {
+            "…"
+        } else {
+            &tp.iface
+        }
     );
+    if let Some(name) = follow_label(s) {
+        title.push_str(&format!(" · following {name}"));
+    }
+    let b = block(&title, s.focus == Panel::Bandwidth);
     let inner = b.inner(area);
     f.render_widget(b, area);
 
@@ -2590,8 +2747,10 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
     // row cursor belong to; otherwise 'b' switches which of the two is shown.
     if s.fullscreen {
         // Zoomed ([z]): the bottom band becomes one full-width table — the
-        // graphs above stay where the eye already was.
-        if s.overlay == Overlay::Zoom {
+        // graphs above stay where the eye already was. It stays drawn while
+        // the [y] analysis floats over it, so closing the overlay lands back
+        // on the table instead of on a re-shuffled panel.
+        if s.overlay == Overlay::Zoom || (s.zoom_behind && s.overlay == Overlay::Triage) {
             zoom_band(f, s, rows[2]);
             return;
         }
@@ -2711,15 +2870,17 @@ fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
             // Records from before the field existed.
             (None, _) => "not recorded (older test)".to_string(),
         };
+        // The rates ride on the identity line — the pane has the width, and
+        // the row this saves goes to the test list above.
         let mut lines = vec![
             selected_rule(area.width as usize),
-            Line::from(Span::styled(
-                format!("{} · {}", r.when(), r.provider),
-                Style::new().fg(Color::Gray),
-            )),
             Line::from(vec![
                 Span::styled(
-                    format!("↓ {:.1}", r.down_mbps),
+                    format!("{} · {}", r.when(), r.provider),
+                    Style::new().fg(Color::Gray),
+                ),
+                Span::styled(
+                    format!("  ↓ {:.1}", r.down_mbps),
                     Style::new().fg(Color::Green),
                 ),
                 Span::styled(
@@ -2957,13 +3118,14 @@ fn top_talkers_view(f: &mut Frame, s: &AppState, area: Rect, view: BwView) {
     let ncols = fitting_columns(&WIDTHS, inner.width);
     let (widths, name_w) = flex_col(&WIDTHS, ncols, inner.width, 0, 24);
     let labels = ["name", "now", "total", "↓", "↑", "share", "retx"];
-    let header = talkers_header(s, &labels[..ncols], BwView::Processes);
+    let header = talkers_header(s, &labels[..ncols], BwView::Processes, 1);
 
     // Rows as drawn (the sort, when one is active), scrolled to keep the
-    // cursor in view, with a cue beside them when there is more.
+    // cursor's position in view, with a cue beside them when there is more.
     let order = s.process_order();
     let cursor_on = s.on_process_list();
-    let (inner, first, visible) = talkers_scroll(f, inner, &order, s.proc_sel);
+    let (pos, sel_idx) = s.proc_cursor();
+    let (inner, first, visible) = talkers_scroll(f, inner, order.len(), pos);
 
     let rows = order.iter().skip(first).take(visible).map(|&idx| {
         let p = &s.processes[idx];
@@ -2983,27 +3145,27 @@ fn top_talkers_view(f: &mut Frame, s: &AppState, area: Rect, view: BwView) {
         let mut cells = vec![
             Cell::from(name),
             fmt_now(p.down_bps + p.up_bps, s.bits_units),
-            Cell::from(Span::styled(
+            rcell(Span::styled(
                 fmt_bytes(p.total_bytes),
                 Style::new().fg(Color::White),
             )),
-            Cell::from(Span::styled(
+            rcell(Span::styled(
                 fmt_bytes(p.down_bytes),
                 Style::new().fg(Color::Green),
             )),
-            Cell::from(Span::styled(
+            rcell(Span::styled(
                 fmt_bytes(p.up_bytes),
                 Style::new().fg(Color::Magenta),
             )),
-            Cell::from(Span::styled(
+            rcell(Span::styled(
                 format!("{:.0}%", p.share * 100.0),
                 Style::new().fg(Color::Gray),
             )),
-            Cell::from(Span::styled(retx, retx_style)),
+            rcell(Span::styled(retx, retx_style)),
         ];
         cells.truncate(ncols);
         Row::new(cells).style(row_style(
-            cursor_on && idx == s.proc_sel,
+            cursor_on && Some(idx) == sel_idx,
             s.pinned_procs.contains(&p.name),
         ))
     });
@@ -3029,17 +3191,11 @@ fn row_style(selected: bool, pinned: bool) -> Style {
     }
 }
 
-/// Scroll a talkers table so the cursor row stays visible, and draw the
-/// scroll cue beside the rows (under the header) when they overflow. Returns
-/// the area left for the table, the first row to draw, and how many.
-fn talkers_scroll(
-    f: &mut Frame,
-    area: Rect,
-    order: &[usize],
-    cursor: usize,
-) -> (Rect, usize, usize) {
+/// Scroll a talkers table so the cursor's display position stays visible, and
+/// draw the scroll cue beside the rows (under the header) when they overflow.
+/// Returns the area left for the table, the first row to draw, and how many.
+fn talkers_scroll(f: &mut Frame, area: Rect, total: usize, pos: usize) -> (Rect, usize, usize) {
     let visible = area.height.saturating_sub(1) as usize; // header row
-    let pos = order.iter().position(|&i| i == cursor).unwrap_or(0);
     let first = if visible == 0 {
         0
     } else {
@@ -3050,7 +3206,7 @@ fn talkers_scroll(
         height: area.height.saturating_sub(1),
         ..area
     };
-    let body = scroll_cue(f, body, order.len(), first, visible);
+    let body = scroll_cue(f, body, total, first, visible);
     (
         Rect {
             width: body.width,
@@ -3079,22 +3235,31 @@ fn fitting_columns(widths: &[u16], width: u16) -> usize {
     ncols.max(1)
 }
 
+/// A right-aligned numeric cell: the units column stays put and magnitudes
+/// compare down the column, the way number tables are read. Name columns
+/// stay left-aligned.
+fn rcell(span: Span<'_>) -> Cell<'_> {
+    Cell::from(Line::from(span).right_aligned())
+}
+
 /// The "now" column: the current combined rate, or a dim dot when idle so a
 /// quiet row reads as quiet rather than as "0 B/s".
 fn fmt_now(bps: f64, bits: bool) -> Cell<'static> {
     if bps > 0.0 {
-        Cell::from(Span::styled(
+        rcell(Span::styled(
             fmt_rate(bps, bits),
             Style::new().fg(Color::Cyan),
         ))
     } else {
-        Cell::from(Span::styled("·", Style::new().fg(Color::DarkGray)))
+        rcell(Span::styled("·", Style::new().fg(Color::DarkGray)))
     }
 }
 
 /// Sortable header row for a talkers table: the column under the cursor is
-/// highlighted, the sorted column carries a direction arrow.
-fn talkers_header<'a>(s: &AppState, labels: &[&'a str], view: BwView) -> Row<'a> {
+/// highlighted, the sorted column carries a direction arrow. The first
+/// `left_cols` labels head text columns and stay left-aligned; the rest head
+/// numbers and right-align with them.
+fn talkers_header<'a>(s: &AppState, labels: &[&'a str], view: BwView, left_cols: usize) -> Row<'a> {
     let active = s.bw_view == view;
     // The column cursor belongs to the table that holds the row cursor —
     // not while the speed-test history pane has it.
@@ -3115,7 +3280,12 @@ fn talkers_header<'a>(s: &AppState, labels: &[&'a str], view: BwView) -> Row<'a>
         } else {
             Style::new().fg(Color::DarkGray)
         };
-        Cell::from(Span::styled(txt, style))
+        let line = Line::from(Span::styled(txt, style));
+        Cell::from(if i < left_cols {
+            line
+        } else {
+            line.right_aligned()
+        })
     }))
 }
 
@@ -3150,15 +3320,16 @@ fn top_remotes(f: &mut Frame, s: &AppState, area: Rect) {
     // space answers nothing.
     let (flexed, addr_w) = flex_col(&WIDTHS, ncols, area.width, 0, 24);
     let labels = ["remote", "process", "now", "total", "↓", "↑", "share"];
-    let header = talkers_header(s, &labels[..ncols], BwView::Remotes);
+    let header = talkers_header(s, &labels[..ncols], BwView::Remotes, 2);
 
     let order = s.remote_order();
     let cursor_on = s.selected_remote().is_some();
-    let (area, first, visible) = talkers_scroll(f, area, &order, s.remote_sel);
+    let (pos, sel_idx) = s.remote_cursor();
+    let (area, first, visible) = talkers_scroll(f, area, order.len(), pos);
 
     let rows = order.iter().skip(first).take(visible).map(|&idx| {
         let r = &s.remotes[idx];
-        let selected = cursor_on && idx == s.remote_sel;
+        let selected = cursor_on && Some(idx) == sel_idx;
         // v6 with a port can outrun the column; keep the tail, which is the
         // distinctive part of the address.
         let remote: String = {
@@ -3176,19 +3347,19 @@ fn top_remotes(f: &mut Frame, s: &AppState, area: Rect) {
             Cell::from(remote),
             Cell::from(Span::styled(process, Style::new().fg(Color::Gray))),
             fmt_now(r.down_bps + r.up_bps, s.bits_units),
-            Cell::from(Span::styled(
+            rcell(Span::styled(
                 fmt_bytes(r.total_bytes),
                 Style::new().fg(Color::White),
             )),
-            Cell::from(Span::styled(
+            rcell(Span::styled(
                 fmt_bytes(r.down_bytes),
                 Style::new().fg(Color::Green),
             )),
-            Cell::from(Span::styled(
+            rcell(Span::styled(
                 fmt_bytes(r.up_bytes),
                 Style::new().fg(Color::Magenta),
             )),
-            Cell::from(Span::styled(
+            rcell(Span::styled(
                 format!("{:.0}%", r.share * 100.0),
                 Style::new().fg(Color::Gray),
             )),
@@ -3226,7 +3397,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("n", "next sub-pane in panel"),
         row("Esc", "back / exit full-screen"),
         row("s", "run speed test"),
-        row("p", "pause / resume the display"),
+        row("P", "pause / resume the display"),
         row("r", "re-probe network info"),
         row("w", "stats window 1m/5m/15m"),
         row("l / D", "CSV recording / zip bundle"),
@@ -3239,8 +3410,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("↑/↓ or j/k", "move the cursor"),
         row("PgUp/PgDn", "move by ten"),
         row("←/→", "move sort-column cursor"),
-        row("Enter", "sort by that column"),
-        row("Space", "reverse sort direction"),
+        row("Enter", "sort / flip direction"),
         row("Shift+R/^R", "panel reset / ERASE ALL"),
     ];
 
@@ -3258,8 +3428,8 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("n", "procs → remotes → history"),
         row("W / a", "whois / add sel. remote"),
         row("p / u", "pin / unpin row at the top"),
-        row("d", "delete sel. speed test"),
-        row("z", "zoom table: all the data"),
+        row("o", "follow row through re-sorts"),
+        row("d / z", "del. speed test / zoom"),
         Line::from(""),
         head("Network"),
         row("r", "re-probe"),
@@ -3315,6 +3485,15 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             " press ? or Esc to close ",
             Style::new().fg(Color::DarkGray),
         ))
+        // Where to report a bug or read more — in the border, where it costs
+        // no rows on a 24-line terminal.
+        .title_bottom(
+            Line::from(Span::styled(
+                " github.com/securitypedant/octomon · octomon.dev ",
+                Style::new().fg(Color::DarkGray),
+            ))
+            .right_aligned(),
+        )
         .border_style(Style::new().fg(Color::Cyan));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
@@ -3401,7 +3580,35 @@ fn net_history_pane(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
             d
         }
     };
-    let detail_h = (detail.len() as u16).min(inner.height / 2);
+    // A fixed slice of the pane, whatever the selected entry holds: sized per
+    // entry, the list above grew and shrank as the cursor moved between a
+    // one-line roam and a fifteen-line resolver change, and the whole pane
+    // jumped. Kept modest so a short entry doesn't strand a screen of blank
+    // rows. [Enter] expands the slice to the whole entry — the list yields
+    // the rows, by explicit choice — leaving at least a few list rows for
+    // context; Enter again collapses.
+    let detail_h = if detail.is_empty() || inner.height < 8 {
+        0
+    } else if s.net_detail_expanded {
+        (detail.len() as u16).min(inner.height.saturating_sub(4).max(inner.height / 2))
+    } else {
+        (inner.height / 4).clamp(4, 8).min(inner.height / 2)
+    };
+    let mut detail = detail;
+    let h = detail_h as usize;
+    if h > 0 && detail.len() > h {
+        let hidden = detail.len() - (h - 1);
+        detail.truncate(h - 1);
+        detail.push(Line::from(Span::styled(
+            if s.net_detail_expanded {
+                // Even expanded, the pane can be too short for everything.
+                format!("  … +{hidden} more lines — the pane is too short for the rest")
+            } else {
+                format!("  … +{hidden} more lines · ↵ to expand")
+            },
+            Style::new().fg(Color::DarkGray),
+        )));
+    }
     let parts = Layout::vertical([Constraint::Min(1), Constraint::Length(detail_h)]).split(inner);
     let list_area = parts[0];
     let visible = list_area.height as usize;
@@ -3512,6 +3719,27 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         }
     };
 
+    // The address cursor: which of the panel's addresses [W] would ask about,
+    // shown only while this pane holds it. Slots, not text, decide which
+    // entry lights up — a gateway and a resolver are often the same
+    // 192.168.1.1.
+    use crate::app::NetSlot;
+    let addrs = s.netinfo_addrs();
+    let sel: Option<NetSlot> = (s.focus == Panel::NetInfo && s.sub_pane == SubPane::Primary)
+        .then(|| {
+            addrs
+                .get(s.net_sel.min(addrs.len().saturating_sub(1)))
+                .map(|a| a.slot)
+        })
+        .flatten();
+    let hl = |slot: NetSlot, text: String| -> Span<'static> {
+        if sel == Some(slot) {
+            Span::styled(text, Style::new().fg(Color::Black).bg(Color::Cyan))
+        } else {
+            Span::raw(text)
+        }
+    };
+
     // Before the first netinfo sample lands.
     if n.iface.is_empty() {
         f.render_widget(
@@ -3549,38 +3777,36 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         if !n.link_detail.contains("DHCP") {
             type_row.push(Span::styled(" · DHCP", Style::new().fg(Color::Gray)));
         }
-        type_row.push(Span::styled(
-            format!(" ({})", n.dhcp_server),
-            Style::new().fg(Color::Gray),
-        ));
+        type_row.push(Span::styled(" (", Style::new().fg(Color::Gray)));
+        type_row.push(if sel == Some(NetSlot::Dhcp) {
+            hl(NetSlot::Dhcp, n.dhcp_server.clone())
+        } else {
+            Span::styled(n.dhcp_server.clone(), Style::new().fg(Color::Gray))
+        });
+        type_row.push(Span::styled(")", Style::new().fg(Color::Gray)));
     }
 
     let text_w = inner.width as usize;
     let label = |k: &str| Span::styled(format!("{k:<9}"), Style::new().fg(Color::DarkGray));
-    // A value that can outgrow the panel (address lists on multihomed
-    // machines, resolver lists) wraps under its own column instead of
-    // clipping at the border.
-    let kv_wrapped = |k: &str, v: &str| -> Vec<Line<'static>> {
-        column_lines(vec![label(k)], v, Style::new(), 9, text_w)
-    };
 
+    // Interface addresses as individual spans (not one joined string), so
+    // the address cursor can land on each; packed so multihomed lists still
+    // wrap under their own column.
+    let addr_list =
+        |key: &str, list: &[String], slot: fn(usize) -> NetSlot| -> Vec<Line<'static>> {
+            if list.is_empty() {
+                return vec![Line::from(vec![label(key), Span::raw("-")])];
+            }
+            let groups = list
+                .iter()
+                .enumerate()
+                .map(|(i, a)| vec![hl(slot(i), a.clone())])
+                .collect();
+            pack_groups(label(key), groups, text_w)
+        };
     let mut lines = vec![kv("iface", iface), Line::from(type_row)];
-    lines.extend(kv_wrapped(
-        "ipv4",
-        &if n.ipv4.is_empty() {
-            "-".to_string()
-        } else {
-            n.ipv4.join(", ")
-        },
-    ));
-    lines.extend(kv_wrapped(
-        "ipv6",
-        &if n.ipv6.is_empty() {
-            "-".to_string()
-        } else {
-            n.ipv6.join(", ")
-        },
-    ));
+    lines.extend(addr_list("ipv4", &n.ipv4, NetSlot::V4));
+    lines.extend(addr_list("ipv6", &n.ipv6, NetSlot::V6));
     lines.push(kv("mac", dash(&n.mac)));
 
     // A tunnel hides the real path: the encapsulated hops never answer ICMP, so
@@ -3598,9 +3824,13 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
             ));
         }
         lines.push(Line::from(row));
-        lines.extend(kv_wrapped(
-            "gateway",
-            &format!("{}  ({})", dash(&n.gateway_ip), dash(&n.gateway_mac)),
+        lines.extend(pack_groups(
+            label("gateway"),
+            vec![vec![
+                hl(NetSlot::Gateway, dash(&n.gateway_ip)),
+                Span::raw(format!("  ({})", dash(&n.gateway_mac))),
+            ]],
+            text_w,
         ));
         // A split tunnel leaves the default route on the physical NIC, so the
         // gateway above is the real, reachable LAN gateway — internet traffic
@@ -3614,13 +3844,19 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
             Style::new().fg(Color::DarkGray),
         )));
     } else {
-        let mut row = format!("{}  ({})", dash(&n.gateway_ip), dash(&n.gateway_mac));
+        let mut groups = vec![vec![
+            hl(NetSlot::Gateway, dash(&n.gateway_ip)),
+            Span::raw(format!("  ({})", dash(&n.gateway_mac))),
+        ]];
         // Both families: name the v6 router too, so "IPv6 broken" has an
         // address to be checked against.
         if !n.gateway_ipv6.is_empty() && n.gateway_ipv6 != n.gateway_ip {
-            row.push_str(&format!("  · v6 {}", n.gateway_ipv6));
+            groups.push(vec![
+                Span::raw("· v6 "),
+                hl(NetSlot::GatewayV6, n.gateway_ipv6.clone()),
+            ]);
         }
-        lines.extend(kv_wrapped("gateway", &row));
+        lines.extend(pack_groups(label("gateway"), groups, text_w));
     }
 
     // How the internet sees this machine — the address beyond the NAT. It is
@@ -3632,7 +3868,7 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
     {
         lines.push(Line::from(vec![
             Span::styled(format!("{:<9}", "public"), Style::new().fg(Color::DarkGray)),
-            Span::raw(t.addr.to_string()),
+            hl(NetSlot::Public, t.addr.to_string()),
             Span::styled(
                 "  · how the internet sees you",
                 Style::new().fg(Color::DarkGray),
@@ -3721,7 +3957,7 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         ]));
     }
 
-    lines.extend(dns_lines(s, text_w));
+    lines.extend(dns_lines(s, text_w, sel));
     if let Some(l) = http_line(s) {
         lines.push(l);
     }
@@ -3955,19 +4191,17 @@ fn dns_graphs(f: &mut Frame, s: &AppState, area: Rect) {
 /// The `dns` rows: each resolver with its reading is one indivisible group —
 /// a line break lands between resolvers, never between an address and its
 /// reading — and continuation lines stay in the value column.
-fn dns_lines(s: &AppState, width: usize) -> Vec<Line<'static>> {
+fn dns_lines(s: &AppState, width: usize, sel: Option<crate::app::NetSlot>) -> Vec<Line<'static>> {
+    use crate::app::NetSlot;
     let label = Span::styled(format!("{:<9}", "dns"), Style::new().fg(Color::DarkGray));
     if s.netinfo.dns.is_empty() {
         return vec![Line::from(vec![label, Span::raw("-")])];
     }
 
-    // The cursor over the resolvers, shown only while this panel holds it —
-    // it exists so [W] has a resolver to ask about.
-    let cursor = (s.focus == Panel::NetInfo && s.sub_pane == SubPane::Primary)
-        .then_some(s.dns_sel.min(s.netinfo.dns.len().saturating_sub(1)));
     let mut groups: Vec<Vec<Span<'static>>> = Vec::new();
     for (i, server) in s.netinfo.dns.iter().enumerate() {
-        let mut g = vec![if cursor == Some(i) {
+        // The address cursor, when it sits on this resolver — [W]'s subject.
+        let mut g = vec![if sel == Some(NetSlot::Dns(i)) {
             Span::styled(
                 server.clone(),
                 Style::new().fg(Color::Black).bg(Color::Cyan),
@@ -4008,14 +4242,24 @@ fn dns_lines(s: &AppState, width: usize) -> Vec<Line<'static>> {
             None if !r.status.is_empty() => r.status.clone(),
             None => "…".to_string(),
         };
-        let mut g = vec![Span::styled(
-            format!("ref {} ({reading})", r.server),
-            Style::new().fg(if r.last_ms.is_none() && !r.status.is_empty() {
-                Color::Yellow
+        let color = if r.last_ms.is_none() && !r.status.is_empty() {
+            Color::Yellow
+        } else {
+            Color::DarkGray
+        };
+        // The server as its own span, so the address cursor can land on it.
+        let mut g = vec![
+            Span::styled("ref ", Style::new().fg(color)),
+            if sel == Some(NetSlot::RefDns) {
+                Span::styled(
+                    r.server.to_string(),
+                    Style::new().fg(Color::Black).bg(Color::Cyan),
+                )
             } else {
-                Color::DarkGray
-            }),
-        )];
+                Span::styled(r.server.to_string(), Style::new().fg(color))
+            },
+            Span::styled(format!(" ({reading})"), Style::new().fg(color)),
+        ];
         if r.hijack == Some(true) {
             g.push(Span::styled(
                 " ⚠ redirects",
@@ -4033,7 +4277,18 @@ fn dns_lines(s: &AppState, width: usize) -> Vec<Line<'static>> {
         )]);
     }
 
-    // Pack whole groups into lines; a break never splits a group.
+    pack_groups(label, groups, width)
+}
+
+/// Pack span groups into lines under a 9-column label, continuing under the
+/// value column; a break never splits a group. Shared by the dns row and the
+/// Network panel's address lists, which highlight individual entries and so
+/// cannot go through plain-text wrapping.
+fn pack_groups(
+    label: Span<'static>,
+    groups: Vec<Vec<Span<'static>>>,
+    width: usize,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
     let mut cur: Vec<Span> = vec![label];
     let mut cur_w = 9usize;
@@ -4874,6 +5129,12 @@ mod tests {
             out.contains("[m] to watch"),
             "unknown rungs say how to fill them"
         );
+        // The absolute read rides along: green rungs say "normal for here",
+        // this line says what that normal is worth anywhere.
+        assert!(
+            out.contains("performance") && out.contains("excellent"),
+            "the absolute performance line is present"
+        );
         assert!(out.contains("no findings"));
         assert!(out.contains("press y or Esc to close"));
     }
@@ -5103,7 +5364,7 @@ mod tests {
             p.record(Some(ms));
             s.dns.push(p);
         }
-        let lines = dns_lines(&s, 40);
+        let lines = dns_lines(&s, 40, None);
         assert!(lines.len() > 1, "three resolvers cannot fit in 40 columns");
         for l in &lines {
             assert!(l.width() <= 40, "line overflows: {l:?}");
@@ -5121,7 +5382,10 @@ mod tests {
 
         // The search domain trails the resolvers when the OS has one.
         s.netinfo.dns_search = vec!["thorpevillage.local".into()];
-        let all: String = dns_lines(&s, 200).iter().map(|l| l.to_string()).collect();
+        let all: String = dns_lines(&s, 200, None)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
         assert!(all.contains("search thorpevillage.local"));
     }
 
@@ -5865,6 +6129,13 @@ mod tests {
             "full screen brings the ↓ column back: {out}"
         );
         assert!(out.contains("Remote addresses · n for next"));
+        // The cursor is a display position; park it on the v6 row wherever
+        // the sort put that, and [W]/[a] act on it.
+        s.remote_sel = s
+            .remote_order()
+            .iter()
+            .position(|&i| s.remotes[i].addr.to_string() == "2606:4700:4700::1111")
+            .unwrap();
         assert_eq!(
             s.selected_addr(),
             Some("2606:4700:4700::1111".parse().unwrap()),
@@ -5906,29 +6177,28 @@ mod tests {
         assert!(out.contains("proc00") && !out.contains("proc29"), "{out}");
         assert!(out.contains('┃'), "scroll cue when rows overflow: {out}");
 
-        // Cursor to the last row in display order: the list scrolls to it.
-        let order = s.process_order();
-        s.proc_sel = *order.last().unwrap();
+        // Cursor to the last display position: the list scrolls to it.
+        s.proc_sel = 29;
         let out = draw(&s, 120, 30);
         assert!(out.contains("proc29") && !out.contains("proc00"), "{out}");
 
-        // Under an ascending name sort the cursor steps through names, not
-        // collector indices.
+        // The cursor is positional: under an ascending name sort row 1 is
+        // proc01; flipping the sort leaves the cursor on row 1, which the
+        // descending list now fills with proc28. Following ([o]) is what
+        // glues it to an item instead.
         s.bw_view = BwView::Processes;
         s.bw_sort = Some((0, false));
         s.proc_sel = 0;
-        let order = s.process_order();
-        assert_eq!(&s.processes[order[0]].name, "proc00");
-        let next = AppState::step_in_order(&order, s.proc_sel, 1);
-        assert_eq!(&s.processes[next].name, "proc01");
-        // Reverse it: stepping "down" from proc00 goes nowhere (it is last).
+        assert_eq!(&s.processes[s.proc_cursor().1.unwrap()].name, "proc00");
+        crate::move_proc_cursor(&mut s, 1);
+        assert_eq!(&s.processes[s.proc_cursor().1.unwrap()].name, "proc01");
         s.bw_sort = Some((0, true));
-        let order = s.process_order();
-        assert_eq!(AppState::step_in_order(&order, 0, 1), 0);
-        assert_eq!(
-            &s.processes[AppState::step_in_order(&order, 0, -1)].name,
-            "proc01"
-        );
+        assert_eq!(&s.processes[s.proc_cursor().1.unwrap()].name, "proc28");
+        // Follow proc01 through the same flip: the cursor rides along.
+        s.follow_proc = Some("proc01".into());
+        assert_eq!(&s.processes[s.proc_cursor().1.unwrap()].name, "proc01");
+        assert_eq!(s.proc_cursor().0, 28, "proc01 sits near the bottom now");
+        s.follow_proc = None;
 
         // A short list draws no cue.
         s.processes.truncate(3);
@@ -6168,7 +6438,6 @@ mod tests {
             "q / Ctrl+C",
             "PgUp/PgDn",
             "Enter",
-            "Space",
             "Shift+R",
             "a",
             "d / Del",
@@ -6206,7 +6475,7 @@ mod tests {
             "procs → remotes → history",
             "full-screen: DNS + history",
             "events / ports / marker",
-            "delete sel. speed test",
+            "del. speed test / zoom",
         ] {
             assert!(
                 out.contains(desc),

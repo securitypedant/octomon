@@ -90,10 +90,12 @@ impl Sample {
     /// Read the current windowed aggregates out of shared state.
     pub fn take(s: &AppState) -> Sample {
         let n = 60;
-        let gw = s
-            .targets
-            .iter()
-            .find(|t| t.discovered && t.addr.to_string() == s.netinfo.gateway_ip);
+        // The same resolution the verdict uses — address first, discovery
+        // label as fallback. Matching only the routing table's gateway_ip
+        // missed the gateway entirely on VPNs, where that is the tunnel's
+        // own address and not the hop discovery pings, so the location never
+        // learned a gateway normal.
+        let gw = crate::verdict::gateway_target(s);
         let (gateway_ms, gateway_p95_ms) = gw
             .map(|g| {
                 let st = g.stats(n);
@@ -310,6 +312,27 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    /// On a VPN the routing table's gateway is the tunnel's own address
+    /// (10.5.0.2) while discovery pings the far end (10.5.0.1): the sample
+    /// must find the gateway by its discovery label, or the location never
+    /// learns a gateway normal — exactly the "gateway —" the locations
+    /// overlay used to show for a VPN whose gateway answered at 15 ms.
+    #[test]
+    fn a_vpn_gateway_still_teaches_the_baseline() {
+        use crate::app::{AppState, TargetStat};
+        let mut s = AppState::new(vec![]);
+        s.netinfo.gateway_ip = "10.5.0.2".into();
+        let mut gw = TargetStat::new("gateway".into(), "10.5.0.1".parse().unwrap());
+        gw.discovered = true;
+        for _ in 0..20 {
+            gw.record_reply(15.0);
+        }
+        s.targets.push(gw);
+        let sample = Sample::take(&s);
+        assert_eq!(sample.gateway_ms, Some(15.0));
+        assert_eq!(sample.gateway_loss_pct, Some(0.0));
     }
 
     #[test]

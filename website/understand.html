@@ -256,6 +256,28 @@
         </details>
 
         <details>
+          <summary>How is the performance grade worked out?</summary>
+          <div class="a">
+            <p>The <em>performance</em> line in the analysis (and the word in
+            the footer) is the deliberate opposite of everything above it: it
+            ignores the location's learned normal entirely and grades the same
+            measurements on one universal scale. Four components are graded —
+            latency (the median across the anchor targets), jitter, packet
+            loss, and bufferbloat once a speed test has measured it — each
+            into excellent / good / fair / poor at fixed steps: latency at
+            50/150/300&nbsp;ms, jitter at 10/30/80&nbsp;ms, loss at
+            0.5/2/5%.</p>
+            <p>The overall grade is the <em>worst</em> component, because one
+            bad dimension is what you feel — 80&nbsp;ms of jitter ruins a call
+            no matter how clean the loss number is. The two readings answer
+            different questions on purpose: every rung can be green ("nothing
+            is wrong <em>for this network</em>") while performance reads poor
+            ("…and this network's normal is still a bad place to take a video
+            call").</p>
+          </div>
+        </details>
+
+        <details>
           <summary>Does running a speed test skew the analysis?</summary>
           <div class="a">
             <p>No. A speed test saturates your link on purpose, so while it

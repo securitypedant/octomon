@@ -32,6 +32,16 @@ pub mod thresholds {
     pub const BLOAT_STEPS_MS: [f64; 4] = [5.0, 30.0, 60.0, 200.0];
     /// Bufferbloat magnitude that earns a finding (the "moderate" step).
     pub const BLOAT_FINDING_MS: f64 = 60.0;
+    /// Absolute performance steps for [`super::Performance`] — the boundaries
+    /// into good / fair / poor (below the first is excellent), judged on the
+    /// median across anchors. Universal scale, no baseline involved: ~50 ms
+    /// is transatlantic fibre, ~300 ms is satellite territory.
+    pub const PERF_LATENCY_STEPS_MS: [f64; 3] = [50.0, 150.0, 300.0];
+    /// Jitter on the same ladder: video calls degrade visibly past ~30 ms
+    /// and fall apart near 80.
+    pub const PERF_JITTER_STEPS_MS: [f64; 3] = [10.0, 30.0, 80.0];
+    /// Loss on the same ladder: interactive traffic feels 2%, 5% breaks it.
+    pub const PERF_LOSS_STEPS_PCT: [f64; 3] = [0.5, 2.0, 5.0];
     pub const USAGE_WARN_PCT: f32 = 60.0;
     pub const USAGE_BAD_PCT: f32 = 85.0;
     pub const RSSI_WEAK_DBM: i32 = -75;
@@ -241,6 +251,19 @@ pub struct Finding {
     pub since: Option<Instant>,
 }
 
+impl Finding {
+    /// A standing property of the network or its configuration — a tunnel in
+    /// the path, a gateway that drops ICMP as policy — rather than an episode
+    /// with an onset. The finding stays; the UI drops the "for 3m 12s" tag,
+    /// which on an always-on VPN would just count octomon's uptime.
+    pub fn steady(&self) -> bool {
+        // GatewayLan at Info severity is exactly the drops-ICMP-but-forwards
+        // note; every real gateway problem raises at Degraded or Down.
+        self.cause == Cause::VpnCaveat
+            || (self.cause == Cause::GatewayLan && self.severity == Severity::Info)
+    }
+}
+
 /// The rank order: causes before their symptoms, then severity, then
 /// confidence, then specificity — except caveat-class causes always sort after
 /// network causes. Symptoms sorting last is what makes this a ladder: a dead
@@ -342,6 +365,42 @@ pub struct Rung {
     pub detail: String,
 }
 
+/// Grade ladder for [`Performance`], worst last so `max` names the component
+/// that drags the connection down.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum PerfGrade {
+    Excellent,
+    Good,
+    Fair,
+    Poor,
+}
+
+impl PerfGrade {
+    pub fn label(self) -> &'static str {
+        match self {
+            PerfGrade::Excellent => "excellent",
+            PerfGrade::Good => "good",
+            PerfGrade::Fair => "fair",
+            PerfGrade::Poor => "poor",
+        }
+    }
+}
+
+/// The absolute performance read: what the connection measures on a universal
+/// scale, deliberately blind to the location's learned normal. The rungs and
+/// findings answer "is anything wrong *for here*?"; this answers what "nothing
+/// wrong here" is worth — on hotel Wi-Fi every rung can be green while the
+/// level of service is poor.
+#[derive(Clone, Debug)]
+pub struct Performance {
+    /// The worst component's grade: one bad dimension is what a call or a
+    /// page load actually feels.
+    pub grade: PerfGrade,
+    /// The component readings ("latency 148ms · jitter 84ms (poor) · …"),
+    /// each annotated with its own grade from fair down.
+    pub detail: String,
+}
+
 /// The full picture: every rung, always in ladder order, plus ranked findings.
 #[derive(Clone, Default, Debug)]
 pub struct Triage {
@@ -351,6 +410,9 @@ pub struct Triage {
     /// Instantaneous (no hysteresis) — what the rules say *right now*. The
     /// footer shows the hysteresis-filtered set from [`VerdictState`] instead.
     pub findings: Vec<Finding>,
+    /// Absolute level of service, independent of the baseline-relative rungs.
+    /// `None` until the anchors have data.
+    pub performance: Option<Performance>,
 }
 
 /// How healthy one probed target looks right now.
@@ -565,8 +627,10 @@ fn fmt_ms(v: Option<f64>) -> String {
 }
 
 /// The auto-discovered gateway target, matched by address first (labels are
-/// only a convention), falling back to the discovery label.
-fn gateway_target(s: &AppState) -> Option<&TargetStat> {
+/// only a convention), falling back to the discovery label. The fallback
+/// matters on a VPN, where the routing table's gateway (the tunnel's own
+/// address) is not the address discovery actually pings.
+pub(crate) fn gateway_target(s: &AppState) -> Option<&TargetStat> {
     s.targets
         .iter()
         .find(|t| t.discovered && t.addr.to_string() == s.netinfo.gateway_ip)
@@ -1985,11 +2049,99 @@ pub fn evaluate(s: &AppState) -> Triage {
         usable,
     );
     let checks = checks(s);
+    let performance = performance(s, &with_data);
     Triage {
         rungs,
         checks,
         findings,
+        performance,
     }
+}
+
+/// The absolute performance read. Medians across anchors, not worst-of: one
+/// struggling anchor is that anchor's problem (and already its own finding);
+/// the general level of service is the typical path. The overall grade is the
+/// worst *component* — high jitter ruins a call no matter how good the loss
+/// number looks.
+fn performance(s: &AppState, with_data: &[&TargetStat]) -> Option<Performance> {
+    let median = |mut v: Vec<f64>| -> Option<f64> {
+        (!v.is_empty()).then(|| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        })
+    };
+    let grade = |v: f64, steps: [f64; 3]| match v {
+        v if v < steps[0] => PerfGrade::Excellent,
+        v if v < steps[1] => PerfGrade::Good,
+        v if v < steps[2] => PerfGrade::Fair,
+        _ => PerfGrade::Poor,
+    };
+
+    let latency = median(
+        with_data
+            .iter()
+            .filter_map(|t| t.stats(th::RECENT).mean)
+            .collect(),
+    )?;
+    let mut parts: Vec<(String, PerfGrade)> = vec![(
+        format!("latency {}", fmt_ms(Some(latency))),
+        grade(latency, th::PERF_LATENCY_STEPS_MS),
+    )];
+    // Jitter warms up from zero; before any dispersion is seen it has no vote.
+    if let Some(jitter) = median(
+        with_data
+            .iter()
+            .map(|t| t.jitter_ms)
+            .filter(|j| *j > 0.0)
+            .collect(),
+    ) {
+        parts.push((
+            format!("jitter {jitter:.0}ms"),
+            grade(jitter, th::PERF_JITTER_STEPS_MS),
+        ));
+    }
+    let loss = median(
+        with_data
+            .iter()
+            .map(|t| t.recent_loss_pct(th::RECENT))
+            .collect(),
+    )
+    .unwrap_or(0.0);
+    parts.push((
+        format!("loss {loss:.0}%"),
+        grade(loss, th::PERF_LOSS_STEPS_PCT),
+    ));
+    // Bufferbloat, when a speed test has measured it. Graded on the same
+    // boundaries the speed-test panel uses, so one +108 ms never reads
+    // "poor" there and something milder here.
+    if let (Some(idle), Some(loaded)) = (s.speedtest.idle_latency_ms, s.speedtest.loaded_latency_ms)
+    {
+        let bloat = (loaded - idle).max(0.0);
+        let [excellent, good, moderate, _] = th::BLOAT_STEPS_MS;
+        parts.push((
+            format!("bloat +{bloat:.0}ms"),
+            grade(bloat, [excellent, good, moderate]),
+        ));
+    }
+
+    let worst = parts.iter().map(|(_, g)| *g).max().expect("parts nonempty");
+    let detail = parts
+        .iter()
+        .map(|(text, g)| {
+            // Name the culprits inline; excellent/good readings speak as bare
+            // numbers.
+            if *g >= PerfGrade::Fair {
+                format!("{text} ({})", g.label())
+            } else {
+                text.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    Some(Performance {
+        grade: worst,
+        detail,
+    })
 }
 
 /// The ladder itself: every area, always present, in blame order. Healthy rungs
@@ -2847,6 +2999,15 @@ pub fn render_text(triage: &Triage, insufficient: Option<&str>) -> String {
             let _ = writeln!(out, "  {} {:<15} {}", glyph_of(c.status), c.name, c.detail);
         }
     }
+    if let Some(p) = &triage.performance {
+        let _ = writeln!(
+            out,
+            "  · {:<15} {} — {}",
+            "performance",
+            p.grade.label(),
+            p.detail
+        );
+    }
     let _ = writeln!(out);
     if let Some(reason) = insufficient {
         let _ = writeln!(out, "  {reason}");
@@ -2925,6 +3086,7 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
         let now = Instant::now();
 
         let mut episodes: Vec<crate::history::Episode> = Vec::new();
+        let net_changes: Vec<crate::app::NetChange>;
         let io = {
             let mut s = state.lock().unwrap();
             let triage = evaluate(&s);
@@ -2963,6 +3125,8 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
                 s.push_event(severity, crate::app::EventCategory::Analysis, message);
             }
 
+            net_changes = std::mem::take(&mut s.net_history_unsaved);
+
             baseline_step(
                 &mut s,
                 &mut healthy_run,
@@ -2978,6 +3142,12 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
                 }
             })
             .await;
+        }
+        // Network changes persist too — the history pane spans sessions.
+        if !net_changes.is_empty() {
+            let _ =
+                tokio::task::spawn_blocking(move || crate::store::append_net_changes(&net_changes))
+                    .await;
         }
 
         // File I/O strictly off the lock.
@@ -3311,6 +3481,66 @@ mod tests {
         let rung = t.rungs.iter().find(|r| r.area == Area::Gateway).unwrap();
         assert_eq!(rung.status, RungStatus::Ok);
         assert!(rung.detail.contains("drops ICMP"), "got: {}", rung.detail);
+    }
+
+    /// The two standing notes — a tunnel in the path, an ICMP-dropping
+    /// gateway — describe how the network *is*, not something that started.
+    /// They render without the "for 3m 12s" tag; real problems keep it.
+    #[test]
+    fn policy_notes_are_steady_and_real_problems_are_not() {
+        let mut s = healthy_state();
+        s.netinfo.tunnel = Some("Cloudflare WARP".into());
+        s.netinfo.tunnel_iface = "utun0".into();
+        let gw = s.targets.iter_mut().find(|t| t.discovered).unwrap();
+        for _ in 0..15 {
+            gw.record_loss();
+        }
+        let t = evaluate(&s);
+        let by_cause = |c: Cause| t.findings.iter().find(|f| f.cause == c).unwrap();
+        assert!(by_cause(Cause::GatewayLan).steady(), "drops-ICMP note");
+        assert!(by_cause(Cause::VpnCaveat).steady(), "tunnel caveat");
+
+        // The same gateway actually failing (anchors dead behind it) is an
+        // episode, and its duration is the story.
+        let mut s = healthy_state();
+        for t in &mut s.targets {
+            for _ in 0..15 {
+                t.record_loss();
+            }
+        }
+        let t = evaluate(&s);
+        assert!(!t.findings[0].steady(), "a real outage keeps its timer");
+    }
+
+    /// The performance line grades on a universal scale, so a connection that
+    /// is perfectly normal *for its location* still reads poor when the
+    /// numbers are poor — and healthy numbers read excellent.
+    #[test]
+    fn performance_is_absolute_where_the_rungs_are_relative() {
+        let p = evaluate(&healthy_state()).performance.expect("has data");
+        assert_eq!(p.grade, PerfGrade::Excellent, "10ms/0% loss: {}", p.detail);
+        assert!(p.detail.contains("latency 10ms"), "got: {}", p.detail);
+
+        // Satellite-grade RTTs on every anchor: poor, and the detail names
+        // the culprit inline.
+        let mut s = AppState::new(vec![
+            probe_ms("Cloudflare", [1, 1, 1, 1], 400.0),
+            probe_ms("Google", [8, 8, 8, 8], 400.0),
+            probe_ms("Quad9", [9, 9, 9, 9], 400.0),
+        ]);
+        s.vitals.cores = vec![10.0; 8];
+        let p = evaluate(&s).performance.expect("has data");
+        assert_eq!(p.grade, PerfGrade::Poor, "got: {}", p.detail);
+        assert!(p.detail.contains("latency 400ms (poor)"), "{}", p.detail);
+    }
+
+    /// Like [`probe`], but every reply at the given RTT.
+    fn probe_ms(label: &str, addr: [u8; 4], rtt: f64) -> TargetStat {
+        let mut t = TargetStat::new(label.into(), IpAddr::V4(Ipv4Addr::from(addr)));
+        for _ in 0..20 {
+            t.record_reply(rtt);
+        }
+        t
     }
 
     #[test]
@@ -4262,6 +4492,7 @@ mod tests {
         let now = Instant::now();
         let with = Triage {
             rungs: vec![],
+            performance: None,
             checks: vec![],
             findings: vec![fake(Cause::GatewayLan)],
         };
@@ -4313,6 +4544,7 @@ mod tests {
         let t0 = Instant::now();
         let with = Triage {
             rungs: vec![],
+            performance: None,
             checks: vec![],
             findings: vec![fake(Cause::SingleDestination)],
         };
@@ -4359,6 +4591,7 @@ mod tests {
         let now = Instant::now();
         let degraded = Triage {
             rungs: vec![],
+            performance: None,
             checks: vec![],
             findings: vec![fake(Cause::GatewayLan)],
         };
@@ -4373,6 +4606,7 @@ mod tests {
         let t = vs.ingest(
             Triage {
                 rungs: vec![],
+                performance: None,
                 checks: vec![],
                 findings: vec![worse.clone()],
             },
@@ -4387,6 +4621,7 @@ mod tests {
         let t = vs.ingest(
             Triage {
                 rungs: vec![],
+                performance: None,
                 checks: vec![],
                 findings: vec![worse],
             },
@@ -4402,6 +4637,7 @@ mod tests {
         let now = Instant::now();
         let with = Triage {
             rungs: vec![],
+            performance: None,
             checks: vec![],
             findings: vec![fake(Cause::WideInternet)],
         };

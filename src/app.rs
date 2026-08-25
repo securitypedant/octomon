@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 use std::net::IpAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Fixed-capacity ring buffer of samples backing sparklines / charts.
 #[derive(Clone)]
@@ -129,7 +129,19 @@ pub struct TargetStat {
     /// Sliding window of recent outcomes (`true` = reply received).
     pub window: VecDeque<bool>,
     pub history: History,
+    /// Set by [`Self::reset`]: losses before this instant are the switchover
+    /// itself — routes settling, a VPN handshaking, probes from the old
+    /// network timing out — not the new path, and are dropped instead of
+    /// recorded. The first reply ends the grace early: from then on losses
+    /// are real. Without this, five timeouts landing in a near-empty window
+    /// read as 30% loss and take the whole window to decay.
+    pub settle_until: Option<Instant>,
 }
+
+/// How long after a stats reset losses stay attributed to the switchover.
+/// Comfortably past the 1 s probe timeout, and enough for a VPN to finish
+/// coming up; a path still failing beyond it is genuinely failing.
+const SETTLE: Duration = Duration::from_secs(8);
 
 impl TargetStat {
     pub fn new(label: String, addr: IpAddr) -> Self {
@@ -147,11 +159,14 @@ impl TargetStat {
             recv: 0,
             window: VecDeque::with_capacity(WINDOW),
             history: History::new(HISTORY),
+            settle_until: None,
         }
     }
 
     /// Record a successful probe with round-trip time in milliseconds.
     pub fn record_reply(&mut self, rtt_ms: f64) {
+        // The path demonstrably works: whatever grace a reset opened is over.
+        self.settle_until = None;
         self.sent += 1;
         self.recv += 1;
         self.push_window(true);
@@ -167,8 +182,13 @@ impl TargetStat {
         self.history.push(rtt_ms);
     }
 
-    /// Record a lost / timed-out probe.
+    /// Record a lost / timed-out probe — unless a reset just happened, in
+    /// which case the loss belongs to the switchover, not the path (see
+    /// [`Self::settle_until`]).
     pub fn record_loss(&mut self) {
+        if self.settle_until.is_some_and(|t| Instant::now() < t) {
+            return;
+        }
         self.sent += 1;
         self.push_window(false);
         self.last_rtt_ms = None;
@@ -195,6 +215,7 @@ impl TargetStat {
         self.web.hist.data.clear();
         self.web.last_ttfb_ms = None;
         self.web.fails = 0;
+        self.settle_until = Some(Instant::now() + SETTLE);
     }
 
     /// True for auto-discovered mid-path hops ("hop 3→1.1.1.1") — routers, not
@@ -424,6 +445,43 @@ pub struct RemoteBandwidth {
     /// Rates this interval; zero when idle.
     pub down_bps: f64,
     pub up_bps: f64,
+}
+
+/// Which of the Network panel's addresses a [`NetAddr`] is: the renderer
+/// compares slots (not tokens — a gateway and a resolver are often the same
+/// 192.168.1.1) to decide which one carries the cursor highlight.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NetSlot {
+    Dhcp,
+    V4(usize),
+    V6(usize),
+    Gateway,
+    GatewayV6,
+    Public,
+    Dns(usize),
+    RefDns,
+}
+
+impl NetSlot {
+    /// Which panel row the slot renders on: ↑/↓ hop between rows, ←/→ walk
+    /// the entries within one (the resolvers sit side by side).
+    pub fn row(self) -> u8 {
+        match self {
+            NetSlot::Dhcp => 0,
+            NetSlot::V4(_) => 1,
+            NetSlot::V6(_) => 2,
+            NetSlot::Gateway | NetSlot::GatewayV6 => 3,
+            NetSlot::Public => 4,
+            NetSlot::Dns(_) | NetSlot::RefDns => 5,
+        }
+    }
+}
+
+/// One whois-able address in the Network panel; see [`AppState::netinfo_addrs`].
+#[derive(Clone, Debug)]
+pub struct NetAddr {
+    pub slot: NetSlot,
+    pub addr: IpAddr,
 }
 
 /// Which list the bandwidth panel's talkers table shows.
@@ -1032,7 +1090,7 @@ impl ProxyConfig {
 /// machine is attached changed. The events overlay has the one-line version;
 /// this keeps the before/after detail so "what was the signal when it roamed"
 /// or "which address did we have on the old network" is answerable later.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NetChange {
     /// Unix timestamp (seconds).
     pub at: i64,
@@ -1045,7 +1103,7 @@ pub struct NetChange {
     pub detail: Vec<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum NetChangeKind {
     /// An interface appeared / vanished.
     IfaceUp,
@@ -1302,7 +1360,7 @@ mod tests {
         let mut s = AppState::new(vec![]);
         s.focus = Panel::NetInfo;
         s.netinfo.dns = vec!["192.168.1.4".into(), "172.64.36.1".into()];
-        s.dns_sel = 1;
+        s.net_sel = 1;
         assert_eq!(
             s.selected_addr(),
             Some(IpAddr::V4(Ipv4Addr::new(172, 64, 36, 1)))
@@ -1312,6 +1370,30 @@ mod tests {
         s.sub_pane = SubPane::Primary;
         s.netinfo.dns.clear();
         assert_eq!(s.selected_addr(), None, "no resolvers, nothing to ask");
+    }
+
+    /// The Network panel's cursor walks every address the panel shows —
+    /// interface, gateway, resolvers — in visual order, and duplicates stay
+    /// distinct stops (a gateway that is also the resolver is both).
+    #[test]
+    fn network_panel_cursor_walks_every_address() {
+        let mut s = AppState::new(vec![]);
+        s.focus = Panel::NetInfo;
+        s.netinfo.ipv4 = vec!["10.0.0.5/24".into()];
+        s.netinfo.gateway_ip = "10.0.0.1".into();
+        s.netinfo.dns = vec!["10.0.0.1".into()];
+        assert_eq!(s.netinfo_addrs().len(), 3);
+        s.net_sel = 0;
+        assert_eq!(
+            s.selected_addr(),
+            Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))),
+            "the /24 suffix is display, not part of the address"
+        );
+        s.net_sel = 1;
+        assert_eq!(
+            s.selected_addr(),
+            Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+        );
     }
 
     #[test]
@@ -1421,6 +1503,27 @@ mod tests {
         // p95 index = round(99 * 0.95) = 94 -> value 95
         assert_eq!(st.p95, Some(95.0));
         assert!((st.stddev - 28.866).abs() < 0.01);
+    }
+
+    /// Losses right after a reset are the switchover (routes settling, a VPN
+    /// handshaking, stale probes timing out), not the new path: they are
+    /// dropped, so the loss column starts at 0% instead of reading 30% and
+    /// trickling down as the window refills. The first reply ends the grace.
+    #[test]
+    fn losses_right_after_a_reset_are_the_switchover_not_the_path() {
+        let mut t = TargetStat::new("a".into(), IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
+        for _ in 0..10 {
+            t.record_reply(10.0);
+        }
+        t.reset();
+        for _ in 0..5 {
+            t.record_loss(); // in-flight probes from the old network
+        }
+        assert_eq!(t.loss_pct(), 0.0, "switchover losses are not the path's");
+        assert_eq!(t.sent, 0, "not even counted as sent");
+        t.record_reply(12.0); // the new path works — the grace is over
+        t.record_loss();
+        assert_eq!(t.loss_pct(), 50.0, "losses after first proof are real");
     }
 
     #[test]
@@ -1840,9 +1943,21 @@ pub struct AppState {
     pub net_history: VecDeque<NetChange>,
     /// Cursor into `net_history` (0 = newest) when that pane holds it.
     pub net_history_sel: usize,
-    /// Cursor over the resolvers in the Network panel's dns row, so [W] can
-    /// ask who runs one.
-    pub dns_sel: usize,
+    /// [Enter] on the history pane: the selected entry's detail block grows
+    /// to its full length (the list yields the rows) instead of the fixed
+    /// slice. Sticky while browsing; Enter again collapses.
+    pub net_detail_expanded: bool,
+    /// Changes pushed since the verdict tick last persisted the history —
+    /// file IO stays off the collectors' lock paths.
+    pub net_history_unsaved: Vec<NetChange>,
+    /// Cursor over every address the Network panel shows (interface, gateway,
+    /// public, resolvers…), so [W] can ask who runs any of them. Indexes
+    /// [`Self::netinfo_addrs`].
+    pub net_sel: usize,
+    /// True while the [y] analysis (or a sibling overlay) was opened from the
+    /// Bandwidth zoom: the zoomed table stays drawn behind it, and closing
+    /// the overlay returns to the zoom instead of dropping it.
+    pub zoom_behind: bool,
     /// Path-MTU probe result, once it has run; and why it could not, when it
     /// could not (an OS that ignores Don't-Fragment, no UDP out).
     pub pmtu: Option<PmtuResult>,
@@ -1874,12 +1989,19 @@ pub struct AppState {
     pub bw_reset: bool,
     /// Whether the talkers table lists processes or remote addresses.
     pub bw_view: BwView,
-    /// Row cursor in the remotes list, as an index into `remotes` (so W and a
-    /// act on the right address whatever the sort).
+    /// Row cursor in the remotes list, as a *display position* (0 = top row
+    /// as drawn): the cursor holds its place while rows re-rank beneath it,
+    /// so watching the top talkers doesn't mean chasing them. [W] and [a]
+    /// act on whatever row currently sits at the position — see
+    /// [`Self::remote_cursor`], which also resolves follow mode.
     pub remote_sel: usize,
-    /// Row cursor in the process list, an index into `processes`. Nothing acts
-    /// on a process; the cursor is what scrolls the list.
+    /// Row cursor in the process list, a display position like `remote_sel`.
     pub proc_sel: usize,
+    /// [o]: the process the cursor is glued to — the pre-positional
+    /// behaviour, opted into for the one row being watched.
+    pub follow_proc: Option<String>,
+    /// [o] on the remotes table: the followed address.
+    pub follow_remote: Option<IpAddr>,
     /// Availability of per-process attribution on this platform.
     pub proc_status: ProcStatus,
     /// Column cursor over the top-talkers header. Processes:
@@ -2093,7 +2215,10 @@ impl AppState {
             egress: None,
             net_history: VecDeque::new(),
             net_history_sel: 0,
-            dns_sel: 0,
+            net_detail_expanded: false,
+            net_history_unsaved: Vec::new(),
+            net_sel: 0,
+            zoom_behind: false,
             pmtu: None,
             pmtu_error: None,
             signal: SignalState::default(),
@@ -2112,6 +2237,8 @@ impl AppState {
             bw_view: BwView::Processes,
             remote_sel: 0,
             proc_sel: 0,
+            follow_proc: None,
+            follow_remote: None,
             pinned_procs: Vec::new(),
             pinned_remotes: Vec::new(),
             proc_status: ProcStatus::Probing,
@@ -2194,6 +2321,8 @@ impl AppState {
         self.bw_view = live.bw_view;
         self.remote_sel = live.remote_sel;
         self.proc_sel = live.proc_sel;
+        self.follow_proc = live.follow_proc.clone();
+        self.follow_remote = live.follow_remote;
         self.bw_col = live.bw_col;
         self.bw_sort = live.bw_sort;
         self.pinned_procs = live.pinned_procs.clone();
@@ -2213,7 +2342,8 @@ impl AppState {
         self.whois_scroll = live.whois_scroll;
         self.triage_scroll = live.triage_scroll;
         self.net_history_sel = live.net_history_sel;
-        self.dns_sel = live.dns_sel;
+        self.net_detail_expanded = live.net_detail_expanded;
+        self.net_sel = live.net_sel;
         self.logging_requested = live.logging_requested;
         self.log = live.log.clone();
         // Things the user asked for by hand: their results are wanted now.
@@ -2306,13 +2436,18 @@ impl AppState {
         if self.net_history.len() == NET_HISTORY_CAP {
             self.net_history.pop_front();
         }
-        self.net_history.push_back(NetChange {
+        let change = NetChange {
             at: chrono::Utc::now().timestamp(),
             kind,
             iface,
             summary,
             detail,
-        });
+        };
+        // Queued for the verdict tick to persist off the lock: the history
+        // survives quitting, so "what changed yesterday evening" still has
+        // an answer today.
+        self.net_history_unsaved.push(change.clone());
+        self.net_history.push_back(change);
     }
 
     /// The locations as the overlay lists them: the network we are on *now*
@@ -2385,15 +2520,94 @@ impl AppState {
             }
             Panel::Quality => self.targets.get(self.selected).map(|t| t.addr),
             Panel::Bandwidth => self.selected_remote().map(|r| r.addr),
-            // The resolver under the cursor: on an unfamiliar network, "who
-            // is this DNS server DHCP gave me" is a fair question.
-            Panel::NetInfo if self.sub_pane == SubPane::Primary => self
-                .netinfo
-                .dns
-                .get(self.dns_sel)
-                .and_then(|d| d.parse().ok()),
+            // The address under the cursor — any of the panel's addresses:
+            // "who is this DNS server / gateway / public IP" are all fair
+            // questions on an unfamiliar network. Clamped the way the panel
+            // clamps its highlight, so [W] always asks about the entry that
+            // is actually lit.
+            Panel::NetInfo if self.sub_pane == SubPane::Primary => {
+                let addrs = self.netinfo_addrs();
+                addrs
+                    .get(self.net_sel.min(addrs.len().saturating_sub(1)))
+                    .map(|a| a.addr)
+            }
             _ => None,
         }
+    }
+
+    /// Every address the Network panel displays, in the panel's visual order —
+    /// the list the ↑/↓ cursor walks so [W] can whois any of them. Rebuilt on
+    /// demand: the panel re-renders from the same call, which keeps the
+    /// highlight and the lookup pointing at the same entry.
+    pub fn netinfo_addrs(&self) -> Vec<NetAddr> {
+        let mut out = Vec::new();
+        let mut push = |slot: NetSlot, token: &str| {
+            // Interface addresses carry their prefix ("172.22.1.161/22"),
+            // which the lookup drops.
+            if let Ok(addr) = token.split('/').next().unwrap_or(token).parse() {
+                out.push(NetAddr { slot, addr });
+            }
+        };
+        push(NetSlot::Dhcp, &self.netinfo.dhcp_server);
+        for (i, a) in self.netinfo.ipv4.iter().enumerate() {
+            push(NetSlot::V4(i), a);
+        }
+        for (i, a) in self.netinfo.ipv6.iter().enumerate() {
+            push(NetSlot::V6(i), a);
+        }
+        push(NetSlot::Gateway, &self.netinfo.gateway_ip);
+        if self.netinfo.gateway_ipv6 != self.netinfo.gateway_ip {
+            push(NetSlot::GatewayV6, &self.netinfo.gateway_ipv6);
+        }
+        if let Some(t) = self
+            .targets
+            .iter()
+            .find(|t| t.discovered && t.label.contains("public"))
+        {
+            let token = t.addr.to_string();
+            push(NetSlot::Public, &token);
+        }
+        for (i, d) in self.netinfo.dns.iter().enumerate() {
+            push(NetSlot::Dns(i), d);
+        }
+        if let Some(r) = self.dns.iter().find(|p| p.reference) {
+            let token = r.server.to_string();
+            push(NetSlot::RefDns, &token);
+        }
+        out
+    }
+
+    /// The processes cursor resolved to (display position, underlying index):
+    /// the followed process's current row while [o] is following one, else
+    /// the parked position with whatever row has ranked into it. `None` index
+    /// on an empty list.
+    pub fn proc_cursor(&self) -> (usize, Option<usize>) {
+        let order = self.process_order();
+        if order.is_empty() {
+            return (0, None);
+        }
+        if let Some(name) = &self.follow_proc
+            && let Some(pos) = order.iter().position(|&i| self.processes[i].name == *name)
+        {
+            return (pos, Some(order[pos]));
+        }
+        let pos = self.proc_sel.min(order.len() - 1);
+        (pos, Some(order[pos]))
+    }
+
+    /// The remotes cursor, resolved like [`Self::proc_cursor`].
+    pub fn remote_cursor(&self) -> (usize, Option<usize>) {
+        let order = self.remote_order();
+        if order.is_empty() {
+            return (0, None);
+        }
+        if let Some(addr) = self.follow_remote
+            && let Some(pos) = order.iter().position(|&i| self.remotes[i].addr == addr)
+        {
+            return (pos, Some(order[pos]));
+        }
+        let pos = self.remote_sel.min(order.len() - 1);
+        (pos, Some(order[pos]))
     }
 
     /// The remote address under the cursor, when the bandwidth panel is showing
@@ -2405,7 +2619,7 @@ impl AppState {
         {
             return None;
         }
-        self.remotes.get(self.remote_sel)
+        self.remote_cursor().1.map(|i| &self.remotes[i])
     }
 
     /// Whether the process list holds the row cursor.
@@ -2490,20 +2704,6 @@ impl AppState {
         order
     }
 
-    /// Move a row cursor `delta` places through `order`, returning the new
-    /// index into the underlying list. A cursor sitting on a row that has
-    /// gone (the list shrank) resumes from the end.
-    pub fn step_in_order(order: &[usize], current: usize, delta: isize) -> usize {
-        if order.is_empty() {
-            return 0;
-        }
-        let pos = order
-            .iter()
-            .position(|&i| i == current)
-            .unwrap_or(order.len() - 1) as isize;
-        order[(pos + delta).clamp(0, order.len() as isize - 1) as usize]
-    }
-
     /// Number of recent samples the current window covers.
     ///
     /// Clamped to what a target actually keeps. Asking for more than the ring
@@ -2566,7 +2766,8 @@ impl AppState {
                 2 => st.mean.unwrap_or(f64::INFINITY),
                 3 => st.p95.unwrap_or(f64::INFINITY),
                 4 => st.max.unwrap_or(f64::INFINITY),
-                5 => t.loss_pct(),
+                5 => t.jitter_ms,
+                6 => t.loss_pct(),
                 _ => 0.0,
             }
         };

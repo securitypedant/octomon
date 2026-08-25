@@ -375,7 +375,7 @@ pub fn export_events(events: Vec<EventItem>) -> Result<std::path::PathBuf, Strin
 
 /// Quote a CSV field when it contains anything that would break parsing.
 /// Target labels and process names are user- and system-supplied.
-fn field(v: &str) -> String {
+pub fn field(v: &str) -> String {
     if v.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", v.replace('"', "\"\""))
     } else {

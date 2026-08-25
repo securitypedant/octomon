@@ -91,6 +91,13 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr) {
         // ASN lookup just leaves them out.
         let asn_rows = asn.unwrap_or_default();
 
+        // Every completed lookup also lands in whois.log in the data folder:
+        // a running reference of "who owned that address when I asked", and
+        // it rides into the [D] bundle with the rest of the data files.
+        // Composed before the lock; written off the async path.
+        let entry = format_log_entry(addr, &outcome, &asn_rows);
+        tokio::task::spawn_blocking(move || append_log(&entry));
+
         let mut s = state.lock().unwrap();
         // The user may have asked about a different address meanwhile.
         let Some(w) = s.whois.as_mut().filter(|w| w.addr == addr) else {
@@ -111,6 +118,63 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr) {
             }
         }
     });
+}
+
+/// A finished registration lookup: structured fields, raw whois lines, and
+/// which source answered.
+type Registration = (Vec<(String, String)>, Vec<String>, String);
+
+/// One whois.log entry: a dated header, then the same rows the overlay shows
+/// — structured fields (registration + ASN), raw whois text when the system
+/// tool answered instead, the error when neither did.
+fn format_log_entry(
+    addr: IpAddr,
+    outcome: &Result<Registration, String>,
+    asn_rows: &[(String, String)],
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = format!(
+        "=== {addr} · {} ===\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    );
+    match outcome {
+        Ok((fields, raw, source)) => {
+            let _ = writeln!(out, "source: {source}");
+            for (k, v) in fields.iter().chain(asn_rows) {
+                let _ = writeln!(out, "{k}: {v}");
+            }
+            for line in raw {
+                let _ = writeln!(out, "{line}");
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(out, "error: {e}");
+            for (k, v) in asn_rows {
+                let _ = writeln!(out, "{k}: {v}");
+            }
+        }
+    }
+    out.push('\n');
+    out
+}
+
+/// Append an entry to `<data dir>/whois.log`. Best-effort: a full disk or a
+/// missing home directory must not take the lookup overlay down with it.
+fn append_log(entry: &str) {
+    use std::io::Write as _;
+    let Some(dir) = crate::store::data_dir() else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("whois.log"))
+    {
+        let _ = f.write_all(entry.as_bytes());
+    }
 }
 
 /// The announcing ASN for `addr` from RIPEstat: `asn` and `prefix` rows, or

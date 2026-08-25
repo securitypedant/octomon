@@ -169,6 +169,9 @@ async fn main() -> Result<()> {
         s.speed_history = history;
         s.speed_total = total;
         s.history = history::load();
+        // The network history spans sessions: yesterday's roams and VPN
+        // flips are still on record today.
+        s.net_history = store::load_net_history();
         s.logging_requested = cli.log;
         // Which tools ship by default varies sharply by distribution, so a
         // missing binary is a normal condition. Say so up front rather than
@@ -654,17 +657,67 @@ fn delete_selected_speedtest(s: &mut AppState) -> Side {
 /// the selection survives closing the zoom.
 fn zoom_move(s: &mut AppState, delta: isize) {
     match s.zoom_view {
-        app::ZoomView::Processes => {
-            let order = s.process_order();
-            s.proc_sel = AppState::step_in_order(&order, s.proc_sel, delta);
-        }
-        app::ZoomView::Remotes => {
-            let order = s.remote_order();
-            s.remote_sel = AppState::step_in_order(&order, s.remote_sel, delta);
-        }
+        app::ZoomView::Processes => move_proc_cursor(s, delta),
+        app::ZoomView::Remotes => move_remote_cursor(s, delta),
         app::ZoomView::Speedtests => {
             let last = s.speed_history.len().saturating_sub(1) as isize;
             s.speed_sel = (s.speed_sel as isize + delta).clamp(0, last.max(0)) as usize;
+        }
+    }
+}
+
+/// Step the processes cursor by display position. While [o] is following a
+/// row, moving re-anchors the follow to whatever the cursor lands on — the
+/// mode means "track what I select", not "trap me on one row".
+fn move_proc_cursor(s: &mut AppState, delta: isize) {
+    let len = s.processes.len();
+    if len == 0 {
+        return;
+    }
+    let (pos, _) = s.proc_cursor();
+    let new = (pos as isize + delta).clamp(0, len as isize - 1) as usize;
+    s.proc_sel = new;
+    if s.follow_proc.is_some() {
+        s.follow_proc = s
+            .process_order()
+            .get(new)
+            .map(|&i| s.processes[i].name.clone());
+    }
+}
+
+/// See [`move_proc_cursor`].
+fn move_remote_cursor(s: &mut AppState, delta: isize) {
+    let len = s.remotes.len();
+    if len == 0 {
+        return;
+    }
+    let (pos, _) = s.remote_cursor();
+    let new = (pos as isize + delta).clamp(0, len as isize - 1) as usize;
+    s.remote_sel = new;
+    if s.follow_remote.is_some() {
+        s.follow_remote = s.remote_order().get(new).map(|&i| s.remotes[i].addr);
+    }
+}
+
+/// [o]: glue the cursor to the row it is on, or release it. On release the
+/// cursor parks at the row's current position rather than snapping back.
+fn toggle_follow(s: &mut AppState) {
+    match s.bw_view {
+        BwView::Processes => {
+            if s.follow_proc.is_some() {
+                s.proc_sel = s.proc_cursor().0;
+                s.follow_proc = None;
+            } else {
+                s.follow_proc = s.proc_cursor().1.map(|i| s.processes[i].name.clone());
+            }
+        }
+        BwView::Remotes => {
+            if s.follow_remote.is_some() {
+                s.remote_sel = s.remote_cursor().0;
+                s.follow_remote = None;
+            } else {
+                s.follow_remote = s.remote_cursor().1.map(|i| s.remotes[i].addr);
+            }
         }
     }
 }
@@ -711,17 +764,52 @@ fn move_cursor(s: &mut AppState, delta: isize) {
             s.speed_sel = (s.speed_sel as isize + delta).clamp(0, last.max(0)) as usize;
         }
         // The network history list, newest first: "up" is toward the newest.
+        // The detail expansion is sticky on purpose: browsing entry to entry
+        // with the full story showing is what it was expanded for.
         Panel::NetInfo if secondary => {
             let last = s.net_history.len().saturating_sub(1) as isize;
             s.net_history_sel = (s.net_history_sel as isize + delta).clamp(0, last.max(0)) as usize;
         }
-        // The talkers cursors walk the rows as drawn, whatever the sort.
-        Panel::Bandwidth if s.bw_view == BwView::Remotes => {
-            s.remote_sel = AppState::step_in_order(&s.remote_order(), s.remote_sel, delta);
+        // ↑/↓ hop between the panel's *rows* (ipv4 → ipv6 → gateway → dns…),
+        // landing on each row's first address; ←/→ walk the entries within a
+        // row. One press per visual line, not per address.
+        Panel::NetInfo => {
+            let addrs = s.netinfo_addrs();
+            if addrs.is_empty() {
+                return;
+            }
+            let mut cur = s.net_sel.min(addrs.len() - 1);
+            for _ in 0..delta.unsigned_abs() {
+                let row = addrs[cur].slot.row();
+                let next = if delta > 0 {
+                    addrs
+                        .iter()
+                        .position(|a| a.slot.row() > row)
+                        .filter(|&i| i > cur)
+                } else {
+                    // The previous row's first entry.
+                    addrs[..cur]
+                        .iter()
+                        .rposition(|a| a.slot.row() < row)
+                        .map(|last_prev| {
+                            let prev_row = addrs[last_prev].slot.row();
+                            addrs
+                                .iter()
+                                .position(|a| a.slot.row() == prev_row)
+                                .unwrap_or(last_prev)
+                        })
+                };
+                match next {
+                    Some(i) => cur = i,
+                    None => break,
+                }
+            }
+            s.net_sel = cur;
         }
-        Panel::Bandwidth => {
-            s.proc_sel = AppState::step_in_order(&s.process_order(), s.proc_sel, delta);
-        }
+        // The talkers cursors are positional: they hold their row while the
+        // sort re-ranks beneath them (unless [o] is following an item).
+        Panel::Bandwidth if s.bw_view == BwView::Remotes => move_remote_cursor(s, delta),
+        Panel::Bandwidth => move_proc_cursor(s, delta),
         _ => {}
     }
 }
@@ -920,7 +1008,16 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.input_buffer.clear();
                     s.input_mode = InputMode::ConfirmReset;
                 }
-                KeyCode::Esc => s.overlay = Overlay::None,
+                KeyCode::Esc => {
+                    // From the analysis-over-zoom, Esc peels one layer: back
+                    // to the zoomed table, not all the way out.
+                    s.overlay = if s.zoom_behind && s.overlay == Overlay::Triage {
+                        Overlay::Zoom
+                    } else {
+                        Overlay::None
+                    };
+                    s.zoom_behind = false;
+                }
                 KeyCode::Char('?') => {
                     s.overlay = if s.overlay == Overlay::Help {
                         Overlay::None
@@ -930,12 +1027,26 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 }
                 KeyCode::Char('y') => {
                     s.triage_scroll = 0;
-                    s.overlay = if s.overlay == Overlay::Triage {
-                        Overlay::None
-                    } else {
-                        Overlay::Triage
+                    s.overlay = match s.overlay {
+                        // Over the zoom the analysis floats on top — the
+                        // zoomed table stays drawn behind it, and closing
+                        // the analysis lands back on it.
+                        Overlay::Zoom => {
+                            s.zoom_behind = true;
+                            Overlay::Triage
+                        }
+                        Overlay::Triage if s.zoom_behind => {
+                            s.zoom_behind = false;
+                            Overlay::Zoom
+                        }
+                        Overlay::Triage => Overlay::None,
+                        _ => Overlay::Triage,
                     };
                 }
+                // The support bundle works from any overlay — reading the
+                // zoomed table or the analysis is exactly when the evidence
+                // worth sending is on screen.
+                KeyCode::Char('D') => side = Side::DumpBundle(Box::new(s.clone())),
                 KeyCode::Char('e') => {
                     s.overlay = if s.overlay == Overlay::Events {
                         Overlay::None
@@ -1058,6 +1169,33 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 {
                     side = delete_selected_speedtest(&mut s);
                 }
+                // The zoomed talkers sort exactly like their compact versions:
+                // ←/→ move the column cursor, Enter sorts and flips. The
+                // speed-test history stays chronological.
+                KeyCode::Left
+                    if s.overlay == Overlay::Zoom && s.zoom_view != app::ZoomView::Speedtests =>
+                {
+                    s.bw_col = s.bw_col.saturating_sub(1);
+                }
+                KeyCode::Right
+                    if s.overlay == Overlay::Zoom && s.zoom_view != app::ZoomView::Speedtests =>
+                {
+                    s.bw_col = (s.bw_col + 1).min(6);
+                }
+                KeyCode::Enter
+                    if s.overlay == Overlay::Zoom && s.zoom_view != app::ZoomView::Speedtests =>
+                {
+                    let col = s.bw_col;
+                    s.bw_sort = match s.bw_sort {
+                        Some((c, desc)) if c == col => Some((c, !desc)),
+                        _ => Some((col, col != 0)), // name asc, metrics desc
+                    };
+                }
+                KeyCode::Char('o')
+                    if s.overlay == Overlay::Zoom && s.zoom_view != app::ZoomView::Speedtests =>
+                {
+                    toggle_follow(&mut s);
+                }
                 KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Whois => {
                     s.whois_scroll = s.whois_scroll.saturating_sub(1);
                 }
@@ -1162,6 +1300,40 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         side = Side::ForgetLocation(key);
                     }
                 }
+                // Pause works from any overlay — reading a zoomed table or
+                // the analysis is exactly when one wants the numbers to hold
+                // still. Shift+P everywhere, so plain 'p' stays pin on the
+                // talkers lists without a mode-dependent surprise.
+                KeyCode::Char('P') => s.paused = !s.paused,
+                // Pinning works in the zoomed talkers too — same keys as the
+                // compact lists they magnify.
+                KeyCode::Char('p') | KeyCode::Char('u')
+                    if s.overlay == Overlay::Zoom
+                        && s.zoom_view != app::ZoomView::Speedtests
+                        && s.proc_status == app::ProcStatus::Supported =>
+                {
+                    let pin = key.code == KeyCode::Char('p');
+                    match s.zoom_view {
+                        app::ZoomView::Remotes => {
+                            if let Some(addr) = s.remote_cursor().1.map(|i| s.remotes[i].addr) {
+                                s.pinned_remotes.retain(|a| *a != addr);
+                                if pin {
+                                    s.pinned_remotes.push(addr);
+                                }
+                            }
+                        }
+                        _ => {
+                            if let Some(name) =
+                                s.proc_cursor().1.map(|i| s.processes[i].name.clone())
+                            {
+                                s.pinned_procs.retain(|n| *n != name);
+                                if pin {
+                                    s.pinned_procs.push(name);
+                                }
+                            }
+                        }
+                    }
+                }
                 KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Locations => {
                     s.locations_sel = s.locations_sel.saturating_sub(1);
                 }
@@ -1230,7 +1402,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 // On the talkers lists, 'p' pins the row under the cursor to
                 // the top and 'u' unpins it — a session-only watch list, so
                 // one row can be tracked while the rest keeps re-sorting.
-                // (This shadows pause there; 'p' still pauses elsewhere.)
+                // (Pause is Shift+P, so the two never collide.)
                 KeyCode::Char('p') | KeyCode::Char('u')
                     if s.focus == Panel::Bandwidth
                         && s.sub_pane == SubPane::Primary
@@ -1239,7 +1411,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     let pin = key.code == KeyCode::Char('p');
                     match s.bw_view {
                         BwView::Remotes => {
-                            if let Some(addr) = s.remotes.get(s.remote_sel).map(|r| r.addr) {
+                            if let Some(addr) = s.remote_cursor().1.map(|i| s.remotes[i].addr) {
                                 s.pinned_remotes.retain(|a| *a != addr);
                                 if pin {
                                     s.pinned_remotes.push(addr);
@@ -1247,7 +1419,8 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                             }
                         }
                         BwView::Processes => {
-                            if let Some(name) = s.processes.get(s.proc_sel).map(|p| p.name.clone())
+                            if let Some(name) =
+                                s.proc_cursor().1.map(|i| s.processes[i].name.clone())
                             {
                                 s.pinned_procs.retain(|n| *n != name);
                                 if pin {
@@ -1257,7 +1430,20 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         }
                     }
                 }
-                KeyCode::Char('p') => s.paused = !s.paused,
+                // 'o' follows the row under the cursor: the cursor (and the
+                // scroll) stay with that row as the sort re-ranks it; again
+                // to release. The default is deliberately positional —
+                // watching the top of the table is the common case, and a
+                // cursor glued to a re-ranking row drags the view around.
+                KeyCode::Char('o')
+                    if s.focus == Panel::Bandwidth && s.sub_pane == SubPane::Primary =>
+                {
+                    toggle_follow(&mut s);
+                }
+                // Shift+P pauses, everywhere: plain 'p' belongs to pin on the
+                // talkers lists, and a key that changes meaning per panel is
+                // the confusion this replaces.
+                KeyCode::Char('P') => s.paused = !s.paused,
                 KeyCode::Char('r') => {
                     s.refresh_at = Some(std::time::Instant::now());
                     side = Side::Refresh;
@@ -1328,20 +1514,6 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         );
                     }
                 }
-                // Space toggles the active sort direction in the focused panel.
-                KeyCode::Char(' ') => match s.focus {
-                    Panel::Quality => {
-                        if let Some((c, d)) = s.q_sort {
-                            s.q_sort = Some((c, !d));
-                        }
-                    }
-                    Panel::Bandwidth => {
-                        if let Some((c, d)) = s.bw_sort {
-                            s.bw_sort = Some((c, !d));
-                        }
-                    }
-                    _ => {}
-                },
                 // Delete the selected target. A user-added one is also
                 // forgotten in the config, or it would be back next start;
                 // discovered targets never reached the file.
@@ -1393,7 +1565,10 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.bw_view = view;
                     s.sub_pane = pane;
                 }
-                KeyCode::Enter if s.focus == Panel::Bandwidth => {
+                // Only while a talkers table holds the cursor: the speed-test
+                // history is chronological and Enter must not reach through
+                // it to re-sort a table the cursor is not even on.
+                KeyCode::Enter if s.focus == Panel::Bandwidth && s.sub_pane == SubPane::Primary => {
                     let col = s.bw_col;
                     s.bw_sort = match s.bw_sort {
                         Some((c, desc)) if c == col => Some((c, !desc)),
@@ -1441,23 +1616,32 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.q_col = s.q_col.saturating_sub(1);
                 }
                 KeyCode::Right if s.focus == Panel::Quality => {
-                    s.q_col = (s.q_col + 1).min(5);
+                    s.q_col = (s.q_col + 1).min(6);
                 }
-                // ←/→ walk the resolvers on the dns row — they sit side by
-                // side, so sideways is the natural direction; ↑↓ stay with
-                // the history pane.
+                // ←/→ walk the panel's addresses one at a time (the resolvers
+                // sit side by side, so sideways is natural there); ↑/↓ hop
+                // between rows via move_cursor.
                 KeyCode::Left if s.focus == Panel::NetInfo && s.sub_pane == SubPane::Primary => {
-                    s.dns_sel = s.dns_sel.saturating_sub(1);
+                    s.net_sel = s.net_sel.saturating_sub(1);
                 }
                 KeyCode::Right if s.focus == Panel::NetInfo && s.sub_pane == SubPane::Primary => {
-                    let last = s.netinfo.dns.len().saturating_sub(1);
-                    s.dns_sel = (s.dns_sel + 1).min(last);
+                    let last = s.netinfo_addrs().len().saturating_sub(1);
+                    s.net_sel = (s.net_sel + 1).min(last);
+                }
+                // In the history pane, Enter grows the selected entry's
+                // detail block to its full length — the fixed slice can hold
+                // less than a resolver change carries — and the list yields
+                // the rows. Enter again collapses back.
+                KeyCode::Enter if s.focus == Panel::NetInfo && s.sub_pane == SubPane::Secondary => {
+                    s.net_detail_expanded = !s.net_detail_expanded;
                 }
                 KeyCode::Enter if s.focus == Panel::Quality => {
                     let col = s.q_col;
                     s.q_sort = match s.q_sort {
-                        Some((c, d)) if c == col => Some((c, d)), // keep direction
-                        _ => Some((col, col != 0)),
+                        // Same column again flips the direction, as the
+                        // Bandwidth tables do.
+                        Some((c, desc)) if c == col => Some((c, !desc)),
+                        _ => Some((col, col != 0)), // name asc, metrics desc
                     };
                 }
                 // 'g' graphs the selected target (and leaves the path views).
@@ -1512,6 +1696,11 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
         // parked in a pane that is no longer drawn is invisible.
         if !s.has_sub_pane() {
             s.sub_pane = SubPane::Primary;
+        }
+        // The zoom only survives beneath the analysis; switching to any other
+        // overlay (or to none) drops the promise to return to it.
+        if !matches!(s.overlay, Overlay::Zoom | Overlay::Triage) {
+            s.zoom_behind = false;
         }
         s.speed_sel = s.speed_sel.min(s.speed_history.len().saturating_sub(1));
     }
@@ -1744,6 +1933,15 @@ fn write_bundle_to(path: &std::path::Path, s: &AppState) -> Result<(), String> {
         "events.csv",
         collectors::logger::format_events_export(s.events.iter().cloned()).as_bytes(),
     )?;
+    // The full talkers tables, not the report's top ten: "which process moved
+    // the bytes" is the question a helper asks of a bundle, and the answer is
+    // often in row forty.
+    if !s.processes.is_empty() {
+        put("processes.csv", processes_csv(s).as_bytes())?;
+    }
+    if !s.remotes.is_empty() {
+        put("remotes.csv", remotes_csv(s).as_bytes())?;
+    }
     if let Some(cfg) = config::Config::path()
         && let Ok(bytes) = std::fs::read(&cfg)
     {
@@ -1772,6 +1970,58 @@ fn write_bundle_to(path: &std::path::Path, s: &AppState) -> Result<(), String> {
     }
     bundle.finish().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Every process the attribution has seen this session, one CSV row each —
+/// the bundle's answer to "which process moved the bytes", complete where the
+/// report's table stops at ten.
+fn processes_csv(s: &AppState) -> String {
+    use std::fmt::Write as _;
+    let mut out =
+        String::from("name,pid,down_bytes,up_bytes,total_bytes,share_pct,retx,down_bps,up_bps\n");
+    for i in s.process_order() {
+        let p = &s.processes[i];
+        let _ = writeln!(
+            out,
+            "{},{},{},{},{},{:.1},{},{:.0},{:.0}",
+            collectors::logger::field(&p.name),
+            p.pid,
+            p.down_bytes,
+            p.up_bytes,
+            p.total_bytes,
+            p.share * 100.0,
+            p.retx,
+            p.down_bps,
+            p.up_bps
+        );
+    }
+    out
+}
+
+/// Every remote address seen this session; see [`processes_csv`].
+fn remotes_csv(s: &AppState) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from(
+        "remote,port,ports_seen,process,down_bytes,up_bytes,total_bytes,share_pct,down_bps,up_bps\n",
+    );
+    for i in s.remote_order() {
+        let r = &s.remotes[i];
+        let _ = writeln!(
+            out,
+            "{},{},{},{},{},{},{},{:.1},{:.0},{:.0}",
+            r.addr,
+            r.port,
+            r.ports,
+            collectors::logger::field(&r.process),
+            r.down_bytes,
+            r.up_bytes,
+            r.total_bytes,
+            r.share * 100.0,
+            r.down_bps,
+            r.up_bps
+        );
+    }
+    out
 }
 
 /// Resolve a user-entered IP or DNS name, append it as a target, and start
@@ -2241,6 +2491,10 @@ fn doctor_json(s: &AppState, full: bool) -> (String, i32) {
                 "summary": f.summary,
                 "evidence": f.evidence,
             })).collect::<Vec<_>>(),
+            "performance": triage.performance.as_ref().map(|p| json!({
+                "grade": p.grade.label(),
+                "detail": p.detail,
+            })),
         },
         "history": s.history_summary().map(|h| json!({
             "days": h.days,

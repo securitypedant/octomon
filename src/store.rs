@@ -95,6 +95,68 @@ fn path() -> Option<PathBuf> {
     Some(data_dir()?.join("speedtests.jsonl"))
 }
 
+/// Where the network-change history persists between sessions.
+fn net_history_path() -> Option<PathBuf> {
+    Some(data_dir()?.join("net_history.jsonl"))
+}
+
+/// Append network changes (best-effort) — the verdict tick calls this with
+/// whatever the collectors pushed since its last pass.
+pub fn append_net_changes(changes: &[crate::app::NetChange]) {
+    if changes.is_empty() {
+        return;
+    }
+    let Some(path) = net_history_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    for c in changes {
+        if let Ok(line) = serde_json::to_string(c) {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
+/// The stored network history, oldest → newest, capped to what the pane
+/// keeps. A file grown to several caps' worth is rewritten down to the tail
+/// while we're here, so an always-on machine doesn't accrete an unbounded
+/// log of DHCP renewals. Unparseable lines (older formats) are skipped.
+pub fn load_net_history() -> std::collections::VecDeque<crate::app::NetChange> {
+    let Some(path) = net_history_path() else {
+        return Default::default();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Default::default();
+    };
+    let all: Vec<crate::app::NetChange> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let cap = crate::app::NET_HISTORY_CAP;
+    let skip = all.len().saturating_sub(cap);
+    let tail: std::collections::VecDeque<_> = all.into_iter().skip(skip).collect();
+    if skip > cap * 3 {
+        let mut out = String::new();
+        for c in &tail {
+            if let Ok(line) = serde_json::to_string(c) {
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+        let _ = std::fs::write(&path, out);
+    }
+    tail
+}
+
 /// Delete the whole data directory — baselines, incident history, speed-test
 /// history and session CSVs. The total-reset path; best-effort.
 pub fn erase() {
