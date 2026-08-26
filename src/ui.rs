@@ -102,7 +102,7 @@ fn zoom_band(f: &mut Frame, s: &AppState, area: Rect) {
         .padding(Padding::new(1, 1, 0, 0))
         .title(Span::styled(title, Style::new().bold()))
         .title_bottom(Span::styled(hint, Style::new().fg(theme::dim())))
-        .border_style(Style::new().fg(Color::Cyan));
+        .border_style(Style::new().fg(theme::accent()));
     let inner = outer.inner(area);
     f.render_widget(outer, area);
     if inner.height < 2 {
@@ -146,7 +146,7 @@ fn zoom_header<'a>(s: &AppState, labels: &[&'a str], view: BwView, map: &[usize]
         }
         let style = if base == Some(s.bw_col) {
             Style::new()
-                .fg(Color::Cyan)
+                .fg(theme::accent())
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             Style::new().fg(theme::dim())
@@ -452,7 +452,10 @@ fn zoom_speedtests(f: &mut Frame, s: &AppState, area: Rect) {
                     dash(&r.server),
                     Style::new().fg(theme::text()),
                 )),
-                Cell::from(Span::styled(dash(&r.network), Style::new().fg(Color::Cyan))),
+                Cell::from(Span::styled(
+                    dash(&r.network),
+                    Style::new().fg(theme::accent()),
+                )),
                 Cell::from(Span::styled(
                     dash(&r.medium),
                     Style::new().fg(theme::text()),
@@ -622,7 +625,7 @@ fn egress_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             " r rescan · press c or Esc to close ",
             Style::new().fg(theme::dim()),
         ))
-        .border_style(Style::new().fg(Color::Cyan));
+        .border_style(Style::new().fg(theme::accent()));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
     // Pre-wrapped into columns above; Paragraph wrap would break the indents.
@@ -636,7 +639,7 @@ fn whois_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     let width = 84u16.min(area.width);
 
     let mut lines: Vec<Line> = Vec::new();
-    let key = |k: &str| Span::styled(format!("{k:<12}"), Style::new().fg(Color::Cyan));
+    let key = |k: &str| Span::styled(format!("{k:<12}"), Style::new().fg(theme::accent()));
     lines.push(Line::from(vec![
         key("address"),
         Span::styled(w.addr.to_string(), Style::new().fg(theme::bright()).bold()),
@@ -712,7 +715,7 @@ fn whois_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             " ↑↓ scroll · press W or Esc to close ",
             Style::new().fg(theme::dim()),
         ))
-        .border_style(Style::new().fg(Color::Cyan));
+        .border_style(Style::new().fg(theme::accent()));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
     f.render_widget(Paragraph::new(shown), inner);
@@ -783,7 +786,7 @@ fn routes_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             " ↑↓ scroll · r re-reads · press T or Esc to close ",
             Style::new().fg(theme::dim()),
         ))
-        .border_style(Style::new().fg(Color::Cyan));
+        .border_style(Style::new().fg(theme::accent()));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
     f.render_widget(Paragraph::new(shown), inner);
@@ -932,7 +935,7 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                 if current {
                     name_row.push(Span::styled(
                         "  ● current",
-                        Style::new().fg(Color::Cyan).bold(),
+                        Style::new().fg(theme::accent()).bold(),
                     ));
                 }
                 // Nothing folded in yet — freshly seen, or just deleted and
@@ -1002,7 +1005,7 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             " ↑↓ select · Enter renames · d deletes · press L or Esc to close ",
             Style::new().fg(theme::dim()),
         ))
-        .border_style(Style::new().fg(Color::Cyan));
+        .border_style(Style::new().fg(theme::accent()));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
     f.render_widget(Paragraph::new(lines), inner);
@@ -1054,7 +1057,7 @@ fn explainer_overlay(f: &mut Frame, area: Rect) {
     let head = |t: &str| Line::from(Span::styled(format!(" {t}"), Style::new().bold()));
     let bullet = |t: &str| {
         Line::from(vec![
-            Span::styled(" ● ", Style::new().fg(Color::Cyan)),
+            Span::styled(" ● ", Style::new().fg(theme::accent())),
             Span::styled(t.to_string(), Style::new().fg(theme::text())),
         ])
     };
@@ -1069,7 +1072,7 @@ fn explainer_overlay(f: &mut Frame, area: Rect) {
         head("this tool helps you diagnose internet connectivity issues:"),
         Line::from(Span::styled(
             " \"Is it my machine, my local network, my ISP — or the internet?\"",
-            Style::new().fg(Color::Cyan).bold(),
+            Style::new().fg(theme::accent()).bold(),
         )),
         Line::from(""),
         bullet("a live analysis at the bottom left of the screen"),
@@ -1114,7 +1117,7 @@ fn explainer_overlay(f: &mut Frame, area: Rect) {
             " press any key to start ",
             Style::new().fg(theme::dim()),
         ))
-        .border_style(Style::new().fg(Color::Cyan));
+        .border_style(Style::new().fg(theme::accent()));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
     if with_art {
@@ -1188,7 +1191,11 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                 Span::styled(format!(" {}  ", e.when()), Style::new().fg(theme::dim())),
                 Span::styled(
                     format!("{:<9} ", e.category.label()),
-                    Style::new().fg(if marker { Color::Magenta } else { Color::Cyan }),
+                    Style::new().fg(if marker {
+                        Color::Magenta
+                    } else {
+                        theme::accent()
+                    }),
                 ),
             ],
             &e.message,
@@ -1221,7 +1228,7 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             " ↑↓ scroll · M mark · x export · C clear · press e or Esc to close ",
             Style::new().fg(theme::dim()),
         ))
-        .border_style(Style::new().fg(Color::Cyan));
+        .border_style(Style::new().fg(theme::accent()));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
     // The list is newest-first; the cue runs the same way (top = newest).
@@ -1270,7 +1277,7 @@ fn startup_notice(f: &mut Frame, s: &AppState, area: Rect) {
     if let Some(note) = &s.privilege_notice {
         lines.push(Line::from(Span::styled(
             " ℹ Privileges",
-            Style::new().fg(Color::Cyan).bold(),
+            Style::new().fg(theme::accent()).bold(),
         )));
         lines.push(Line::from(Span::styled(
             format!(" {note}"),
@@ -1414,7 +1421,7 @@ fn hop_ttl(h: &crate::app::MonitoredHop) -> String {
 
 /// Panel-specific action hints shown at top-right.
 fn context_line(s: &AppState) -> Line<'static> {
-    let key = |k: &str| Span::styled(k.to_string(), Style::new().fg(Color::Cyan));
+    let key = |k: &str| Span::styled(k.to_string(), Style::new().fg(theme::accent()));
     let txt = |t: &str| Span::styled(t.to_string(), Style::new().fg(theme::text()));
     let mut spans = match s.focus {
         Panel::Quality => vec![
@@ -1938,7 +1945,7 @@ fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             },
             Style::new().fg(theme::dim()),
         ))
-        .border_style(Style::new().fg(Color::Cyan));
+        .border_style(Style::new().fg(theme::accent()));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
     // Pre-wrapped above; Paragraph-level wrap would only mangle the indents.
@@ -1953,7 +1960,11 @@ fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
 }
 
 fn block(title: &str, focused: bool) -> Block<'static> {
-    let border = if focused { Color::Cyan } else { theme::dim() };
+    let border = if focused {
+        theme::accent()
+    } else {
+        theme::dim()
+    };
     Block::bordered()
         .title(Span::styled(format!(" {title} "), Style::new().bold()))
         .border_style(Style::new().fg(border))
@@ -2015,7 +2026,7 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         }
         let style = if focused && s.q_col == sort_col {
             Style::new()
-                .fg(Color::Cyan)
+                .fg(theme::accent())
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             Style::new().fg(theme::text()).bold()
@@ -2122,7 +2133,7 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
             t.label.clone()
         };
         Row::new(vec![
-            Cell::from(Span::styled(marker, Style::new().fg(Color::Cyan))),
+            Cell::from(Span::styled(marker, Style::new().fg(theme::accent()))),
             cell(label, identity),
             cell(t.addr.to_string(), identity),
             cell(
@@ -2314,7 +2325,7 @@ fn web_graph(f: &mut Frame, s: &AppState, area: Rect) {
                         .collect::<Vec<_>>(),
                 )
                 .bar_set(s.bar_set.clone())
-                .style(Style::new().fg(SERIES_COLOR)),
+                .style(Style::new().fg(theme::accent())),
             rows[1],
         );
     }
@@ -2651,7 +2662,7 @@ fn hop_chart(f: &mut Frame, m: &crate::app::HopMonitor, n: usize, area: Rect, ma
         Dataset::default()
             .marker(marker)
             .graph_type(GraphType::Line)
-            .style(Style::new().fg(SERIES_COLOR))
+            .style(Style::new().fg(theme::accent()))
             .data(&series),
         Dataset::default()
             .marker(marker)
@@ -2666,7 +2677,7 @@ fn hop_chart(f: &mut Frame, m: &crate::app::HopMonitor, n: usize, area: Rect, ma
     ];
     let chart = Chart::new(datasets)
         .block(Block::new().title(Line::from(vec![
-            Span::styled(" latency ", Style::new().fg(SERIES_COLOR)),
+            Span::styled(" latency ", Style::new().fg(theme::accent())),
             Span::styled("· p95 ", Style::new().fg(theme::dim())),
             Span::styled(format!("{p95:.0}ms"), Style::new().fg(P95_COLOR)),
             Span::styled(" · jitter ", Style::new().fg(theme::dim())),
@@ -2819,7 +2830,7 @@ fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
         Dataset::default()
             .marker(s.graph_marker)
             .graph_type(GraphType::Line)
-            .style(Style::new().fg(SERIES_COLOR))
+            .style(Style::new().fg(theme::accent()))
             .data(&series),
         Dataset::default()
             .marker(s.graph_marker)
@@ -2837,7 +2848,7 @@ fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
     let chart = Chart::new(datasets)
         .block(Block::new().title(Line::from(vec![
             Span::styled(" latency ", Style::new().fg(theme::dim())),
-            Span::styled(t.label.clone(), Style::new().fg(SERIES_COLOR)),
+            Span::styled(t.label.clone(), Style::new().fg(theme::accent())),
             Span::styled("   p95 ", Style::new().fg(theme::dim())),
             Span::styled(format!("{p95:.0}ms"), Style::new().fg(P95_COLOR)),
             Span::styled("   jitter ", Style::new().fg(theme::dim())),
@@ -3110,7 +3121,7 @@ fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         }
         lines.push(Line::from(vec![
             Span::styled("network ", Style::new().fg(theme::dim())),
-            Span::styled(network, Style::new().fg(Color::Cyan)),
+            Span::styled(network, Style::new().fg(theme::accent())),
         ]));
         lines
     };
@@ -3456,7 +3467,7 @@ fn fmt_now(bps: f64, bits: bool) -> Cell<'static> {
     if bps > 0.0 {
         rcell(Span::styled(
             fmt_rate(bps, bits),
-            Style::new().fg(Color::Cyan),
+            Style::new().fg(theme::accent()),
         ))
     } else {
         rcell(Span::styled("·", Style::new().fg(theme::dim())))
@@ -3483,7 +3494,7 @@ fn talkers_header<'a>(s: &AppState, labels: &[&'a str], view: BwView, left_cols:
         }
         let style = if focused && i == s.bw_col {
             Style::new()
-                .fg(Color::Cyan)
+                .fg(theme::accent())
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             Style::new().fg(theme::dim())
@@ -3584,7 +3595,7 @@ fn top_remotes(f: &mut Frame, s: &AppState, area: Rect) {
 fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     let row = |k: &str, d: &str| {
         Line::from(vec![
-            Span::styled(format!("{k:<11}"), Style::new().fg(Color::Cyan)),
+            Span::styled(format!("{k:<11}"), Style::new().fg(theme::accent())),
             Span::styled(d.to_string(), Style::new().fg(theme::text())),
         ])
     };
@@ -3703,7 +3714,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             ))
             .right_aligned(),
         )
-        .border_style(Style::new().fg(Color::Cyan));
+        .border_style(Style::new().fg(theme::accent()));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
 
@@ -3852,7 +3863,11 @@ fn net_history_pane(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
                     ),
                     Span::styled(
                         format!("{:<10} ", c.kind.label()),
-                        style.fg(if selected { Color::Black } else { Color::Cyan }),
+                        style.fg(if selected {
+                            Color::Black
+                        } else {
+                            theme::accent()
+                        }),
                     ),
                 ],
                 &c.summary,
@@ -4690,7 +4705,7 @@ fn signal_graph(f: &mut Frame, s: &AppState, area: Rect) {
         title.push(Span::styled(" · tx ", Style::new().fg(theme::dim())));
         title.push(Span::styled(
             format!("{:.0} Mb/s ", sig.tx_rate_mbps),
-            Style::new().fg(Color::Cyan).bold(),
+            Style::new().fg(theme::accent()).bold(),
         ));
     } else {
         title.push(Span::raw(" "));
@@ -4716,7 +4731,7 @@ fn signal_graph(f: &mut Frame, s: &AppState, area: Rect) {
             Dataset::default()
                 .marker(s.graph_marker)
                 .graph_type(GraphType::Line)
-                .style(Style::new().fg(Color::Cyan))
+                .style(Style::new().fg(theme::accent()))
                 .data(&tx_pts),
         );
     }
@@ -4944,7 +4959,7 @@ fn speedtest_line(s: &AppState) -> Line<'static> {
     match &st.status {
         SpeedStatus::Idle => Line::from(vec![
             label,
-            Span::styled("[s]", Style::new().fg(Color::Cyan)),
+            Span::styled("[s]", Style::new().fg(theme::accent())),
             Span::raw(" run"),
         ]),
         SpeedStatus::Running => Line::from(vec![
@@ -4958,7 +4973,10 @@ fn speedtest_line(s: &AppState) -> Line<'static> {
                 .unwrap_or_default();
             let mut spans = vec![
                 label,
-                Span::styled(format!("{} ", st.provider), Style::new().fg(Color::Cyan)),
+                Span::styled(
+                    format!("{} ", st.provider),
+                    Style::new().fg(theme::accent()),
+                ),
                 Span::styled(
                     format!("↓ {}", fmt_mbps(st.down_mbps)),
                     Style::new().fg(Color::Green).bold(),
@@ -5075,10 +5093,10 @@ fn rtt_color(ms: f64, reference_ms: Option<f64>) -> Color {
     }
 }
 
-/// Series colours for the latency charts. Deliberately outside the
-/// green/yellow/red scale, which means "how bad is this" everywhere else — a
-/// green trace line would read as a verdict rather than as a series.
-const SERIES_COLOR: Color = Color::Cyan;
+/// Series colours for the latency charts (the main line is [`theme::accent`]).
+/// Deliberately outside the green/yellow/red scale, which means "how bad is
+/// this" everywhere else — a green trace line would read as a verdict rather
+/// than as a series.
 const P95_COLOR: Color = Color::Magenta;
 
 /// A target row's colour: loss first (absolute — packets have no "normal"),

@@ -795,6 +795,14 @@ pub struct NetInfo {
     /// points at a physical NIC, but internet traffic egresses via the tunnel.
     /// The gateway shown is then the real LAN gateway, not the tunnel endpoint.
     pub tunnel_is_split: bool,
+    /// When the tunnel itself holds the default route, the physical network
+    /// carrying its outer packets: that LAN's gateway identifies the *place*
+    /// so the location can be "this network via this VPN" instead of one
+    /// global per-vendor bucket mixing home and hotel normals. Empty when no
+    /// physical interface with a gateway is visible (some VMs, odd setups).
+    pub underlay_gateway_ip: String,
+    pub underlay_gateway_mac: String,
+    pub underlay_medium: LinkMedium,
     /// Present when the default interface is Wi-Fi and details are available.
     pub wifi: Option<WifiInfo>,
 }
@@ -805,12 +813,16 @@ impl NetInfo {
     /// different, so anything derived from them has to be rebuilt.
     pub fn identity(&self) -> String {
         format!(
-            "{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}",
             self.iface,
             self.ipv4.join(","),
             self.gateway_ip,
             self.tunnel_iface,
             self.medium as u8,
+            // Roaming the physical network under a full-tunnel VPN (dock to
+            // hotel Wi-Fi with the VPN up) changes every path even though the
+            // tunnel device looks the same.
+            self.underlay_gateway_ip,
         )
     }
 

@@ -214,6 +214,12 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
     }
     v.netinfo.gateway_mac = d.mac(&v.netinfo.gateway_mac);
     v.netinfo.mac = d.mac(&v.netinfo.mac);
+    if let Ok(ip) = v.netinfo.underlay_gateway_ip.parse::<IpAddr>() {
+        v.netinfo.underlay_gateway_ip = d.ip(ip).to_string();
+    }
+    if !v.netinfo.underlay_gateway_mac.is_empty() {
+        v.netinfo.underlay_gateway_mac = d.mac(&v.netinfo.underlay_gateway_mac);
+    }
     v.netinfo.ipv4 = v.netinfo.ipv4.iter().map(|a| d.cidr(a)).collect();
     v.netinfo.ipv6 = v.netinfo.ipv6.iter().map(|a| d.cidr(a)).collect();
     if !v.netinfo.gateway_ipv6.is_empty() {
@@ -435,6 +441,12 @@ impl Disguise {
     /// A baseline label is the SSID, or the gateway address for a wired
     /// network: whichever it is, it identifies the place.
     fn ssid_or_text(&mut self, label: &str) -> String {
+        // Split-tunnel locations read "HomeNet via Cloudflare WARP": the
+        // network half identifies the place and gets disguised; the vendor
+        // half identifies software and stays.
+        if let Some((net, vpn)) = label.split_once(" via ") {
+            return format!("{} via {vpn}", self.ssid_or_text(net));
+        }
         if label.parse::<IpAddr>().is_ok() || self.subs.contains_key(label) {
             return self.text(label);
         }

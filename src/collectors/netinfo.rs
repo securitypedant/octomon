@@ -116,6 +116,19 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
                 info.tunnel_iface = name;
                 info.tunnel_is_split = true;
             }
+            // The tunnel holds the default route: find the physical network
+            // underneath, so "Home via WARP" and "Hotel via WARP" stay
+            // separate places instead of one mixed per-vendor bucket.
+            if info.medium == LinkMedium::Tunnel
+                && let Some((ip, mac, medium)) = tokio::task::spawn_blocking(underlay_identity)
+                    .await
+                    .ok()
+                    .flatten()
+            {
+                info.underlay_gateway_ip = ip;
+                info.underlay_gateway_mac = mac;
+                info.underlay_medium = medium;
+            }
             if info.tunnel.is_some() {
                 let vendor = match &vendor_cache {
                     Some((name, v)) if *name == info.tunnel_iface => v.clone(),
@@ -355,8 +368,46 @@ fn build(iface: &netdev::Interface) -> NetInfo {
             String::new()
         },
         tunnel_is_split: false,
+        // Filled by the caller when the tunnel holds the default route.
+        underlay_gateway_ip: String::new(),
+        underlay_gateway_mac: String::new(),
+        underlay_medium: LinkMedium::Unknown,
         wifi: None, // filled in by the caller for Wi-Fi links
     }
+}
+
+/// The physical network under a full-tunnel VPN: the interface whose gateway
+/// carries the tunnel's outer packets. Which one that is exactly is the OS's
+/// business; the heuristic — the gatewayed physical interface, wired first —
+/// matches how metrics fall out on every setup seen so far. `None` when no
+/// physical interface has a gateway (some VMs put the tunnel alone).
+fn underlay_identity() -> Option<(String, String, LinkMedium)> {
+    let ifaces = netdev::get_interfaces();
+    let mut candidates: Vec<_> = ifaces
+        .iter()
+        .filter(|i| !i.ipv4.is_empty() || !i.ipv6.is_empty())
+        .filter(|i| {
+            matches!(
+                classify(i),
+                LinkMedium::Ethernet | LinkMedium::WiFi | LinkMedium::Cellular
+            )
+        })
+        .filter_map(|i| {
+            let gw = i.gateway.as_ref()?;
+            let ip = gw
+                .ipv4
+                .first()
+                .map(|a| a.to_string())
+                .or_else(|| gw.ipv6.first().map(|a| a.to_string()))?;
+            Some((ip, gw.mac_addr.to_string(), classify(i)))
+        })
+        .collect();
+    candidates.sort_by_key(|(_, _, m)| match m {
+        LinkMedium::Ethernet => 0,
+        LinkMedium::WiFi => 1,
+        _ => 2,
+    });
+    candidates.into_iter().next()
 }
 
 /// Physical interfaces worth announcing: up, addressed, and a medium a human

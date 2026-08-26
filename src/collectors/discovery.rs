@@ -41,7 +41,20 @@ pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Confi
         // Name what the hop is on the way *to*: "hop 3" alone leaves you
         // wondering hop 3 of which path, since these come from one traceroute
         // toward the internet rather than from anywhere in the target list.
-        let label = if ttl == 1 {
+        //
+        // TTL 1 is only "the gateway" when it plausibly IS this LAN's
+        // gateway: the routing table's address, or at least something on the
+        // private side. Hotel gateways that stay silent leave the first
+        // *answering* hop upstream at TTL 1, and a VPN's walk starts at the
+        // vendor's edge — labeling either "gateway" made the Quality panel
+        // contradict the Network panel and fed a stranger's router into the
+        // gateway baseline. (The routing-table gateway itself is probed by
+        // the fallback below whenever the walk didn't cover it.)
+        let plausibly_gateway = ttl == 1 && {
+            let s = state.lock().unwrap();
+            s.netinfo.gateway_ip == addr.to_string() || s.netinfo.is_lan_addr(addr)
+        };
+        let label = if plausibly_gateway {
             "gateway".to_string()
         } else {
             format!("hop {ttl}→{probe}")

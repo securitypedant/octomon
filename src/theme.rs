@@ -62,6 +62,19 @@ pub fn warn() -> Color {
     }
 }
 
+/// The accent: focused borders, key hints, panel titles, the latency series.
+/// Everywhere the dark UI says Cyan — which on white is barely there; a dark
+/// teal keeps the identity with actual contrast. Cyan *backgrounds* (the tab
+/// badge, selected rows) stay literal Cyan: black-on-cyan reads on either
+/// background.
+pub fn accent() -> Color {
+    if is_light() {
+        Color::Indexed(30)
+    } else {
+        Color::Cyan
+    }
+}
+
 /// The jitter band in the latency charts.
 pub fn jitter() -> Color {
     if is_light() {

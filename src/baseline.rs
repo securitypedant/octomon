@@ -175,6 +175,14 @@ impl Baseline {
 /// Location permission (when macOS redacts the SSID, the gateway MAC still
 /// identifies the network). A cable keys on the gateway MAC alone. No gateway
 /// at all → no baseline, rather than a garbage key.
+///
+/// VPNs make their own locations, because a tunnel changes what the internet
+/// looks like regardless of the room — and per *underlying network*, since the
+/// uplink and the exit PoP both shape the normal: "HomeNet via Cloudflare
+/// WARP" ≠ "HotelNet via Cloudflare WARP". Split tunnels key on the physical
+/// network's own identity; full tunnels on the gatewayed physical interface
+/// found beneath the tunnel, falling back to one per-vendor location when no
+/// underlay is visible at all.
 pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
     let mac_known = !n.gateway_mac.is_empty() && n.gateway_mac != "-";
     let ip_known = !n.gateway_ip.is_empty() && n.gateway_ip != "-";
@@ -200,9 +208,36 @@ pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
 
     let (raw, label) = if full_tunnel {
         let vendor = n.tunnel.as_deref().unwrap_or("");
-        if vendor.is_empty() {
+        let (vkey, vshown) = if vendor.is_empty() {
             // Unidentified tunnels fall back to the device name — less stable
             // (utun4 today, utun6 tomorrow) but better than no location.
+            (n.tunnel_iface.as_str(), "VPN")
+        } else {
+            (vendor, vendor)
+        };
+        let u_mac = !n.underlay_gateway_mac.is_empty() && n.underlay_gateway_mac != "-";
+        let u_ip = !n.underlay_gateway_ip.is_empty() && n.underlay_gateway_ip != "-";
+        if u_mac || u_ip {
+            // The physical network underneath is known: this VPN *here* is
+            // the place — "Home via WARP" ≠ "Hotel via WARP" (different
+            // uplink, different exit PoP, different normals).
+            let ukey = if u_mac {
+                &n.underlay_gateway_mac
+            } else {
+                &n.underlay_gateway_ip
+            };
+            (
+                format!("{ukey}|{}|via|{vkey}", n.underlay_medium as u8),
+                format!(
+                    "{} via {vshown}",
+                    if u_ip {
+                        n.underlay_gateway_ip.as_str()
+                    } else {
+                        n.underlay_gateway_mac.as_str()
+                    }
+                ),
+            )
+        } else if vendor.is_empty() {
             (
                 format!("vpn|{}|{}", n.tunnel_iface, n.medium as u8),
                 format!("VPN ({})", n.tunnel_iface),
@@ -236,6 +271,28 @@ pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
         // the SSID is then the only identity available — and "iPhone" is
         // exactly the location a hotspot baseline should be keyed to.
         (format!("{ssid}|nogw|{}", n.medium as u8), ssid.to_string())
+    };
+
+    // A split tunnel (kernel default route on the physical NIC, internet
+    // traffic egressing via the tunnel — WARP on macOS) still changes what
+    // "the internet" looks like from here: anchor latency is the tunnel's,
+    // DNS is the tunnel's, speed is the tunnel's. So it is its own location —
+    // but *per underlying network*: "Home via WARP" and "Hotel via WARP"
+    // differ in uplink and nearest exit PoP, and mixing their normals would
+    // poison both. Hence the LAN identity computed above, suffixed.
+    let (raw, label) = if let Some(vendor) = n.tunnel.as_deref().filter(|_| n.tunnel_is_split) {
+        // An unidentified vendor keys on the device name — less stable
+        // (utunN renumbers) but better than folding VPN minutes into the
+        // bare network's normal.
+        let key = if vendor.is_empty() {
+            &n.tunnel_iface
+        } else {
+            vendor
+        };
+        let shown = if vendor.is_empty() { "VPN" } else { vendor };
+        (format!("{raw}|via|{key}"), format!("{label} via {shown}"))
+    } else {
+        (raw, label)
     };
 
     // Hash the identity so the on-disk keys don't spell out SSIDs; the label
@@ -427,19 +484,95 @@ mod tests {
         let (ukey, ulabel) = fingerprint(&unknown).unwrap();
         assert_ne!(key, ukey);
         assert_eq!(ulabel, "VPN (CloudflareWARP)");
+    }
 
-        // A split tunnel keeps the physical network's identity: the default
-        // route is still the LAN's, and that is the place being measured.
-        let mut split = wifi_net("HomeNet", "aa:bb:cc:dd:ee:ff");
-        split.tunnel = Some("Cloudflare WARP".into());
-        split.tunnel_iface = "utun4".into();
-        split.tunnel_is_split = true;
-        assert_eq!(
-            fingerprint(&split).unwrap().0,
-            fingerprint(&wifi_net("HomeNet", "aa:bb:cc:dd:ee:ff"))
-                .unwrap()
-                .0
+    /// A full tunnel with a visible physical network underneath keys on that
+    /// underlay: the same VPN over the office Ethernet and over hotel Wi-Fi
+    /// is two places with two normals. The vendor-only bucket above is only
+    /// the fallback for setups where no underlay is discoverable.
+    #[test]
+    fn a_full_tunnel_keys_on_the_underlay_when_one_is_visible() {
+        let over = |gw_ip: &str, gw_mac: &str, medium: LinkMedium| NetInfo {
+            iface: "CloudflareWARP".into(),
+            ipv4: vec!["100.96.0.1/32".into()],
+            gateway_ip: "-".into(),
+            gateway_mac: "-".into(),
+            medium: LinkMedium::Tunnel,
+            tunnel: Some("Cloudflare WARP".into()),
+            tunnel_iface: "CloudflareWARP".into(),
+            underlay_gateway_ip: gw_ip.into(),
+            underlay_gateway_mac: gw_mac.into(),
+            underlay_medium: medium,
+            ..Default::default()
+        };
+        let office = fingerprint(&over(
+            "10.90.0.1",
+            "aa:aa:aa:aa:aa:01",
+            LinkMedium::Ethernet,
+        ))
+        .expect("underlay fingerprint");
+        let hotel = fingerprint(&over("192.168.1.1", "bb:bb:bb:bb:bb:02", LinkMedium::WiFi))
+            .expect("underlay fingerprint");
+        assert_ne!(office.0, hotel.0, "same VPN, different places");
+        assert_eq!(office.1, "10.90.0.1 via Cloudflare WARP");
+        assert_eq!(hotel.1, "192.168.1.1 via Cloudflare WARP");
+
+        // A DHCP renewal changing nothing identifying returns the same key,
+        // and the underlay MAC (not the IP) is what the key rides on.
+        let renewed = fingerprint(&over(
+            "10.90.0.1",
+            "aa:aa:aa:aa:aa:01",
+            LinkMedium::Ethernet,
+        ));
+        assert_eq!(office.0, renewed.unwrap().0);
+
+        // No underlay at all (the Azure-VM shape when the NIC has no
+        // gateway): falls back to the per-vendor bucket.
+        let mut bare = over("", "", LinkMedium::Unknown);
+        bare.underlay_gateway_ip = String::new();
+        bare.underlay_gateway_mac = String::new();
+        assert_eq!(fingerprint(&bare).unwrap().1, "Cloudflare WARP");
+    }
+
+    /// A split tunnel is its own location *per underlying network*: the VPN
+    /// changes what the internet looks like (anchor latency, DNS, speed all
+    /// ride the tunnel), and "Home via WARP" differs from "Hotel via WARP" in
+    /// uplink and exit PoP — so the LAN pairs each get an entry: Home,
+    /// Home via WARP, Hotel, Hotel via WARP.
+    #[test]
+    fn a_split_tunnel_is_its_own_location_per_underlying_network() {
+        let with_warp = |ssid: &str, mac: &str| {
+            let mut n = wifi_net(ssid, mac);
+            n.tunnel = Some("Cloudflare WARP".into());
+            n.tunnel_iface = "utun4".into();
+            n.tunnel_is_split = true;
+            n
+        };
+        let home = fingerprint(&wifi_net("HomeNet", "aa:bb:cc:dd:ee:ff")).unwrap();
+        let home_warp = fingerprint(&with_warp("HomeNet", "aa:bb:cc:dd:ee:ff")).unwrap();
+        let hotel_warp = fingerprint(&with_warp("HotelNet", "11:22:33:44:55:66")).unwrap();
+
+        assert_ne!(home.0, home_warp.0, "VPN on = a different place");
+        assert_ne!(
+            home_warp.0, hotel_warp.0,
+            "same VPN over different uplinks = different normals"
         );
+        assert_eq!(home_warp.1, "HomeNet via Cloudflare WARP");
+        assert_eq!(hotel_warp.1, "HotelNet via Cloudflare WARP");
+
+        // Toggling the VPN off and on returns to the same pair, and the utun
+        // number is irrelevant while the vendor is known.
+        let mut renumbered = with_warp("HomeNet", "aa:bb:cc:dd:ee:ff");
+        renumbered.tunnel_iface = "utun7".into();
+        assert_eq!(home_warp.0, fingerprint(&renumbered).unwrap().0);
+
+        // An unidentified split tunnel still separates from the bare LAN.
+        let mut unknown = with_warp("HomeNet", "aa:bb:cc:dd:ee:ff");
+        unknown.tunnel = Some(String::new());
+        let (ukey, ulabel) = fingerprint(&unknown).unwrap();
+        assert_ne!(ukey, home.0);
+        assert_ne!(ukey, home_warp.0);
+        assert_eq!(ulabel, "HomeNet via VPN");
     }
 
     /// A v6-only carrier hotspot exposes no routable gateway; the SSID alone
