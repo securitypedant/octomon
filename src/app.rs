@@ -260,6 +260,19 @@ impl TargetStat {
         lost as f64 / take as f64 * 100.0
     }
 
+    /// True when the RTT distribution no longer describes the display window:
+    /// none of the most recent `n` probes were answered. [`Self::stats`]
+    /// samples the last `n` *successes*, so during a total outage it would
+    /// keep serving pre-outage figures — minutes old, still healthy-looking —
+    /// while loss reads 100%. The display asks this before believing them.
+    /// Judged from the same outcome window as the loss figure, not the
+    /// wall clock, so a paused display never ages into staleness and an
+    /// empty window reads as "no data yet", not "gone quiet".
+    pub fn stats_stale(&self, n: usize) -> bool {
+        let take = n.max(1).min(self.window.len());
+        take > 0 && !self.window.iter().rev().take(take).any(|ok| *ok)
+    }
+
     /// Distribution over the most recent `n` successful samples.
     pub fn stats(&self, n: usize) -> RttStats {
         let mut v: Vec<f64> = self
@@ -1765,6 +1778,34 @@ mod tests {
         assert_eq!(s.events.back().unwrap().message, "network changed → en7");
     }
 
+    /// During a total outage the RTT window holds only pre-outage successes;
+    /// `stats_stale` is what stops the display serving them as current.
+    #[test]
+    fn stats_go_stale_when_no_probe_in_the_window_answers() {
+        let mut t = TargetStat::new("t".into(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert!(!t.stats_stale(30), "no data yet is not staleness");
+        for _ in 0..30 {
+            t.record_reply(10.0);
+        }
+        assert!(!t.stats_stale(30));
+        for _ in 0..30 {
+            t.record_loss();
+        }
+        // The internet went away: the whole display window is losses, yet
+        // `stats` still reports the old replies — stale says don't show them.
+        assert!(t.stats_stale(30));
+        assert_eq!(t.stats(30).mean, Some(10.0), "figures frozen underneath");
+        // A wider window still reaching the old replies is not stale: the
+        // figures it shows genuinely sit inside the period it claims.
+        assert!(!t.stats_stale(60));
+        // One reply and the readings are current again.
+        t.record_reply(12.0);
+        assert!(!t.stats_stale(30));
+        // A stats reset clears the outcome window: back to "no data yet".
+        t.reset();
+        assert!(!t.stats_stale(30));
+    }
+
     #[test]
     fn loss_pct_counts_window() {
         let mut t = TargetStat::new("t".into(), IpAddr::V4(Ipv4Addr::LOCALHOST));
@@ -1850,6 +1891,9 @@ pub enum Overlay {
     Locations,
     /// Who owns the selected address (RDAP / whois).
     Whois,
+    /// The OS routing table, verbatim — where "does anything route off this
+    /// machine, and via what" is answered ([T]).
+    Routes,
     /// Outbound reachability by port — which protocols this network lets out.
     Egress,
     /// One Bandwidth table at 80% of the screen ([z]): every column, full
@@ -2064,6 +2108,11 @@ pub struct AppState {
     pub whois: Option<Whois>,
     /// Scroll offset into the whois overlay.
     pub whois_scroll: usize,
+    /// The OS routing table for the [T] overlay: `None` until first opened,
+    /// then the tool's raw lines. Refreshed each time the overlay opens.
+    pub routes: Option<Vec<String>>,
+    /// Scroll offset into the routing-table overlay.
+    pub routes_scroll: usize,
     /// Scroll offset (lines) in the analysis overlay; clamped at draw time.
     pub triage_scroll: usize,
     /// Which chart the panel is showing.
@@ -2272,6 +2321,8 @@ impl AppState {
             hop_monitor: None,
             whois: None,
             whois_scroll: 0,
+            routes: None,
+            routes_scroll: 0,
             triage_scroll: 0,
             quality_view: QualityView::Graph,
             sub_pane: SubPane::Primary,
@@ -2348,6 +2399,7 @@ impl AppState {
         self.locations_sel = live.locations_sel;
         self.events_scroll = live.events_scroll;
         self.whois_scroll = live.whois_scroll;
+        self.routes_scroll = live.routes_scroll;
         self.triage_scroll = live.triage_scroll;
         self.net_history_sel = live.net_history_sel;
         self.net_detail_expanded = live.net_detail_expanded;
@@ -2356,6 +2408,7 @@ impl AppState {
         self.log = live.log.clone();
         // Things the user asked for by hand: their results are wanted now.
         self.whois = live.whois.clone();
+        self.routes = live.routes.clone();
         self.traceroute = live.traceroute.clone();
         // The path monitor is a measurement, so its numbers hold; but starting
         // or stopping one, and its row cursor, are the user's.

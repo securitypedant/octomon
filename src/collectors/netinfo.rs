@@ -496,11 +496,13 @@ fn egress_iface_name() -> Option<String> {
 /// Classify the medium carrying the default route.
 fn classify(iface: &netdev::Interface) -> LinkMedium {
     // Name first: macOS reports `utun` devices as plain Ethernet, so a VPN like
-    // Cloudflare WARP is invisible to `if_type` alone.
-    if is_tunnel_name(&iface.name) {
+    // Cloudflare WARP is invisible to `if_type` alone. On Windows `name` is the
+    // adapter GUID — the friendly name ("CloudflareWARP") is where the vendor's
+    // naming actually shows up, so both are checked.
+    if is_tunnel_name(&iface.name) || iface.friendly_name.as_deref().is_some_and(is_tunnel_name) {
         return LinkMedium::Tunnel;
     }
-    match iface.if_type {
+    let base = match iface.if_type {
         InterfaceType::Wireless80211 | InterfaceType::PeerToPeerWireless => LinkMedium::WiFi,
         InterfaceType::Ethernet
         | InterfaceType::Ethernet3Megabit
@@ -515,7 +517,19 @@ fn classify(iface: &netdev::Interface) -> LinkMedium {
         InterfaceType::Loopback => LinkMedium::Loopback,
         InterfaceType::Bridge => LinkMedium::Bridge,
         _ => LinkMedium::Unknown,
+    };
+    // Windows reports WARP as an "Unknown adapter": no type, no MAC. An
+    // unclassifiable, MAC-less device carrying a known VPN's address range is
+    // that VPN's tunnel — a physical NIC always has a MAC, so this cannot
+    // claim one (a CGNAT WAN address on a real NIC stays Unknown/Ethernet).
+    if base == LinkMedium::Unknown && iface.mac_addr.is_none_or(|m| m.octets() == [0u8; 6]) {
+        let v4: Vec<Ipv4Addr> = iface.ipv4.iter().map(|n| n.addr()).collect();
+        let v6: Vec<Ipv6Addr> = iface.ipv6.iter().map(|n| n.addr()).collect();
+        if vendor_from_addrs(&v4, &v6).is_some() {
+            return LinkMedium::Tunnel;
+        }
     }
+    base
 }
 
 /// Interface-name prefixes used by tunnel/VPN virtual devices across platforms.
@@ -532,6 +546,9 @@ fn is_tunnel_name(name: &str) -> bool {
         "proton",
         "zt",
         "tailscale",
+        // Windows adapter aliases: the WARP client names its adapter
+        // "CloudflareWARP" (one word).
+        "cloudflarewarp",
     ];
     let n = name.to_ascii_lowercase();
     PREFIXES.iter().any(|p| n.starts_with(p))
@@ -586,6 +603,42 @@ const KNOWN_VPNS: &[Vpn] = &[
         v4: &[],
         v6: &[],
         procs: &["cloudflared"],
+    },
+    Vpn {
+        display: "ExpressVPN",
+        v4: &[],
+        v6: &[],
+        procs: &["expressvpn"],
+    },
+    Vpn {
+        display: "Surfshark",
+        v4: &[],
+        v6: &[],
+        procs: &["surfshark"],
+    },
+    Vpn {
+        display: "Private Internet Access",
+        v4: &[],
+        v6: &[],
+        procs: &["pia-daemon", "privateinternetaccess"],
+    },
+    Vpn {
+        display: "Windscribe",
+        v4: &[],
+        v6: &[],
+        procs: &["windscribe"],
+    },
+    Vpn {
+        display: "Zscaler",
+        v4: &[],
+        v6: &[],
+        procs: &["zsatunnel", "zstunnel", "zscaler"],
+    },
+    Vpn {
+        display: "FortiClient",
+        v4: &[],
+        v6: &[],
+        procs: &["forticlient", "fortitray"],
     },
     Vpn {
         display: "OpenVPN",
@@ -767,7 +820,17 @@ mod tests {
 
     #[test]
     fn tunnel_names_are_recognised() {
-        for n in ["utun4", "tun0", "wg0", "ppp0", "ZT0", "ipsec1"] {
+        for n in [
+            "utun4",
+            "tun0",
+            "wg0",
+            "ppp0",
+            "ZT0",
+            "ipsec1",
+            // The Windows WARP adapter's friendly name, exactly as the client
+            // registers it.
+            "CloudflareWARP",
+        ] {
             assert!(is_tunnel_name(n), "{n} should be a tunnel");
         }
         for n in ["en0", "eth0", "wlan0", "bridge0", "lo0"] {

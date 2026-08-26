@@ -194,6 +194,52 @@ pub async fn dhcp_server(_iface: &str, _iface_index: u32) -> Option<String> {
     None
 }
 
+/// The kernel's routing table, as the platform's own tool prints it — raw and
+/// unparaphrased, because "what does the routing table actually say" is the
+/// question this answers (split-tunnel VPNs, 0.0.0.0/1 overrides, a missing
+/// default). Blocking (shells out); call off the UI path. Empty lines trimmed
+/// at both ends; an unrunnable tool reports itself in the output rather than
+/// pretending the table is empty.
+pub fn routing_table() -> Vec<String> {
+    fn run(cmd: &str, args: &[&str]) -> Option<Vec<String>> {
+        let out = std::process::Command::new(cmd).args(args).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<String> = text.lines().map(|l| l.trim_end().to_string()).collect();
+        let start = lines.iter().position(|l| !l.is_empty())?;
+        let end = lines.iter().rposition(|l| !l.is_empty())?;
+        Some(lines[start..=end].to_vec())
+    }
+
+    #[cfg(target_os = "macos")]
+    let table = run("netstat", &["-rn"]);
+    #[cfg(target_os = "linux")]
+    let table = {
+        // `ip` is the native tool; netstat is the fallback on minimal images.
+        let v4 = run("ip", &["-4", "route", "show"]);
+        let v6 = run("ip", &["-6", "route", "show"]);
+        match (v4, v6) {
+            (None, None) => run("netstat", &["-rn"]),
+            (v4, v6) => {
+                let mut out = vec!["IPv4:".to_string()];
+                out.extend(v4.unwrap_or_default());
+                out.push(String::new());
+                out.push("IPv6:".to_string());
+                out.extend(v6.unwrap_or_default());
+                Some(out)
+            }
+        }
+    };
+    #[cfg(windows)]
+    let table = run("route", &["print"]);
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    let table: Option<Vec<String>> = None;
+
+    table.unwrap_or_else(|| vec!["could not read the routing table on this platform".to_string()])
+}
+
 /// `search` / `domain` directives out of resolv.conf text.
 #[cfg_attr(windows, allow(dead_code))]
 pub fn parse_resolv_search(text: &str) -> Vec<String> {

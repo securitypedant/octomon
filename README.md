@@ -215,6 +215,7 @@ octomon --help
 | `e` | Event timeline; `x` inside it exports the events to a CSV in the config folder |
 | `M` | Drop a marker into the event timeline ("moved rooms", "call just dropped") |
 | `c` | Scan outbound ports (which protocols this network lets out); `r` inside it rescans |
+| `T` | The OS routing table, verbatim (split tunnels, VPN `0.0.0.0/1` overrides, a missing default); `r` inside it re-reads |
 | `?` | Help |
 | `Esc` | Back out of a view / leave full-screen |
 | `q` / `Ctrl+C` | Quit |
@@ -254,6 +255,9 @@ On first run octomon writes a config file you can edit:
 - **Config:** `~/.config/octomon/config.toml` (honours `$XDG_CONFIG_HOME`;
   `%APPDATA%\octomon\` on Windows). Targets, timings, endpoints, the reference
   resolver, the NTP server, the egress-scan list.
+- **Light terminals:** octomon asks the terminal its background colour at
+  startup and adapts. If yours guesses wrong, set `theme = "light"` (or
+  `"dark"`) in the config, or pass `--theme light` for one run.
 - **Data** (`~/.local/share/octomon/`, honours `$XDG_DATA_HOME`):
   `speedtests.jsonl` (speed-test history), `baselines.json` (each network's
   learned normal), `history.jsonl` (finished incidents per network, kept 90

@@ -12,6 +12,7 @@ mod demo;
 mod history;
 mod platform;
 mod store;
+mod theme;
 mod ui;
 mod util;
 mod verdict;
@@ -104,6 +105,11 @@ struct Cli {
     /// so octomon can be run headless as a recorder.
     #[arg(long)]
     log: bool,
+
+    /// Colour scheme: auto (ask the terminal its background), dark, or light.
+    /// Overrides the config's `theme` for this run.
+    #[arg(long, value_name = "auto|dark|light")]
+    theme: Option<String>,
 }
 
 #[tokio::main]
@@ -378,6 +384,11 @@ async fn main() -> Result<()> {
         std::process::exit(code);
     }
 
+    // Resolve dark/light before the input thread exists: theme auto-detection
+    // asks the terminal its background colour and reads the reply off the
+    // terminal input — once the thread below owns stdin it would eat it.
+    theme::init(cli.theme.as_deref().unwrap_or(&cfg.theme));
+
     // Read terminal input on a blocking OS thread → async channel.
     let (tx, rx) = mpsc::unbounded_channel::<KeyEvent>();
     std::thread::spawn(move || {
@@ -571,6 +582,8 @@ enum Side {
     HopMonitor(IpAddr, String),
     /// Look up who owns an address for the [W] overlay.
     Whois(IpAddr),
+    /// Read the OS routing table for the [T] overlay (a blocking shell-out).
+    LoadRoutes,
     SaveProvider(String),
     /// Persist the user's name for the current network's baseline.
     NameNetwork {
@@ -1110,6 +1123,35 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         s.overlay
                     };
                 }
+                // The routing table toggles from any overlay too: reading the
+                // analysis ("nothing routes off the LAN") is exactly when the
+                // table is wanted as evidence.
+                KeyCode::Char('T') => {
+                    s.overlay = if s.overlay == Overlay::Routes {
+                        Overlay::None
+                    } else {
+                        s.routes = None; // show "reading…" while it loads
+                        s.routes_scroll = 0;
+                        side = Side::LoadRoutes;
+                        Overlay::Routes
+                    };
+                }
+                KeyCode::Char('r') if s.overlay == Overlay::Routes => {
+                    s.routes = None;
+                    side = Side::LoadRoutes;
+                }
+                KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Routes => {
+                    s.routes_scroll = s.routes_scroll.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') if s.overlay == Overlay::Routes => {
+                    s.routes_scroll = s.routes_scroll.saturating_add(1);
+                }
+                KeyCode::PageUp if s.overlay == Overlay::Routes => {
+                    s.routes_scroll = s.routes_scroll.saturating_sub(10);
+                }
+                KeyCode::PageDown if s.overlay == Overlay::Routes => {
+                    s.routes_scroll = s.routes_scroll.saturating_add(10);
+                }
                 // A marker can be dropped with an overlay up too — reading
                 // the events list is exactly when one realises it is needed.
                 KeyCode::Char('M') => {
@@ -1476,6 +1518,15 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.overlay = Overlay::Locations;
                     side = Side::LoadLocations;
                 }
+                // Shift+T shows the OS routing table, from anywhere: "what
+                // does the kernel actually do with a packet" — split tunnels,
+                // 0.0.0.0/1 VPN overrides, a missing default route.
+                KeyCode::Char('T') => {
+                    s.routes = None;
+                    s.routes_scroll = 0;
+                    s.overlay = Overlay::Routes;
+                    side = Side::LoadRoutes;
+                }
                 // Shift+N names the current network's baseline ("Home"…).
                 // Pre-filled with the existing name so editing beats retyping.
                 KeyCode::Char('N') if s.baseline_key.is_some() => {
@@ -1749,6 +1800,15 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
             }
         }
         Side::Whois(addr) => collectors::whois::start(ctx.state.clone(), addr),
+        Side::LoadRoutes => {
+            let state = ctx.state.clone();
+            tokio::spawn(async move {
+                let lines = tokio::task::spawn_blocking(platform::routing_table)
+                    .await
+                    .unwrap_or_default();
+                state.lock().unwrap().routes = Some(lines);
+            });
+        }
         Side::SaveProvider(name) => {
             tokio::task::spawn_blocking(move || config::Config::persist_provider(&name));
         }
@@ -1940,6 +2000,12 @@ fn write_bundle_to(path: &std::path::Path, s: &AppState) -> Result<(), String> {
     };
 
     put("report.txt", doctor_report(s, true).0.as_bytes())?;
+    // The routing table, verbatim: the first thing a helper asks for when
+    // "nothing routes" or a VPN is suspected, and unreconstructable later.
+    put(
+        "routes.txt",
+        (platform::routing_table().join("\n") + "\n").as_bytes(),
+    )?;
     put(
         "events.csv",
         collectors::logger::format_events_export(s.events.iter().cloned()).as_bytes(),

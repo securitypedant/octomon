@@ -676,6 +676,29 @@ pub fn insufficient_reason(s: &AppState) -> Option<String> {
     None
 }
 
+/// Whether this network blackholes ICMP wholesale: every anchor with enough
+/// samples is at (essentially) total loss while an HTTP probe succeeds — the
+/// signature of a VM host or hotel network dropping ICMP as policy, not of an
+/// outage. Azure does this to every VM.
+pub fn icmp_blackholed(s: &AppState) -> bool {
+    let http_ok = matches!(s.http.v4, crate::app::FamilyProbe::Ok(_))
+        || matches!(s.http.v6, crate::app::FamilyProbe::Ok(_));
+    if !http_ok {
+        return false;
+    }
+    let mut sampled = 0;
+    for t in s.targets.iter().filter(|t| !t.discovered) {
+        if t.window.len() < th::MIN_SAMPLES {
+            continue;
+        }
+        sampled += 1;
+        if t.recent_loss_pct(th::RECENT) < 99.5 {
+            return false;
+        }
+    }
+    sampled > 0
+}
+
 /// The bottom rung, before any probe is consulted: is there a link with an
 /// address and a way out at all? Every failure further up is a symptom of this.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1570,7 +1593,15 @@ pub fn evaluate(s: &AppState) -> Triage {
             let v6_dns_dead =
                 !v6_dns.is_empty() && v6_dns.iter().all(|p| p.failing(th::DNS_FAIL_PCT));
             let mut evidence = vec![format!("v6 probe: {reason} · v4 probe: ok {v4_ms:.0}ms")];
-            let (where_, corroborated) = if no_v6_gateway {
+            let (where_, corroborated) = if let Some(vpn) = s.netinfo.tunnel_label() {
+                // Point-to-point tunnels have no router and no v6 gateway by
+                // design — "at the router" would send the user to a box that
+                // doesn't exist. The VPN either carries v6 or it doesn't.
+                evidence.push(format!(
+                    "traffic goes through {vpn} — whether IPv6 works is the tunnel's doing, not the LAN's"
+                ));
+                ("the VPN tunnel isn't carrying IPv6", false)
+            } else if no_v6_gateway {
                 evidence.push(
                     "this interface has a global IPv6 address but no IPv6 default router — the router advertises addresses without a route"
                         .to_string(),

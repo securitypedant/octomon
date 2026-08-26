@@ -186,11 +186,34 @@ pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
         .map(|w| w.ssid.as_str())
         .filter(|s| !s.is_empty() && !s.contains("redacted"))
         .unwrap_or("");
-    if !mac_known && !ip_known && ssid.is_empty() {
+    // A full-tunnel VPN (the tunnel itself holds the default route) is its own
+    // place, whatever LAN sits underneath: latency, DNS and loss all describe
+    // the tunnel, not the room. Keyed on the vendor so reconnecting — or a
+    // different exit server, or macOS renumbering utunN — comes back to the
+    // same location instead of minting a new one each time. This is also the
+    // only identity a tunnel like WARP on Windows has: a /32, no gateway, no
+    // MAC — nothing below would key on it at all.
+    let full_tunnel = n.medium == LinkMedium::Tunnel && n.tunnel.is_some();
+    if !mac_known && !ip_known && ssid.is_empty() && !full_tunnel {
         return None;
     }
 
-    let (raw, label) = if n.medium == LinkMedium::WiFi && !ssid.is_empty() {
+    let (raw, label) = if full_tunnel {
+        let vendor = n.tunnel.as_deref().unwrap_or("");
+        if vendor.is_empty() {
+            // Unidentified tunnels fall back to the device name — less stable
+            // (utun4 today, utun6 tomorrow) but better than no location.
+            (
+                format!("vpn|{}|{}", n.tunnel_iface, n.medium as u8),
+                format!("VPN ({})", n.tunnel_iface),
+            )
+        } else {
+            (
+                format!("vpn|{vendor}|{}", n.medium as u8),
+                vendor.to_string(),
+            )
+        }
+    } else if n.medium == LinkMedium::WiFi && !ssid.is_empty() {
         (
             format!(
                 "{ssid}|{}|wifi",
@@ -370,6 +393,53 @@ mod tests {
         wired.medium = LinkMedium::Ethernet;
         let wired = fingerprint(&wired).unwrap();
         assert_ne!(wifi.0, wired.0, "different medium, different baseline");
+    }
+
+    /// A full-tunnel VPN is its own location, keyed on the vendor: WARP on
+    /// Windows exposes a /32 with no gateway and no MAC — nothing else
+    /// identifies it — and on macOS the same VPN must map to the same
+    /// location whether it came up as utun4 or utun6.
+    #[test]
+    fn a_full_tunnel_vpn_is_its_own_location() {
+        let warp = NetInfo {
+            iface: "CloudflareWARP".into(),
+            ipv4: vec!["100.96.0.1/32".into()],
+            gateway_ip: "-".into(),
+            gateway_mac: "-".into(),
+            medium: LinkMedium::Tunnel,
+            tunnel: Some("Cloudflare WARP".into()),
+            tunnel_iface: "CloudflareWARP".into(),
+            ..Default::default()
+        };
+        let (key, label) = fingerprint(&warp).expect("tunnel fingerprint");
+        assert_eq!(label, "Cloudflare WARP");
+
+        // Same VPN on another device name (macOS utun renumbering): same key.
+        let mut renumbered = warp.clone();
+        renumbered.iface = "utun6".into();
+        renumbered.tunnel_iface = "utun6".into();
+        renumbered.ipv4 = vec!["100.96.0.7/32".into()];
+        assert_eq!(key, fingerprint(&renumbered).unwrap().0);
+
+        // An unidentified tunnel still gets a location, named by its device.
+        let mut unknown = warp.clone();
+        unknown.tunnel = Some(String::new());
+        let (ukey, ulabel) = fingerprint(&unknown).unwrap();
+        assert_ne!(key, ukey);
+        assert_eq!(ulabel, "VPN (CloudflareWARP)");
+
+        // A split tunnel keeps the physical network's identity: the default
+        // route is still the LAN's, and that is the place being measured.
+        let mut split = wifi_net("HomeNet", "aa:bb:cc:dd:ee:ff");
+        split.tunnel = Some("Cloudflare WARP".into());
+        split.tunnel_iface = "utun4".into();
+        split.tunnel_is_split = true;
+        assert_eq!(
+            fingerprint(&split).unwrap().0,
+            fingerprint(&wifi_net("HomeNet", "aa:bb:cc:dd:ee:ff"))
+                .unwrap()
+                .0
+        );
     }
 
     /// A v6-only carrier hotspot exposes no routable gateway; the SSID alone

@@ -300,6 +300,17 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
         }
         w.raw = w.raw.iter().map(|l| d.text(l)).collect();
     }
+    // The routing table is raw tool output, full of subnets and neighbours the
+    // substitution map has never seen: a canned table beats an under-disguised
+    // real one.
+    if v.routes.is_some() {
+        v.routes = Some(vec![
+            "Destination        Gateway            Flags     Netif".to_string(),
+            "default            192.168.0.1        UGScg     en0".to_string(),
+            "192.168.0.0/24     link#12            UCS       en0".to_string(),
+            "192.168.0.1/32     link#12            UCS       en0".to_string(),
+        ]);
+    }
     if let Some(e) = v.egress.as_mut() {
         for r in e.results.iter_mut() {
             r.check.host = d.text(&r.check.host);
@@ -383,6 +394,11 @@ pub fn disguise_machine(s: &AppState, d: &mut Disguise) -> AppState {
     for c in v.net_history.iter_mut() {
         c.summary = d.text(&c.summary);
         c.detail = c.detail.iter().map(|l| d.text(l)).collect();
+    }
+    // The routing table can carry the machine's own MAC in neighbour entries
+    // and its EUI-64 v6 addresses; the mapping built above covers both.
+    if let Some(routes) = v.routes.as_mut() {
+        *routes = routes.iter().map(|l| d.text(l)).collect();
     }
     if let Some(n) = v.notice.as_mut() {
         *n = d.text(n);

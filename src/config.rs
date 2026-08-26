@@ -120,6 +120,15 @@ pub struct Config {
     /// speed tests and ISP plans are sold in). Anything else reads as bytes.
     #[serde(default = "default_bandwidth_units")]
     pub bandwidth_units: String,
+    /// Colour scheme: "auto" (ask the terminal its background at startup),
+    /// "dark" or "light". Auto falls back to dark when the terminal doesn't
+    /// answer. `--theme` overrides for one run.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+fn default_theme() -> String {
+    "auto".to_string()
 }
 
 fn default_bandwidth_units() -> String {
@@ -226,6 +235,7 @@ impl Default for Config {
             graph_marker: "auto".to_string(),
             bar_glyphs: "auto".to_string(),
             bandwidth_units: default_bandwidth_units(),
+            theme: default_theme(),
         }
     }
 }
