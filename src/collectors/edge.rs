@@ -1,0 +1,101 @@
+//! The edge check: ask octomon.dev's `/edge` endpoint how the Cloudflare
+//! edge sees this connection — which PoP answers, whose AS the request came
+//! from, and the edge's own TCP RTT measurement of this client. The one
+//! octomon-operated endpoint; it stores nothing about the caller (the
+//! website's /privacy page shows everything its operator can see), and
+//! `edge_check_url = ""` disables it entirely.
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use tokio::sync::Notify;
+
+use crate::app::{AppState, EdgeInfo};
+use crate::config::Config;
+
+/// Refresh cadence between network changes: the answer only moves when the
+/// path does, so a slow tick is plenty — and it is what makes the public
+/// request-count graph on /privacy interpretable (calls/hour ≈ 4× fleet).
+const REFRESH: Duration = Duration::from_secs(15 * 60);
+
+pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config, changed: Arc<Notify>) {
+    let url = cfg.edge_check_url.trim().to_string();
+    if url.is_empty() {
+        return;
+    }
+    let Ok(client) = reqwest::Client::builder()
+        .user_agent(crate::util::USER_AGENT)
+        .timeout(Duration::from_secs(10))
+        .no_proxy()
+        .build()
+    else {
+        return;
+    };
+    loop {
+        // A failed refresh keeps the last answer — stale edge facts beat
+        // none, and the panel row shows measurements, not health. A
+        // *network change* is different: the old answer describes the old
+        // path, so it is cleared below before the re-fetch.
+        if let Some(info) = fetch(&client, &url).await {
+            state.lock().unwrap().edge = Some(info);
+        }
+        tokio::select! {
+            _ = changed.notified() => {
+                state.lock().unwrap().edge = None;
+                // Let the new network settle before asking.
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+            _ = tokio::time::sleep(REFRESH) => {}
+        }
+    }
+}
+
+async fn fetch(client: &reqwest::Client, url: &str) -> Option<EdgeInfo> {
+    let text = crate::util::fetch_text_capped(client, url, 4096)
+        .await
+        .ok()?;
+    parse(&text)
+}
+
+/// The `/edge` JSON into [`EdgeInfo`]; `None` when it isn't the expected
+/// shape (a captive portal answering for us, an old worker).
+pub fn parse(text: &str) -> Option<EdgeInfo> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
+    // `colo` is the field that proves this is really the edge answering.
+    let colo = v["colo"].as_str()?.to_string();
+    Some(EdgeInfo {
+        ip: s("ip"),
+        asn: v["asn"].as_u64().unwrap_or(0) as u32,
+        isp: s("isp"),
+        colo,
+        city: s("city"),
+        country: s("country"),
+        tcp_rtt_ms: v["tcp_rtt_ms"].as_f64(),
+        http: s("http"),
+        tls: s("tls"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+
+    #[test]
+    fn edge_answers_parse_and_junk_does_not() {
+        let info = parse(
+            r#"{"ip":"203.0.113.9","asn":8075,"isp":"Microsoft Corporation",
+                "colo":"IAD","city":"Washington","country":"US",
+                "tcp_rtt_ms":9,"http":"HTTP/2","tls":"TLSv1.3","ts":1756240000}"#,
+        )
+        .expect("parses");
+        assert_eq!(info.colo, "IAD");
+        assert_eq!(info.asn, 8075);
+        assert_eq!(info.tcp_rtt_ms, Some(9.0));
+
+        // A captive portal's HTML, or an old worker's 404 body: no colo, no
+        // EdgeInfo — never a garbage row in the Network panel.
+        assert!(parse("<html>sign in</html>").is_none());
+        assert!(parse(r#"{"error":"not found"}"#).is_none());
+    }
+}

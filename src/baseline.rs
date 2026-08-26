@@ -55,6 +55,14 @@ pub struct Baseline {
     pub gateway_loss_pct: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_loss_pct: Option<f64>,
+    /// TCP connect and web TTFB normals (best anchor) — the ICMP-free view
+    /// of "how far away is the internet here". On networks that blackhole
+    /// ICMP these are the *only* latency normals a location can learn.
+    /// Absent in files from before the fields existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_tcp_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_ttfb_ms: Option<f64>,
     pub dns_ms: Option<f64>,
     pub rssi_dbm: Option<f64>,
     pub down_mbps: Option<f64>,
@@ -82,6 +90,8 @@ pub struct Sample {
     pub anchor_ms: Option<f64>,
     pub gateway_loss_pct: Option<f64>,
     pub anchor_loss_pct: Option<f64>,
+    pub anchor_tcp_ms: Option<f64>,
+    pub web_ttfb_ms: Option<f64>,
     pub dns_ms: Option<f64>,
     pub rssi_dbm: Option<f64>,
 }
@@ -120,6 +130,24 @@ impl Sample {
             .filter(|t| !t.discovered && !t.window.is_empty())
             .map(|t| t.recent_loss_pct(n))
             .min_by(f64::total_cmp);
+        // The ICMP-free latency normals, same "best anchor" reasoning: TCP
+        // connect and web TTFB both work where ping is blackholed, so a
+        // location's learning never comes back empty-handed.
+        let anchor_tcp_ms = s
+            .targets
+            .iter()
+            .filter(|t| !t.discovered)
+            .filter_map(|t| t.tcp.stats(n).mean)
+            .min_by(f64::total_cmp);
+        let web_ttfb_ms = s
+            .targets
+            .iter()
+            .filter(|t| !t.discovered)
+            .filter_map(|t| {
+                let recent: Vec<f64> = t.web.hist.data.iter().rev().take(n).copied().collect();
+                (!recent.is_empty()).then(|| recent.iter().sum::<f64>() / recent.len() as f64)
+            })
+            .min_by(f64::total_cmp);
         // This network's own resolvers; the reference resolver is contrast.
         let dns: Vec<f64> = s
             .dns
@@ -136,6 +164,8 @@ impl Sample {
             anchor_ms,
             gateway_loss_pct,
             anchor_loss_pct,
+            anchor_tcp_ms,
+            web_ttfb_ms,
             dns_ms,
             rssi_dbm,
         }
@@ -161,6 +191,8 @@ impl Baseline {
         self.anchor_ms = ewma(self.anchor_ms, sample.anchor_ms);
         self.gateway_loss_pct = ewma(self.gateway_loss_pct, sample.gateway_loss_pct);
         self.anchor_loss_pct = ewma(self.anchor_loss_pct, sample.anchor_loss_pct);
+        self.anchor_tcp_ms = ewma(self.anchor_tcp_ms, sample.anchor_tcp_ms);
+        self.web_ttfb_ms = ewma(self.web_ttfb_ms, sample.web_ttfb_ms);
         self.dns_ms = ewma(self.dns_ms, sample.dns_ms);
         self.rssi_dbm = ewma(self.rssi_dbm, sample.rssi_dbm);
         self.samples += 1;

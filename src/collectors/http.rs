@@ -239,6 +239,7 @@ async fn probe_verified(
 fn proxy_client(proxy: &str) -> Option<reqwest::Client> {
     let proxy = reqwest::Proxy::all(proxy).ok()?;
     reqwest::Client::builder()
+        .user_agent(crate::util::USER_AGENT)
         .proxy(proxy)
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(4))
@@ -248,6 +249,7 @@ fn proxy_client(proxy: &str) -> Option<reqwest::Client> {
 
 fn family_client(local: IpAddr) -> Option<reqwest::Client> {
     reqwest::Client::builder()
+        .user_agent(crate::util::USER_AGENT)
         .local_address(local)
         // Direct by definition: the probe measures the network, not whatever
         // `https_proxy` happens to be set to in this shell.

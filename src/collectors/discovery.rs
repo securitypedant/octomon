@@ -181,6 +181,7 @@ pub async fn public_ip(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg:
         return;
     }
     let Ok(http) = reqwest::Client::builder()
+        .user_agent(crate::util::USER_AGENT)
         .timeout(std::time::Duration::from_secs(10))
         .no_proxy()
         .build()
@@ -209,7 +210,20 @@ pub async fn public_ip(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg:
         }
     }
     let Some(addr) = found else {
-        state.lock().unwrap().public_ip_error = Some(errors.join("; "));
+        // The raw reqwest error chains (two of them, with full URLs) turned
+        // the analysis row into a paragraph. The row gets one readable
+        // sentence; the chains go to the events timeline — once per distinct
+        // failure, not on every retry of the same one.
+        let short = summarize_fetch_errors(&errors);
+        let mut s = state.lock().unwrap();
+        if s.public_ip_error.as_deref() != Some(short.as_str()) {
+            s.push_event(
+                crate::verdict::Severity::Info,
+                crate::app::EventCategory::Network,
+                format!("public IP discovery failed — {}", errors.join(" · ")),
+            );
+        }
+        s.public_ip_error = Some(short);
         return;
     };
     state.lock().unwrap().public_ip_error = None;
@@ -231,6 +245,40 @@ pub async fn public_ip(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg:
     }
 }
 
+/// One readable sentence out of the per-URL fetch errors, for the analysis
+/// row. When both endpoints failed the same way (the overwhelmingly common
+/// case — DNS is down for everyone or no one), name the way once; otherwise
+/// admit the mix. The full chains live in the events timeline.
+pub fn summarize_fetch_errors(errors: &[String]) -> String {
+    let kind = |e: &str| {
+        let e = e.to_ascii_lowercase();
+        if e.contains("dns error") || e.contains("lookup") || e.contains("resolve") {
+            "DNS lookup failed"
+        } else if e.contains("timed out") || e.contains("timeout") {
+            "timed out"
+        } else if e.contains("certificate") || e.contains("tls") {
+            "TLS failed"
+        } else if e.contains("connect") {
+            "could not connect"
+        } else if e.contains("no address in the answer") {
+            "no address in the answer"
+        } else {
+            "request failed"
+        }
+    };
+    let kinds: Vec<&str> = errors.iter().map(|e| kind(e)).collect();
+    let uniform = kinds.windows(2).all(|w| w[0] == w[1]);
+    let what = match (uniform, kinds.first()) {
+        (true, Some(k)) => (*k).to_string(),
+        (false, _) => kinds.join(" / "),
+        (_, None) => "request failed".to_string(),
+    };
+    format!(
+        "{what} ({} endpoints tried) — details in events [e]",
+        errors.len().max(1)
+    )
+}
+
 /// The address in a public-IP answer: either the bare literal most services
 /// return, or the `ip=…` line of Cloudflare's `cdn-cgi/trace` format.
 pub fn parse_public_ip(text: &str) -> Option<IpAddr> {
@@ -246,6 +294,30 @@ pub fn parse_public_ip(text: &str) -> Option<IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The analysis row must stay one sentence however ugly the underlying
+    /// error chains are; the chains themselves belong to the events log.
+    #[test]
+    fn fetch_errors_summarize_to_one_readable_line() {
+        // The screenshot case: both endpoints, same DNS failure, full chains.
+        let errors = vec![
+            "https://api.ipify.org: could not connect: dns error: failed to lookup address information: nodename nor servname provided, or not known".to_string(),
+            "https://one.one.one.one/cdn-cgi/trace: could not connect: dns error: failed to lookup address information: nodename nor servname provided, or not known".to_string(),
+        ];
+        assert_eq!(
+            summarize_fetch_errors(&errors),
+            "DNS lookup failed (2 endpoints tried) — details in events [e]"
+        );
+
+        // Different failures per endpoint: named, still short.
+        let mixed = vec![
+            "https://api.ipify.org: timed out".to_string(),
+            "https://one.one.one.one/cdn-cgi/trace: no address in the answer".to_string(),
+        ];
+        let s = summarize_fetch_errors(&mixed);
+        assert!(s.starts_with("timed out / no address in the answer"), "{s}");
+        assert!(s.len() < 100, "still a row, not a paragraph: {s}");
+    }
 
     #[test]
     fn public_ip_answers_parse_in_both_shapes() {

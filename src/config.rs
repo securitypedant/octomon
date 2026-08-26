@@ -125,6 +125,18 @@ pub struct Config {
     /// answer. `--theme` overrides for one run.
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// The edge check: octomon.dev's `/edge` endpoint reports how the
+    /// Cloudflare edge sees this connection — the answering PoP, the ISP's
+    /// AS, and the edge's own TCP RTT measurement. Exists purely to deepen
+    /// the monitoring; it stores nothing about the client (the website's
+    /// /privacy page shows everything its operator can see). Set to "" to
+    /// never call it.
+    #[serde(default = "default_edge_check_url")]
+    pub edge_check_url: String,
+}
+
+fn default_edge_check_url() -> String {
+    "https://octomon.dev/edge".to_string()
 }
 
 fn default_theme() -> String {
@@ -236,6 +248,7 @@ impl Default for Config {
             bar_glyphs: "auto".to_string(),
             bandwidth_units: default_bandwidth_units(),
             theme: default_theme(),
+            edge_check_url: default_edge_check_url(),
         }
     }
 }

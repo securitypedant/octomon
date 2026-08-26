@@ -77,6 +77,10 @@ async fn connect(url: &str) -> Result<Ws, String> {
         "Sec-WebSocket-Protocol",
         SUBPROTOCOL.parse().expect("valid header value"),
     );
+    req.headers_mut().insert(
+        "User-Agent",
+        crate::util::USER_AGENT.parse().expect("valid header value"),
+    );
     let (ws, _resp) = connect_async(req).await.map_err(|e| e.to_string())?;
     Ok(ws)
 }

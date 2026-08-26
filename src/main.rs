@@ -300,6 +300,12 @@ async fn main() -> Result<()> {
     tokio::spawn(collectors::signal::run(state.clone()));
     tokio::spawn(collectors::procbw::run(state.clone()));
     tokio::spawn(collectors::web::run(state.clone()));
+    tokio::spawn(collectors::tcp::run(state.clone(), cfg.clone()));
+    tokio::spawn(collectors::edge::run(
+        state.clone(),
+        cfg.clone(),
+        network_changed.clone(),
+    ));
     tokio::spawn(collectors::resolve::run(
         state.clone(),
         ping_clients.clone(),
@@ -1502,6 +1508,22 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     side = Side::Refresh;
                 }
                 KeyCode::Char('w') => s.cycle_window(),
+                // 'i' flips the quality table between its probe families
+                // (ICMP ↔ TCP connect). The split view shows one at a time —
+                // full screen already shows both side by side. The automatic
+                // default is ICMP, or TCP where the network blackholes ICMP,
+                // so the flip is computed from what is showing now.
+                KeyCode::Char('i') => {
+                    let auto = if verdict::icmp_blackholed(&s) {
+                        app::ProbeFamily::Tcp
+                    } else {
+                        app::ProbeFamily::Icmp
+                    };
+                    s.quality_family = Some(match s.quality_family.unwrap_or(auto) {
+                        app::ProbeFamily::Icmp => app::ProbeFamily::Tcp,
+                        app::ProbeFamily::Tcp => app::ProbeFamily::Icmp,
+                    });
+                }
                 // 'l' toggles session recording; the logger task acts on this
                 // and reports back, so no file I/O happens on the key path.
                 KeyCode::Char('l') => s.logging_requested = !s.logging_requested,

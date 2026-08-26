@@ -9,6 +9,16 @@ use futures_util::StreamExt;
 /// crates.io build. What every "which octomon is this?" surface prints.
 pub const VERSION: &str = env!("OCTOMON_VERSION_FULL");
 
+/// How octomon identifies itself on every HTTP(S) request it makes — probes,
+/// speed tests, RDAP, the public-IP lookup. A monitoring tool that hits
+/// endpoints on a timer owes their operators an honest name and somewhere to
+/// look it up, not reqwest's silence or a browser costume.
+pub const USER_AGENT: &str = concat!(
+    "octomon/",
+    env!("CARGO_PKG_VERSION"),
+    " (network monitoring tool; +https://octomon.dev)"
+);
+
 /// A count of minutes as people read time: "40m", "5h 20m", "2d 10h".
 /// "3458 min" asks the reader to do arithmetic mid-glance; two units are
 /// plenty, so days drop the minutes.

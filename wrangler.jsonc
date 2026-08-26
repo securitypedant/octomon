@@ -14,8 +14,18 @@
   "r2_buckets": [
     { "binding": "APT", "bucket_name": "octomon-apt" }
   ],
+  // /edge's request counter: one datapoint per call carrying only the
+  // octomon version family and a count — the entire input to the public
+  // graph on /privacy. The dataset is auto-created on first write.
+  "analytics_engine_datasets": [
+    { "binding": "EDGE_STATS", "dataset": "octomon_edge" }
+  ],
   "routes": [
     { "pattern": "octomon.dev", "custom_domain": true }
   ],
-  "observability": { "enabled": true }
+  // Deliberately OFF: Workers Logs would persist per-request invocation
+  // records, and /privacy promises /edge keeps no logs about callers. Use
+  // `npx wrangler tail` for live debugging — it streams and stores nothing —
+  // and avoid tailing while chasing anything other than a real problem.
+  "observability": { "enabled": false }
 }

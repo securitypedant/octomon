@@ -57,7 +57,9 @@ Things it checks:
 The panels:
 
 - **Connection Quality** — ICMP latency to configurable targets (last / avg /
-  p95 / max), jitter, loss, and a bufferbloat grade. Auto-discovers the gateway
+  p95 / max), jitter, loss, and a bufferbloat grade — plus the same columns
+  measured over TCP connects to port 443 (`i` toggles; full screen shows both),
+  which keep working on networks that blackhole ping. Auto-discovers the gateway
   and next hops, traceroutes any target (`t`), and monitors every hop on a path
   MTR-style (`m`) with per-hop loss and latency; `W` asks who owns any address.
 - **Bandwidth** — live throughput, an on-demand speed test (`s`) with a choice
@@ -226,6 +228,7 @@ octomon --help
 | `Ctrl+R` | Total reset: erase **all** octomon config and stored data (baselines, history, speed tests) — asks you to type `ERASE` to confirm |
 | **Connection Quality** | |
 | `a` / `d` | Add / delete a target (add accepts an IP or DNS name) |
+| `i` | Toggle the stats between ICMP and TCP connect (`:443`) — full screen shows both side by side |
 | `g` | Graph the selected target's latency |
 | `t` | Traceroute the selected target once |
 | `m` | Continuously monitor every hop to the target (MTR-style) |
@@ -273,6 +276,8 @@ contacts, and why:
 |----------|------|-----|-----------|
 | Your ICMP targets (default 1.1.1.1, 8.8.8.8, 9.9.9.9, octomon.dev), plus the gateway and first hops found by a startup `traceroute` toward `discovery_probe` | continuously | latency/loss | ICMP echo |
 | Your ICMP targets, over HTTPS | every 5 s | is the web service up (HEAD, no body, no redirects, certificate errors tolerated — a timing probe) | a `HEAD /` |
+| Your anchor targets, TCP port 443 | every second | connect-time latency/loss that works where ICMP is blocked (a handshake, closed immediately; no data sent) | a TCP handshake |
+| `octomon.dev/edge` (`edge_check_url`) | at startup, on network change, then every 15 min | how the Cloudflare edge sees this connection: serving PoP, your ISP's AS, the edge's own TCP RTT to you | a GET with octomon's User-Agent; the endpoint stores nothing about you — see [octomon.dev/privacy](https://octomon.dev/privacy) |
 | Your system's DNS resolvers, and the reference resolver (`dns_reference_resolver`, default 1.1.1.1) | every 5 s; once a minute a random non-existent name | resolver latency; hijack check | one A query for `dns_probe_name` (default `example.com`) |
 | Your OS's own connectivity-check URL (`captive.apple.com`, `msftconnecttest.com` or `connectivity-check.ubuntu.com`), and through the system proxy when one is set | every 12 s | HTTP reachability, captive-portal detection, clock skew fallback | a GET |
 | `time.cloudflare.com` (`ntp_server`) | at startup, then every 15 min | is the system clock right | one NTP packet |
@@ -288,11 +293,16 @@ Notes:
 - Third-party responses are read with a hard size cap, and text that arrives
   from outside (SSIDs, registry records, process names) has control characters
   stripped before it reaches your terminal.
-- Nothing is sent to any octomon-operated service (there isn't one), and no
-  telemetry is collected.
+- The only octomon-operated endpoint is `octomon.dev/edge`, which exists
+  purely to deepen the monitoring: it returns your connection's edge view *to
+  you* and **stores nothing about you** — no logs, no identifiers. The single
+  thing it counts is requests per octomon version family, and that count is
+  published, in full, at [octomon.dev/privacy](https://octomon.dev/privacy) —
+  the only dashboard that exists. Set `edge_check_url = ""` to never call it.
+  No other telemetry of any kind is collected.
 - Turn any of it off or point it elsewhere in `config.toml`: `public_ip_url`,
   `discovery_probe`, `dns_reference_resolver`, `ntp_server` (`""` disables),
-  `http_probe_provider`, `egress_checks`.
+  `http_probe_provider`, `egress_checks`, `edge_check_url`.
 - The CSV recordings, baselines and history include your SSID, gateway and
   addresses; treat them as you would any other file about your network.
 

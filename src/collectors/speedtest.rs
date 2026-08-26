@@ -112,6 +112,7 @@ fn librespeed_spec(base: &str) -> HttpSpec {
 
 pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>, cfg: crate::config::Config) {
     let client = match reqwest::Client::builder()
+        .user_agent(crate::util::USER_AGENT)
         .pool_max_idle_per_host(STREAMS)
         .timeout(Duration::from_secs(30))
         .build()

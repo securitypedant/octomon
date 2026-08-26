@@ -2112,36 +2112,65 @@ fn performance(s: &AppState, with_data: &[&TargetStat]) -> Option<Performance> {
         _ => PerfGrade::Poor,
     };
 
-    let latency = median(
-        with_data
+    // On an ICMP-blackholed network the grade would otherwise sit at Poor on
+    // 100% loss the analysis itself calls policy: the TCP connect series
+    // carries the judgement instead, and the detail says so.
+    let via_tcp = icmp_blackholed(s);
+    let (latencies, jitters, losses): (Vec<f64>, Vec<f64>, Vec<f64>) = if via_tcp {
+        let anchors: Vec<&TargetStat> = s
+            .targets
             .iter()
-            .filter_map(|t| t.stats(th::RECENT).mean)
-            .collect(),
-    )?;
+            .filter(|t| !t.discovered && !t.tcp.history.data.is_empty())
+            .collect();
+        (
+            anchors
+                .iter()
+                .filter_map(|t| t.tcp.stats(th::RECENT).mean)
+                .collect(),
+            anchors
+                .iter()
+                .map(|t| t.tcp.jitter_ms)
+                .filter(|j| *j > 0.0)
+                .collect(),
+            anchors
+                .iter()
+                .map(|t| t.tcp.recent_loss_pct(th::RECENT))
+                .collect(),
+        )
+    } else {
+        (
+            with_data
+                .iter()
+                .filter_map(|t| t.stats(th::RECENT).mean)
+                .collect(),
+            with_data
+                .iter()
+                .map(|t| t.jitter_ms)
+                .filter(|j| *j > 0.0)
+                .collect(),
+            with_data
+                .iter()
+                .map(|t| t.recent_loss_pct(th::RECENT))
+                .collect(),
+        )
+    };
+    let latency = median(latencies)?;
     let mut parts: Vec<(String, PerfGrade)> = vec![(
-        format!("latency {}", fmt_ms(Some(latency))),
+        format!(
+            "latency {}{}",
+            fmt_ms(Some(latency)),
+            if via_tcp { " (tcp)" } else { "" }
+        ),
         grade(latency, th::PERF_LATENCY_STEPS_MS),
     )];
     // Jitter warms up from zero; before any dispersion is seen it has no vote.
-    if let Some(jitter) = median(
-        with_data
-            .iter()
-            .map(|t| t.jitter_ms)
-            .filter(|j| *j > 0.0)
-            .collect(),
-    ) {
+    if let Some(jitter) = median(jitters) {
         parts.push((
             format!("jitter {jitter:.0}ms"),
             grade(jitter, th::PERF_JITTER_STEPS_MS),
         ));
     }
-    let loss = median(
-        with_data
-            .iter()
-            .map(|t| t.recent_loss_pct(th::RECENT))
-            .collect(),
-    )
-    .unwrap_or(0.0);
+    let loss = median(losses).unwrap_or(0.0);
     parts.push((
         format!("loss {loss:.0}%"),
         grade(loss, th::PERF_LOSS_STEPS_PCT),
@@ -2715,6 +2744,19 @@ pub fn checks(s: &AppState) -> Vec<Check> {
         })
     };
 
+    // ICMP blackhole first: it explains every dash and 100% above, and
+    // without a line of its own the analysis read "all healthy" while the
+    // quality table sat empty — the reader deserves to be told the judgement
+    // is running on web and DNS evidence alone.
+    if icmp_blackholed(s) {
+        push(
+            "ICMP",
+            RungStatus::Warn,
+            "blocked on this network — every ping goes unanswered while the web answers, so the latency/loss columns cannot measure here; web and DNS carry the judgement"
+                .to_string(),
+        );
+    }
+
     // Path discovery + public IP.
     let hops = s.targets.iter().filter(|t| t.is_path_hop()).count();
     let gw = s.targets.iter().any(|t| t.hop_ttl() == Some(1));
@@ -2739,6 +2781,48 @@ pub fn checks(s: &AppState) -> Vec<Check> {
             "gateway not found yet".to_string()
         },
     );
+    // The edge's view, when the /edge check has answered: an independent,
+    // ICMP-free vantage — the far end measured *us*.
+    if let Some(e) = &s.edge {
+        let place = match (e.city.is_empty(), e.country.is_empty()) {
+            (false, false) => format!("{} ({}, {})", e.colo, e.city, e.country),
+            (false, true) => format!("{} ({})", e.colo, e.city),
+            _ => e.colo.clone(),
+        };
+        let mut detail = format!("Cloudflare PoP {place}");
+        if !e.isp.is_empty() {
+            detail.push_str(&format!(" · via {} (AS{})", e.isp, e.asn));
+        }
+        if let Some(r) = e.tcp_rtt_ms {
+            detail.push_str(&format!(" · its tcp rtt to us {r:.0}ms"));
+        }
+        if !e.http.is_empty() {
+            detail.push_str(&format!(" · {} {}", e.http, e.tls));
+        }
+        // A public IP that disagrees with the edge's is worth a word: two
+        // egress paths (a proxy for HTTP, a different route for the probe).
+        let public_seen = s
+            .targets
+            .iter()
+            .find(|t| t.discovered && t.label.contains("public"))
+            .map(|t| t.addr.to_string());
+        let mismatch = public_seen.is_some_and(|p| !e.ip.is_empty() && p != e.ip);
+        if mismatch {
+            detail.push_str(&format!(
+                " · saw us as {} — differs from the discovered public IP",
+                e.ip
+            ));
+        }
+        push(
+            "edge",
+            if mismatch {
+                RungStatus::Warn
+            } else {
+                RungStatus::Ok
+            },
+            detail,
+        );
+    }
     let public = s
         .targets
         .iter()

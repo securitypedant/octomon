@@ -956,9 +956,19 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                     .rssi_dbm
                     .map(|r| format!(" · rssi ~{r:.0}dBm"))
                     .unwrap_or_default();
+                // The ICMP-free normals, when learned: on a network that
+                // blackholes ping these are the only latency the location
+                // knows, and they sit right beside the "no ICMP" that
+                // explains the gaps.
+                let http_normals = match (b.anchor_tcp_ms, b.web_ttfb_ms) {
+                    (Some(t), Some(w)) => format!(" · tcp ~{t:.0}ms · web ~{w:.0}ms"),
+                    (Some(t), None) => format!(" · tcp ~{t:.0}ms"),
+                    (None, Some(w)) => format!(" · web ~{w:.0}ms"),
+                    (None, None) => String::new(),
+                };
                 lines.push(Line::from(Span::styled(
                     format!(
-                        "  gateway {} · internet {} · DNS {}{rssi}{speed} · {} healthy",
+                        "  gateway {} · internet {}{http_normals} · DNS {}{rssi}{speed} · {} healthy",
                         ms(b.gateway_ms, b.gateway_loss_pct),
                         ms(b.anchor_ms, b.anchor_loss_pct),
                         ms(b.dns_ms, None),
@@ -1838,8 +1848,16 @@ fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                 )));
             }
             Verdict::Healthy => {
+                // On an ICMP-blackholed network "healthy" rests on web + DNS
+                // evidence alone — say so, or the empty quality table and the
+                // green verdict read as contradicting each other.
+                let qualifier = if crate::verdict::icmp_blackholed(s) {
+                    " (judged on web + DNS — this network blocks ICMP)"
+                } else {
+                    ""
+                };
                 lines.push(Line::from(Span::styled(
-                    " no findings — connection looks healthy",
+                    format!(" no findings — connection looks healthy{qualifier}"),
                     Style::new().fg(Color::Green),
                 )));
             }
@@ -1970,6 +1988,112 @@ fn block(title: &str, focused: bool) -> Block<'static> {
         .border_style(Style::new().fg(border))
 }
 
+/// The numbers one probe family contributes to a quality-table row,
+/// precomputed so ICMP (flat fields on `TargetStat`) and TCP (a
+/// [`crate::app::Series`]) render through one code path with one set of
+/// grading rules.
+struct FamilyNums {
+    last: Option<f64>,
+    jitter: f64,
+    st: crate::app::RttStats,
+    loss: f64,
+    now_loss: f64,
+    stale: bool,
+    rtt_ref: Option<f64>,
+    loss_ref: Option<f64>,
+    /// This family's wall of loss is the network's ICMP policy, not a fault
+    /// (see `icmp_blackholed`) — excused readings render dim.
+    excused: bool,
+    /// False for a target this family never probes (TCP skips discovered
+    /// hops): cells show a quiet placeholder instead of fake 0% loss.
+    probed: bool,
+}
+
+/// The metric cells (`last avg p95 [max] jit loss`) for one family.
+fn family_cells(v: &FamilyNums, dim_all: bool, with_max: bool) -> Vec<Cell<'static>> {
+    let cell = |text: String, color: Color| {
+        let c = if dim_all { theme::dim() } else { color };
+        Cell::from(Span::styled(text, Style::new().fg(c)))
+    };
+    if !v.probed {
+        let quiet = || cell("·".into(), theme::dim());
+        let mut out = vec![quiet(), quiet(), quiet()];
+        if with_max {
+            out.push(quiet());
+        }
+        out.extend([quiet(), cell(String::new(), theme::dim())]);
+        return out;
+    }
+    let excused_wall = v.excused && v.loss >= 99.0;
+    let windowed = |x: Option<f64>| if v.stale { None } else { x };
+    let stale_c = if excused_wall {
+        theme::dim()
+    } else {
+        match crate::verdict::loss_grade(v.now_loss, v.loss_ref) {
+            crate::verdict::RttGrade::Bad => Color::Red,
+            crate::verdict::RttGrade::Warn => theme::warn(),
+            crate::verdict::RttGrade::Good => theme::dim(),
+        }
+    };
+    let rtt_c = |x: Option<f64>| match x {
+        Some(ms) => rtt_color(ms, v.rtt_ref),
+        None if v.stale => stale_c,
+        None => theme::dim(),
+    };
+    let jit_color = if v.stale {
+        stale_c
+    } else if v.jitter < th::PERF_JITTER_STEPS_MS[1] {
+        Color::Green
+    } else if v.jitter < th::PERF_JITTER_STEPS_MS[2] {
+        theme::warn()
+    } else {
+        Color::Red
+    };
+    let loss_color = if excused_wall {
+        theme::dim()
+    } else {
+        match (
+            crate::verdict::loss_grade(v.loss, v.loss_ref),
+            crate::verdict::loss_grade(v.loss, None),
+        ) {
+            (crate::verdict::RttGrade::Good, crate::verdict::RttGrade::Good) => Color::Green,
+            // "Good" only against this location's learned weather: usual,
+            // not healthy. Dim says "expected here"; green would say
+            // "fine", which 30% loss on a plane is not.
+            (crate::verdict::RttGrade::Good, _) => theme::dim(),
+            (crate::verdict::RttGrade::Warn, _) => theme::warn(),
+            (crate::verdict::RttGrade::Bad, _) => Color::Red,
+        }
+    };
+    // ↓ marks loss that is pure momentum: the recent probes are clean and
+    // the figure is an ended incident draining out of the window.
+    let aging = v.loss >= 0.5 && v.now_loss == 0.0;
+    let mut out = vec![
+        cell(
+            fmt_ms(v.last),
+            latency_color(v.last, 0.0, v.rtt_ref, v.loss_ref),
+        ),
+        cell(fmt_ms(windowed(v.st.mean)), rtt_c(windowed(v.st.mean))),
+        cell(fmt_ms(windowed(v.st.p95)), rtt_c(windowed(v.st.p95))),
+    ];
+    if with_max {
+        out.push(cell(fmt_ms(windowed(v.st.max)), rtt_c(windowed(v.st.max))));
+    }
+    out.push(cell(
+        if v.stale {
+            "—".into()
+        } else {
+            format!("{:.1}", v.jitter)
+        },
+        jit_color,
+    ));
+    out.push(cell(
+        format!("{:.0}%{}", v.loss, if aging { "↓" } else { "" }),
+        loss_color,
+    ));
+    out
+}
+
 fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     // The border is a fixed inset, so the inner rect is known before the title
     // is — and the title needs the scroll counts, which depend on the layout.
@@ -2016,6 +2140,23 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let n = s.window_samples();
 
     let focused = s.focus == Panel::Quality && s.sub_pane == SubPane::Primary;
+    // The whole network drops ICMP while the web answers (Azure VMs): every
+    // ICMP row's 100% is the same non-signal, and neither red (nothing is
+    // broken) nor green (nothing is *fine* — nothing is measured) tells the
+    // truth. It also flips the split view's default family to TCP, so such a
+    // network opens onto numbers instead of dashes.
+    let blackholed = crate::verdict::icmp_blackholed(s);
+    let family = s.quality_family.unwrap_or(if blackholed {
+        crate::app::ProbeFamily::Tcp
+    } else {
+        crate::app::ProbeFamily::Icmp
+    });
+    // Full screen fits both families side by side; the max columns are the
+    // least diagnostic (p95 already tells the tail story) and yield first on
+    // narrower fullscreens — TCP's before ICMP's.
+    let dual = s.fullscreen;
+    let icmp_max = !dual || area.width >= 140;
+    let tcp_max = dual && area.width >= 150;
     // Sortable header: highlight the column cursor, mark the active sort ▲/▼.
     let hcell = |sort_col: usize, label: &str| {
         let mut txt = label.to_string();
@@ -2033,20 +2174,41 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         };
         Cell::from(Span::styled(txt, style))
     };
-    let header = Row::new(vec![
-        Cell::from(""),
-        hcell(0, "Target"),
+    let plain = |label: &str| {
         Cell::from(Span::styled(
-            "Address",
+            label.to_string(),
             Style::new().fg(theme::text()).bold(),
-        )),
-        hcell(1, "last"),
-        hcell(2, "avg"),
-        hcell(3, "p95"),
-        hcell(4, "max"),
-        hcell(5, "jit"),
-        hcell(6, "loss"),
-    ]);
+        ))
+    };
+    let mut header_cells = vec![Cell::from(""), hcell(0, "Target"), plain("Address")];
+    // Split view: the metric headers describe whichever family is shown and
+    // stay sortable. Dual (full screen): the ICMP group keeps the sort; the
+    // TCP group sits behind a labelled divider.
+    if dual || family == crate::app::ProbeFamily::Icmp {
+        header_cells.extend([hcell(1, "last"), hcell(2, "avg"), hcell(3, "p95")]);
+        if icmp_max {
+            header_cells.push(hcell(4, "max"));
+        }
+        header_cells.extend([hcell(5, "jit"), hcell(6, "loss")]);
+    } else {
+        header_cells.extend([plain("last"), plain("avg"), plain("p95")]);
+        if icmp_max {
+            header_cells.push(plain("max"));
+        }
+        header_cells.extend([plain("jit"), plain("loss")]);
+    }
+    if dual {
+        header_cells.push(Cell::from(Span::styled(
+            "│tcp",
+            Style::new().fg(theme::accent()).bold(),
+        )));
+        header_cells.extend([plain("last"), plain("avg"), plain("p95")]);
+        if tcp_max {
+            header_cells.push(plain("max"));
+        }
+        header_cells.extend([plain("jit"), plain("loss")]);
+    }
+    let header = Row::new(header_cells);
 
     let order = s.quality_order();
     // Scroll so the cursor stays visible: with a path monitor open below, the
@@ -2063,64 +2225,58 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
 
     let rows = order.iter().skip(first).take(rows_avail).map(|&i| {
         let t = &s.targets[i];
-        let st = t.stats(n);
-        let loss = t.recent_loss_pct(n);
-        let rtt_ref = crate::verdict::rtt_reference(t, s);
-        let loss_ref = crate::verdict::loss_reference(t, s);
-        // Loss as it stands *right now*: the detection-sized slice of the
-        // window. When the window still carries an ended incident, this is
-        // what lets the row start relaxing before the figures do.
-        let now_loss = t.recent_loss_pct(th::RECENT.min(n));
+        let icmp_loss = t.recent_loss_pct(n);
         // A mid-path router that never answers ICMP is not a fault — the
         // analysis already treats it that way — so it reads dim, not red.
-        let dim_hop = t.is_path_hop() && loss >= th::LOSS_DOWN_PCT;
-        // Every stat cell grades itself, so recovery reads as the row
-        // greening from the left: `last` and the name turn green the moment
-        // replies return, while p95/max/loss hold their colour until the
-        // incident ages out of the window — "now is fine, the history is
-        // still draining" at a glance.
-        let cell = |text: String, color: Color| {
-            let c = if dim_hop { theme::dim() } else { color };
-            Cell::from(Span::styled(text, Style::new().fg(c)))
+        let dim_hop = t.is_path_hop() && icmp_loss >= th::LOSS_DOWN_PCT;
+        // Every stat cell grades itself (see `family_cells`), so recovery
+        // reads as the row greening from the left: `last` and the name turn
+        // green the moment replies return, while p95/max/loss hold their
+        // colour until the incident ages out of the window.
+        let icmp = FamilyNums {
+            last: t.last_rtt_ms,
+            jitter: t.jitter_ms,
+            st: t.stats(n),
+            loss: icmp_loss,
+            // Loss as it stands *right now*: the detection-sized slice of
+            // the window, which lets the row start relaxing before the
+            // windowed figures do.
+            now_loss: t.recent_loss_pct(th::RECENT.min(n)),
+            stale: t.stats_stale(n),
+            rtt_ref: crate::verdict::rtt_reference(t, s),
+            loss_ref: crate::verdict::loss_reference(t, s),
+            excused: blackholed,
+            probed: true,
         };
-        // The RTT window only ever holds successes, so when nothing beyond
-        // the gateway answers it would keep serving the last good avg/p95/max
-        // — frozen, and still green — while loss reads 100%. Once no probe
-        // in the window the header claims to cover got an answer, those
-        // figures describe nothing current: dash them out, red when the path
-        // is failing right now, dim for a target that simply has no data yet.
-        let stale = t.stats_stale(n);
-        let windowed = |v: Option<f64>| if stale { None } else { v };
-        let stale_c = match crate::verdict::loss_grade(now_loss, loss_ref) {
-            crate::verdict::RttGrade::Bad => Color::Red,
-            crate::verdict::RttGrade::Warn => theme::warn(),
-            crate::verdict::RttGrade::Good => theme::dim(),
+        let tcp = FamilyNums {
+            last: t.tcp.last_ms,
+            jitter: t.tcp.jitter_ms,
+            st: t.tcp.stats(n),
+            loss: t.tcp.recent_loss_pct(n),
+            now_loss: t.tcp.recent_loss_pct(th::RECENT.min(n)),
+            stale: t.tcp.stats_stale(n),
+            rtt_ref: t.tcp.floor_ms(),
+            loss_ref: None,
+            excused: false,
+            probed: !t.discovered,
         };
-        let rtt_c = |v: Option<f64>| match v {
-            Some(ms) => rtt_color(ms, rtt_ref),
-            None if stale => stale_c,
-            None => theme::dim(),
-        };
-        let jit_color = if stale {
-            stale_c
-        } else if t.jitter_ms < th::PERF_JITTER_STEPS_MS[1] {
-            Color::Green
-        } else if t.jitter_ms < th::PERF_JITTER_STEPS_MS[2] {
-            theme::warn()
+        // The identity columns wear the shown family's *current* condition —
+        // last reply and fresh loss — not the windowed history beside them.
+        let id_nums = if !dual && family == crate::app::ProbeFamily::Tcp {
+            &tcp
         } else {
-            Color::Red
+            &icmp
         };
-        let loss_color = match crate::verdict::loss_grade(loss, loss_ref) {
-            crate::verdict::RttGrade::Good => Color::Green,
-            crate::verdict::RttGrade::Warn => theme::warn(),
-            crate::verdict::RttGrade::Bad => Color::Red,
+        let identity = if (id_nums.excused && id_nums.loss >= 99.0) || !id_nums.probed {
+            theme::dim()
+        } else {
+            latency_color(
+                id_nums.last,
+                id_nums.now_loss,
+                id_nums.rtt_ref,
+                id_nums.loss_ref,
+            )
         };
-        // ↓ marks loss that is pure momentum: the recent probes are clean
-        // and the figure is an ended incident draining out of the window.
-        let aging = loss >= 0.5 && now_loss == 0.0;
-        // The identity columns wear the *current* condition — last reply and
-        // fresh loss — not the windowed history beside them.
-        let identity = latency_color(t.last_rtt_ms, now_loss, rtt_ref, loss_ref);
         let marker = if i == s.graph_target { "►" } else { "" };
         let mut row_style = Style::new();
         if focused && i == s.selected {
@@ -2132,46 +2288,53 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         } else {
             t.label.clone()
         };
-        Row::new(vec![
+        let idc = |text: String| {
+            let c = if dim_hop { theme::dim() } else { identity };
+            Cell::from(Span::styled(text, Style::new().fg(c)))
+        };
+        let mut cells = vec![
             Cell::from(Span::styled(marker, Style::new().fg(theme::accent()))),
-            cell(label, identity),
-            cell(t.addr.to_string(), identity),
-            cell(
-                fmt_ms(t.last_rtt_ms),
-                latency_color(t.last_rtt_ms, 0.0, rtt_ref, loss_ref),
-            ),
-            cell(fmt_ms(windowed(st.mean)), rtt_c(windowed(st.mean))),
-            cell(fmt_ms(windowed(st.p95)), rtt_c(windowed(st.p95))),
-            cell(fmt_ms(windowed(st.max)), rtt_c(windowed(st.max))),
-            cell(
-                if stale {
-                    "—".into()
-                } else {
-                    format!("{:.1}", t.jitter_ms)
-                },
-                jit_color,
-            ),
-            cell(
-                format!("{loss:.0}%{}", if aging { "↓" } else { "" }),
-                loss_color,
-            ),
-        ])
-        .style(row_style)
+            idc(label),
+            idc(t.addr.to_string()),
+        ];
+        if dual {
+            cells.extend(family_cells(&icmp, dim_hop, icmp_max));
+            cells.push(Cell::from(Span::styled("│", Style::new().fg(theme::dim()))));
+            cells.extend(family_cells(&tcp, dim_hop, tcp_max));
+        } else if family == crate::app::ProbeFamily::Tcp {
+            cells.extend(family_cells(&tcp, dim_hop, icmp_max));
+        } else {
+            cells.extend(family_cells(&icmp, dim_hop, icmp_max));
+        }
+        Row::new(cells).style(row_style)
     });
     // The metric columns are fixed; the name and address split whatever the
     // panel has left, so a long hostname is not clipped at 13 characters while
     // the right-hand side of the panel sits empty.
-    let widths = [
+    let mut widths = vec![
         Constraint::Length(2),
         Constraint::Min(14),
         Constraint::Min(16),
         Constraint::Length(8),
         Constraint::Length(8),
         Constraint::Length(8),
-        Constraint::Length(8),
-        Constraint::Length(6),
-        Constraint::Length(6),
     ];
+    if icmp_max {
+        widths.push(Constraint::Length(8));
+    }
+    widths.extend([Constraint::Length(6), Constraint::Length(6)]);
+    if dual {
+        widths.push(Constraint::Length(4)); // the │tcp divider
+        widths.extend([
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(8),
+        ]);
+        if tcp_max {
+            widths.push(Constraint::Length(8));
+        }
+        widths.extend([Constraint::Length(6), Constraint::Length(6)]);
+    }
     // Scroll counts live in the title: overlaying them on the header row
     // clobbered whichever column happened to sit under them. They come before
     // the stats so a narrow panel clips the stats, never the scroll cue.
@@ -2192,12 +2355,22 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     if s.window_is_capped() {
         title.push_str(&format!(" capped at {}", s.window_samples()));
     }
+    // Which family the split-view metric columns describe ([i] toggles);
+    // full screen shows both, labelled by the │tcp divider.
+    if !dual && family == crate::app::ProbeFamily::Tcp {
+        title.push_str(" · tcp :443");
+    }
     if let Some(t) = s.targets.get(s.graph_target) {
         // Same staleness contract as the cells below: jit/sd/bloat are
         // computed from successes only, so with no reply inside the window
         // they would sit frozen in the title looking current.
         if t.stats_stale(n) {
-            title.push_str(&format!(" · {}: not answering", t.label));
+            // Network-wide blackhole: the cue below explains every target at
+            // once; per-target "not answering" would only crowd it out of
+            // the panel's width.
+            if !blackholed {
+                title.push_str(&format!(" · {}: not answering", t.label));
+            }
         } else {
             let st = t.stats(n);
             title.push_str(&format!(
@@ -2224,9 +2397,10 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     }
     // A wall of 100% loss with a working web check is a network that drops
     // ICMP as policy (Azure VMs, some hotels) — name that here, where the red
-    // is, or the table reads as a total outage.
-    if crate::verdict::icmp_blackholed(s) {
-        title.push_str(" · no ICMP replies on this network — web works");
+    // is, or the table reads as a total outage. Kept short: the title is
+    // already long and this cue must survive a half-width panel.
+    if blackholed {
+        title.push_str(" · no ICMP here — web ok");
     }
     title.push(')');
     f.render_widget(block(&title, s.focus == Panel::Quality), area);
@@ -2803,11 +2977,19 @@ fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
         v
     };
     if raw.is_empty() {
+        // "collecting…" is a promise; on a network that blackholes ICMP it
+        // will never be kept — say what is actually happening and where the
+        // real signal lives instead.
+        let placeholder = if crate::verdict::icmp_blackholed(s) {
+            format!(
+                " latency · {} — no ICMP replies on this network; web probes still measure",
+                t.label
+            )
+        } else {
+            format!(" latency · {} — collecting…", t.label)
+        };
         f.render_widget(
-            Paragraph::new(Span::styled(
-                format!(" latency · {} — collecting…", t.label),
-                Style::new().fg(theme::dim()),
-            )),
+            Paragraph::new(Span::styled(placeholder, Style::new().fg(theme::dim()))),
             area,
         );
         return;
@@ -3638,6 +3820,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         head("Connection Quality"),
         row("a", "add target (remembered)"),
         row("d / Del", "delete + forget target"),
+        row("i", "stats: icmp ↔ tcp :443"),
         row("g", "graph selected target"),
         row("t", "traceroute once"),
         row("m", "monitor every hop (MTR)"),
@@ -4094,6 +4277,35 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
                 Style::new().fg(theme::dim()),
             ),
         ]));
+    }
+
+    // The edge's view of this connection, when the /edge check is on and has
+    // answered: the PoP serving you, your ISP by name, and the edge's own
+    // TCP RTT measurement — the far end's version of "how far away are you".
+    if let Some(e) = &s.edge {
+        let mut spans = vec![
+            Span::styled(format!("{:<9}", "edge"), Style::new().fg(theme::dim())),
+            Span::styled(e.colo.clone(), Style::new().fg(theme::text())),
+        ];
+        if !e.isp.is_empty() {
+            spans.push(Span::styled(
+                format!(" · {}", e.isp),
+                Style::new().fg(theme::text()),
+            ));
+            if e.asn != 0 {
+                spans.push(Span::styled(
+                    format!(" (AS{})", e.asn),
+                    Style::new().fg(theme::dim()),
+                ));
+            }
+        }
+        if let Some(rtt) = e.tcp_rtt_ms {
+            spans.push(Span::styled(
+                format!(" · tcp rtt {rtt:.0}ms"),
+                Style::new().fg(theme::text()),
+            ));
+        }
+        lines.push(Line::from(spans));
     }
 
     // The clock, only when it is wrong: right is the expected state.
@@ -6362,20 +6574,94 @@ mod tests {
                 t.record_loss();
             }
         }
-        // Full-screen: the cue rides at the end of a long title and a
-        // half-width panel would clip it before the assertion could see it.
-        s.focus = Panel::Quality;
-        s.fullscreen = true;
         s.http.v4 = FamilyProbe::Ok(30.0);
+        // The split view's half-width panel is exactly where the cue used to
+        // truncate, so that is where it is asserted.
         let out = draw(&s, 170, 40);
         assert!(
-            out.contains("no ICMP replies on this network"),
+            out.contains("no ICMP here — web ok"),
             "expected the blackhole cue in the quality title"
         );
+        // The per-target "not answering" clause yields to the network-wide
+        // cue rather than crowding it out of the width.
+        assert!(!out.contains("not answering"));
+        // The latency graph stops promising "collecting…" — it never will.
+        assert!(out.contains("web probes still measure"));
+        assert!(!out.contains("collecting"));
 
+        // The analysis names the condition and qualifies the green verdict.
+        let checks = crate::verdict::checks(&s);
+        let icmp = checks.iter().find(|c| c.name == "ICMP").expect("ICMP row");
+        assert_eq!(icmp.status, crate::verdict::RungStatus::Warn);
+        assert!(icmp.detail.contains("blocked on this network"));
+        s.overlay = crate::app::Overlay::Triage;
+        s.verdict.current = crate::verdict::Verdict::Healthy;
+        let out = draw(&s, 170, 45);
+        assert!(
+            out.contains("judged on web + DNS"),
+            "healthy line must admit it is judging without ICMP"
+        );
+
+        s.overlay = crate::app::Overlay::None;
         s.http.v4 = FamilyProbe::NotRun;
         let out = draw(&s, 170, 40);
-        assert!(!out.contains("no ICMP replies"));
+        assert!(!out.contains("no ICMP here"));
+        assert!(crate::verdict::checks(&s).iter().all(|c| c.name != "ICMP"));
+    }
+
+    /// The quality table's second family: [i] flips the split view to the
+    /// TCP connect series, an ICMP blackhole flips it automatically, and
+    /// full screen shows both families behind the │tcp divider.
+    #[test]
+    fn quality_table_shows_the_tcp_family() {
+        use crate::app::{FamilyProbe, ProbeFamily, TargetStat};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let mut s = AppState::new(vec![
+            TargetStat::new("Cloudflare".into(), IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+            TargetStat::new("Google".into(), IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+        ]);
+        for t in &mut s.targets {
+            for _ in 0..20 {
+                t.record_reply(10.0);
+                t.tcp.record_reply(33.0);
+            }
+        }
+        // Healthy ICMP: the split view defaults to it — no tcp marker.
+        let out = draw(&s, 170, 40);
+        assert!(!out.contains("tcp :443"));
+        assert!(out.contains("10.0ms"));
+        assert!(!out.contains("33.0ms"));
+
+        // [i] flips to the TCP series: its numbers, and the title says so.
+        s.quality_family = Some(ProbeFamily::Tcp);
+        let out = draw(&s, 170, 40);
+        assert!(out.contains("tcp :443"));
+        assert!(out.contains("33.0ms"));
+
+        // An ICMP blackhole flips the *default* (no user override needed).
+        s.quality_family = None;
+        for t in &mut s.targets {
+            for _ in 0..20 {
+                t.record_loss();
+            }
+        }
+        s.http.v4 = FamilyProbe::Ok(30.0);
+        let out = draw(&s, 170, 40);
+        assert!(out.contains("tcp :443"));
+        assert!(out.contains("33.0ms"));
+
+        // Full screen: both families side by side behind the divider.
+        s.focus = Panel::Quality;
+        s.fullscreen = true;
+        let out = draw(&s, 170, 45);
+        assert!(out.contains("│tcp"));
+        assert!(out.contains("33.0ms"), "tcp numbers in the dual view");
+
+        // The performance grade rides the TCP series while ICMP is blind.
+        let triage = crate::verdict::evaluate(&s);
+        let perf = triage.performance.expect("graded");
+        assert!(perf.detail.contains("(tcp)"), "got: {}", perf.detail);
     }
 
     /// The remotes view lists addresses with their busiest port and process,

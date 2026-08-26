@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>octomon — privacy</title>
+<meta name="description" content="What octomon sends, what we can see, and proof: the only dashboard we have is published on this page. Nothing about you is recorded.">
+<link rel="canonical" href="https://octomon.dev/privacy">
+<link rel="icon" type="image/png" sizes="32x32" href="/images/octomon-logo-32.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/images/octomon-icon-tile.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/images/octomon-icon-tile.png">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://octomon.dev/privacy">
+<meta property="og:title" content="octomon — privacy">
+<meta property="og:description" content="Nothing about you is recorded. The only dashboard we have is published on this page.">
+<meta property="og:image" content="https://octomon.dev/images/octomon-og-card.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="/tokens.css">
+<style>
+  /* Every colour on this page is a token from tokens.css — no hex here. */
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+  }
+  body {
+    margin: 0;
+    background: var(--octo-ink);
+    color: var(--octo-white);
+    font-family: var(--octo-body);
+    font-size: 17px;
+    line-height: 1.6;
+    overflow-x: clip;
+  }
+  a { color: var(--octo-green); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  :focus-visible {
+    outline: 2px solid var(--octo-green);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  h1, h2 {
+    font-family: var(--octo-display);
+    text-transform: uppercase;
+    letter-spacing: -0.01em;
+    font-weight: 400;
+    line-height: 1.05;
+    margin: 0 0 0.4em;
+  }
+  code {
+    font-family: var(--octo-mono);
+    font-size: 0.9em;
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-radius: 5px;
+    padding: 0.1em 0.4em;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  header {
+    border-bottom: 1px solid var(--octo-line);
+    background: var(--octo-ink);
+  }
+  .nav {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+    padding: 14px 0;
+  }
+  .mark { display: flex; align-items: center; gap: 12px; color: var(--octo-white); }
+  .mark:hover { text-decoration: none; }
+  .mark svg { width: 34px; height: 34px; display: block; }
+  .wordmark {
+    font-family: var(--octo-mono);
+    font-weight: 800;
+    font-size: 1.35rem;
+    letter-spacing: 0.023em;
+  }
+  nav.links { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px 22px; font-family: var(--octo-mono); font-size: 0.95rem; }
+
+  section { padding: 56px 0; }
+  section + section { border-top: 1px solid var(--octo-line); }
+  h1 { font-size: clamp(2rem, 4.5vw, 3.4rem); }
+  h2 { font-size: clamp(1.5rem, 3vw, 2.2rem); }
+  .lede { color: var(--octo-muted); max-width: 56em; margin-top: 0; }
+  .pagehead { padding: 56px 0 40px; border-bottom: 2px solid var(--octo-magenta); }
+  section p { max-width: 56em; }
+  section p, section li { color: var(--octo-muted); }
+  section li { margin-bottom: 0.5em; }
+  section strong { color: var(--octo-white); }
+
+  .card {
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+    padding: 22px 24px;
+    margin-top: 24px;
+  }
+  .card h3 {
+    margin: 0 0 10px;
+    font-family: var(--octo-mono); font-weight: 700; font-size: 1.05rem;
+    color: var(--octo-green);
+  }
+
+  /* the published dashboard */
+  .graph-card { overflow-x: auto; }
+  #edge-graph { width: 100%; min-width: 540px; height: 260px; display: block; }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 10px;
+    font-family: var(--octo-mono); font-size: 0.85rem; color: var(--octo-muted);
+  }
+  .legend .key { display: inline-flex; align-items: center; gap: 7px; }
+  .legend .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  .graph-note { font-size: 0.85rem; color: var(--octo-muted); margin-top: 8px; }
+
+  footer {
+    border-top: 2px solid var(--octo-magenta);
+    padding: 28px 0 40px;
+    color: var(--octo-muted);
+    font-size: 0.9rem;
+  }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; }
+
+  @media (max-width: 600px) {
+    .wrap { padding: 0 16px; }
+    nav.links { flex-basis: 100%; margin-left: 0; justify-content: space-between; gap: 6px 8px; font-size: 0.85rem; }
+    .nav { padding-bottom: 24px; }
+    .nav .mark { margin: 0 auto; }
+    section { padding: 44px 0; }
+    .pagehead { padding: 40px 0 32px; }
+    .card { padding: 16px; }
+    footer .wrap { flex-direction: column; align-items: flex-start; gap: 6px; }
+  }
+  @media (max-width: 480px) {
+    .wordmark { font-size: 1.15rem; }
+  }
+</style>
+<!-- Cloudflare Web Analytics -->
+<script type='module' src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "0ebdfd53d18b49d39f76f9d08b3499c9"}'></script>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <a class="mark" href="/" aria-label="octomon home">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-hidden="true">
+        <g fill="var(--octo-green)">
+          <g transform="rotate(-14 22 64)"><rect x="18" y="60" width="8" height="44" rx="4"/></g>
+          <g transform="rotate(-7 34 64)"><rect x="30" y="60" width="8" height="58" rx="4"/></g>
+          <rect x="42" y="60" width="8" height="40" rx="4"/>
+          <rect x="54" y="60" width="8" height="54" rx="4"/>
+          <rect x="66" y="60" width="8" height="42" rx="4"/>
+          <rect x="78" y="60" width="8" height="58" rx="4" fill="var(--octo-amber)"/>
+          <g transform="rotate(7 94 64)"><rect x="90" y="60" width="8" height="46" rx="4"/></g>
+          <g transform="rotate(14 106 64)"><rect x="102" y="60" width="8" height="60" rx="4"/></g>
+        </g>
+        <path d="M22 70 C22 42 38 18 64 18 C90 18 106 42 106 70 Z" fill="var(--octo-green)"/>
+        <rect x="44" y="38" width="11" height="18" rx="1.5" fill="var(--octo-red)"/>
+        <rect x="73" y="38" width="11" height="18" rx="1.5" fill="var(--octo-red)"/>
+      </svg>
+      <span class="wordmark">octomon</span>
+    </a>
+    <nav class="links" aria-label="site">
+      <a href="/#install">install</a>
+      <a href="/#features">features</a>
+      <a href="/#video">video</a>
+      <a href="/understand">faq</a>
+      <a href="/privacy">privacy</a>
+      <a href="https://github.com/securitypedant/octomon">github</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="pagehead">
+    <div class="wrap">
+      <h1>Privacy</h1>
+      <p class="lede">octomon measures <em>your</em> connection, on <em>your</em>
+      machine, for <em>you</em>. Nothing about you is recorded by us — and this
+      page is the proof: the only dashboard we have is published below, for
+      everyone to see.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <h2>The promise</h2>
+      <p><strong>Everything octomon learns stays on your machine.</strong>
+      Baselines, incident history, speed tests, recordings — all local files
+      you can read, export, or erase (<code>Ctrl+R</code> erases everything).
+      No telemetry, no accounts, no identifiers.</p>
+      <p>As a <em>network</em> tool, octomon does make outbound requests — to
+      ping targets, resolvers, time servers and speed-test backends. Every
+      endpoint it contacts, when, why, and exactly what is sent is listed in the
+      <a href="https://github.com/securitypedant/octomon#network--privacy">README's
+      network table</a>. Every request identifies itself honestly as
+      <code>octomon/&lt;version&gt; (network monitoring tool; +https://octomon.dev)</code>
+      — never a browser costume.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>The one endpoint we operate: /edge</h2>
+      <p>octomon calls <code>https://octomon.dev/edge</code> at startup, on a
+      network change, and every 15 minutes. Its only purpose is to improve the
+      quality and depth of the monitoring: the Cloudflare edge answers with
+      facts about your connection that your machine cannot see from the
+      inside — which PoP is serving you, which ISP network your traffic
+      arrives from, and the edge's own TCP round-trip measurement of you (a
+      latency reading that works even on networks that block ping).</p>
+      <p>That answer goes <strong>to you and is stored nowhere</strong>. The
+      endpoint keeps no logs. The single thing it counts is: <em>one request
+      happened, from octomon version x.y</em> — the version family from the
+      user agent, and nothing else. No IP address, no location, no identifier
+      of any kind is retained, which also means we <em>cannot</em> count
+      unique users, only requests — a deliberate limitation.</p>
+      <p>Don't want even that? Set <code>edge_check_url = ""</code> in
+      octomon's config and it is never called. The row simply disappears from
+      the Network panel.</p>
+      <div class="card">
+        <h3>the fine print, honestly</h3>
+        <p>octomon.dev is served by Cloudflare, so Cloudflare's platform
+        handles the HTTP requests the way it does for every site behind it —
+        that is true of any request to this domain, not just /edge. The
+        website (not the tool) uses Cloudflare Web Analytics, which is
+        cookieless. Our own code on /edge stores the version-family count
+        described above, and nothing more.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>Our whole dashboard, published</h2>
+      <p>This graph is everything we can see: <strong>/edge requests per day,
+      by octomon version family</strong>, for the last 30 days. It is
+      deliberately coarse — day buckets, version families like
+      <code>0.8</code> rather than exact versions — so even a fleet of one
+      cannot be traced through it. There is no other dashboard, private or
+      otherwise.</p>
+      <div class="card graph-card">
+        <h3>/edge requests · last 30 days</h3>
+        <svg id="edge-graph" role="img" aria-label="Daily /edge request counts by octomon version family"></svg>
+        <div class="legend" id="edge-legend"></div>
+        <p class="graph-note" id="edge-note">loading the live numbers…</p>
+      </div>
+      <p style="margin-top:18px">The data behind it is public too:
+      <a href="/edge/stats"><code>octomon.dev/edge/stats</code></a> — the same
+      aggregate this page renders, and the only readout the endpoint's
+      counter can produce.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>Your own data, on your own disk</h2>
+      <p>The files octomon keeps locally — CSV recordings, learned baselines,
+      incident history — include your SSIDs, gateway and addresses. Treat them
+      as you would any file describing your network, especially the
+      <code>Shift+D</code> support bundle, which is designed to be shared with
+      whoever is helping you debug.</p>
+      <p>Questions, or something on this page that isn't clear enough? Open an
+      issue: <a href="https://github.com/securitypedant/octomon/issues">github.com/securitypedant/octomon</a>.</p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2025–2026 Simon Thorpe · MIT or Apache-2.0</span>
+    <a href="/privacy">privacy</a>
+    <a href="https://github.com/securitypedant/octomon">github.com/securitypedant/octomon</a>
+    <a href="https://crates.io/crates/octomon">crates.io/crates/octomon</a>
+    <a href="https://www.youtube.com/watch?v=sHPd2LeYvaw">intro video</a>
+  </div>
+</footer>
+
+<script>
+// The published dashboard: stacked daily bars by version family, drawn from
+// /edge/stats. Colours cycle through the brand tokens; failure states say so
+// instead of leaving a mysteriously empty box.
+(async () => {
+  const svg = document.getElementById("edge-graph");
+  const note = document.getElementById("edge-note");
+  const legend = document.getElementById("edge-legend");
+  const colors = ["#3FCF5C", "#B249B9", "#E8B03A", "#E0524D", "#8A96A4"];
+  let series = [];
+  try {
+    const resp = await fetch("/edge/stats");
+    series = (await resp.json()).series ?? [];
+  } catch {
+    note.textContent = "the stats endpoint isn't answering right now — try again later.";
+    return;
+  }
+  if (!series.length) {
+    note.textContent = "no requests recorded yet — the counter is brand new.";
+    return;
+  }
+  const days = [...new Set(series.map((r) => r.day))].sort();
+  const versions = [...new Set(series.map((r) => r.version))].sort();
+  const byDay = new Map(days.map((d) => [d, new Map()]));
+  for (const r of series) byDay.get(r.day).set(r.version, r.calls);
+  const totals = days.map((d) => versions.reduce((s, v) => s + (byDay.get(d).get(v) ?? 0), 0));
+  const peak = Math.max(...totals, 1);
+
+  const W = Math.max(540, days.length * 26), H = 260, PAD = 34;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const bw = Math.min(18, (W - PAD * 2) / days.length - 6);
+  let out = "";
+  days.forEach((d, i) => {
+    const x = PAD + (i * (W - PAD * 2)) / days.length;
+    let y = H - 24;
+    versions.forEach((v, vi) => {
+      const calls = byDay.get(d).get(v) ?? 0;
+      if (!calls) return;
+      const h = ((H - 50) * calls) / peak;
+      y -= h;
+      out += `<rect x="${x}" y="${y}" width="${bw}" height="${h}" rx="2" fill="${colors[vi % colors.length]}"><title>${d.slice(0, 10)} · ${v}: ${calls}</title></rect>`;
+    });
+    if (i % Math.ceil(days.length / 8) === 0) {
+      out += `<text x="${x + bw / 2}" y="${H - 8}" fill="#8A96A4" font-size="10" text-anchor="middle" font-family="monospace">${d.slice(5, 10)}</text>`;
+    }
+  });
+  out += `<text x="${PAD - 6}" y="16" fill="#8A96A4" font-size="10" text-anchor="start" font-family="monospace">peak ${peak}/day</text>`;
+  svg.innerHTML = out;
+  legend.innerHTML = versions
+    .map((v, vi) => `<span class="key"><span class="swatch" style="background:${colors[vi % colors.length]}"></span>octomon ${v}</span>`)
+    .join("");
+  note.textContent = "updated hourly · day buckets · version families only — by design, so nobody can be traced through it.";
+})();
+</script>
+
+</body>
+</html>

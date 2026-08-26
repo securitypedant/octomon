@@ -312,7 +312,7 @@ async fn rdap(
 fn client(proxy: Option<&str>, local: Option<IpAddr>) -> Result<reqwest::Client, String> {
     let mut b = reqwest::Client::builder()
         .timeout(TIMEOUT)
-        .user_agent(concat!("octomon/", env!("CARGO_PKG_VERSION")));
+        .user_agent(crate::util::USER_AGENT);
     b = match proxy {
         Some(url) => b.proxy(reqwest::Proxy::all(url).map_err(|e| e.to_string())?),
         None => b.no_proxy(),

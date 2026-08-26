@@ -119,6 +119,10 @@ pub struct TargetStat {
     pub hostname: Option<String>,
     /// HTTP(S) capability and timing, learned by the web prober.
     pub web: WebProbe,
+    /// TCP connect timing to port 443 — the ICMP stand-in on networks that
+    /// blackhole ping. Probed at ping cadence for anchors only (discovered
+    /// hops and gateways rarely serve 443 and would read as fake loss).
+    pub tcp: Series,
     pub last_rtt_ms: Option<f64>,
     /// RFC 3550 interarrival jitter (smoothed).
     pub jitter_ms: f64,
@@ -143,6 +147,150 @@ pub struct TargetStat {
 /// coming up; a path still failing beyond it is genuinely failing.
 const SETTLE: Duration = Duration::from_secs(8);
 
+/// One probe family's accumulated statistics: the same window / history /
+/// jitter machinery the ICMP fields on [`TargetStat`] carry, as a struct, so
+/// a second family (TCP connect) can ride beside them. The ICMP fields stay
+/// flat on `TargetStat` — they are read directly in hundreds of places — so
+/// the algorithms here deliberately mirror those methods; a change to one
+/// belongs in both.
+#[derive(Clone)]
+pub struct Series {
+    /// Round trip of the most recent probe; `None` after a miss.
+    pub last_ms: Option<f64>,
+    /// RFC 3550 interarrival jitter (smoothed).
+    pub jitter_ms: f64,
+    /// All-time minimum — the idle baseline.
+    pub min_ever_ms: Option<f64>,
+    pub sent: u64,
+    pub recv: u64,
+    /// Sliding window of recent outcomes (`true` = answered).
+    pub window: VecDeque<bool>,
+    pub history: History,
+    /// See [`TargetStat::settle_until`]: post-reset losses are the
+    /// switchover's, not the path's.
+    pub settle_until: Option<Instant>,
+}
+
+impl Default for Series {
+    fn default() -> Self {
+        Self {
+            last_ms: None,
+            jitter_ms: 0.0,
+            min_ever_ms: None,
+            sent: 0,
+            recv: 0,
+            window: VecDeque::with_capacity(WINDOW),
+            history: History::new(HISTORY),
+            settle_until: None,
+        }
+    }
+}
+
+impl Series {
+    pub fn record_reply(&mut self, rtt_ms: f64) {
+        self.settle_until = None;
+        self.sent += 1;
+        self.recv += 1;
+        self.push_window(true);
+        self.last_ms = Some(rtt_ms);
+        self.min_ever_ms = Some(self.min_ever_ms.map_or(rtt_ms, |m| m.min(rtt_ms)));
+        if let Some(prev) = self.history.last() {
+            let d = (rtt_ms - prev).abs();
+            self.jitter_ms += (d - self.jitter_ms) / 16.0;
+        }
+        self.history.push(rtt_ms);
+    }
+
+    pub fn record_loss(&mut self) {
+        if self.settle_until.is_some_and(|t| Instant::now() < t) {
+            return;
+        }
+        self.sent += 1;
+        self.push_window(false);
+        self.last_ms = None;
+    }
+
+    fn push_window(&mut self, ok: bool) {
+        if self.window.len() == WINDOW {
+            self.window.pop_front();
+        }
+        self.window.push_back(ok);
+    }
+
+    pub fn reset(&mut self) {
+        self.last_ms = None;
+        self.jitter_ms = 0.0;
+        self.min_ever_ms = None;
+        self.sent = 0;
+        self.recv = 0;
+        self.window.clear();
+        self.history.data.clear();
+        self.settle_until = Some(Instant::now() + SETTLE);
+    }
+
+    /// Loss over the most recent `n` outcomes (see
+    /// [`TargetStat::recent_loss_pct`]).
+    pub fn recent_loss_pct(&self, n: usize) -> f64 {
+        let take = n.min(self.window.len());
+        if take == 0 {
+            return 0.0;
+        }
+        let lost = self
+            .window
+            .iter()
+            .rev()
+            .take(take)
+            .filter(|ok| !**ok)
+            .count();
+        lost as f64 / take as f64 * 100.0
+    }
+
+    /// See [`TargetStat::stats_stale`]: no success among the last `n`
+    /// outcomes means the RTT figures describe nothing current.
+    pub fn stats_stale(&self, n: usize) -> bool {
+        let take = n.max(1).min(self.window.len());
+        take > 0 && !self.window.iter().rev().take(take).any(|ok| *ok)
+    }
+
+    /// Distribution over the most recent `n` successful samples.
+    pub fn stats(&self, n: usize) -> RttStats {
+        let mut v: Vec<f64> = self
+            .history
+            .data
+            .iter()
+            .rev()
+            .take(n.max(1))
+            .copied()
+            .collect();
+        if v.is_empty() {
+            return RttStats::default();
+        }
+        let samples = v.len();
+        let mean = v.iter().sum::<f64>() / samples as f64;
+        let var = v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / samples as f64;
+        v.sort_by(f64::total_cmp);
+        let pct = |p: f64| v[(((samples - 1) as f64) * p).round() as usize];
+        RttStats {
+            min: Some(v[0]),
+            mean: Some(mean),
+            p95: Some(pct(0.95)),
+            max: Some(v[samples - 1]),
+            stddev: var.sqrt(),
+        }
+    }
+
+    /// The series' usual best (see [`TargetStat::floor_ms`]).
+    pub fn floor_ms(&self) -> Option<f64> {
+        const MIN_HISTORY: usize = 30;
+        if self.history.data.len() < MIN_HISTORY {
+            return self.min_ever_ms;
+        }
+        let mut v: Vec<f64> = self.history.data.iter().copied().collect();
+        v.sort_by(f64::total_cmp);
+        Some(v[v.len() / 10])
+    }
+}
+
 impl TargetStat {
     pub fn new(label: String, addr: IpAddr) -> Self {
         Self {
@@ -152,6 +300,7 @@ impl TargetStat {
             addr,
             hostname: None,
             web: WebProbe::default(),
+            tcp: Series::default(),
             last_rtt_ms: None,
             jitter_ms: 0.0,
             min_ever_ms: None,
@@ -215,6 +364,7 @@ impl TargetStat {
         self.web.hist.data.clear();
         self.web.last_ttfb_ms = None;
         self.web.fails = 0;
+        self.tcp.reset();
         self.settle_until = Some(Instant::now() + SETTLE);
     }
 
@@ -1838,6 +1988,37 @@ pub enum Panel {
     Vitals,
 }
 
+/// Which probe family the Connection Quality table's metric columns show in
+/// the split view ([i] toggles). Full screen shows both side by side.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProbeFamily {
+    Icmp,
+    Tcp,
+}
+
+/// What the Cloudflare edge reported about this connection (`/edge` on
+/// octomon.dev): the view from the *other* end — which PoP answers, whose
+/// network the request arrived from, and the edge's own TCP RTT measurement.
+/// Nothing here is stored server-side; see the website's /privacy page.
+#[derive(Clone, Default)]
+pub struct EdgeInfo {
+    pub ip: String,
+    pub asn: u32,
+    /// AS organisation ("Comcast Cable", "Microsoft Corporation").
+    pub isp: String,
+    /// IATA code of the answering Cloudflare PoP ("IAD").
+    pub colo: String,
+    pub city: String,
+    pub country: String,
+    /// The edge's SYN/SYN-ACK measurement of this client, in ms — an RTT
+    /// reading that needs no ICMP and isn't taken by this machine.
+    pub tcp_rtt_ms: Option<f64>,
+    /// "HTTP/2", "HTTP/3"…
+    pub http: String,
+    /// "TLSv1.3"…
+    pub tls: String,
+}
+
 /// Which table the [z] zoom overlay is showing at 80% of the screen.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum ZoomView {
@@ -2110,6 +2291,13 @@ pub struct AppState {
     pub bar_set: ratatui::symbols::bar::Set<'static>,
     /// Column cursor over the target table (0=target,1=last,2=avg,3=p95,4=max,5=loss).
     pub q_col: usize,
+    /// [i]: the user's explicit choice of probe family for the split-view
+    /// quality table. `None` = automatic — ICMP, unless the network
+    /// blackholes it, in which case TCP (so an Azure VM opens onto numbers).
+    pub quality_family: Option<ProbeFamily>,
+    /// The Cloudflare edge's view of this connection, when the `/edge` check
+    /// is enabled and has answered. `None` = disabled, or not fetched yet.
+    pub edge: Option<EdgeInfo>,
     /// Active target sort: (column, descending). None = insertion order.
     pub q_sort: Option<(usize, bool)>,
     /// Traceroute result for the current target, when requested.
@@ -2328,6 +2516,8 @@ impl AppState {
             proc_details: std::collections::HashMap::new(),
             bar_set: ratatui::symbols::bar::NINE_LEVELS,
             q_col: 0,
+            quality_family: None,
+            edge: None,
             q_sort: None,
             traceroute: None,
             hop_monitor: None,
@@ -2388,6 +2578,7 @@ impl AppState {
         self.graph_marker = live.graph_marker;
         self.bar_set = live.bar_set.clone();
         self.q_col = live.q_col;
+        self.quality_family = live.quality_family;
         self.q_sort = live.q_sort;
         self.bw_view = live.bw_view;
         self.remote_sel = live.remote_sel;
