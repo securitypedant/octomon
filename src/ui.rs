@@ -2180,10 +2180,20 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
             Style::new().fg(theme::text()).bold(),
         ))
     };
+    let divider = |label: &str| {
+        Cell::from(Span::styled(
+            label.to_string(),
+            Style::new().fg(theme::accent()).bold(),
+        ))
+    };
     let mut header_cells = vec![Cell::from(""), hcell(0, "Target"), plain("Address")];
     // Split view: the metric headers describe whichever family is shown and
-    // stay sortable. Dual (full screen): the ICMP group keeps the sort; the
-    // TCP group sits behind a labelled divider.
+    // stay sortable. Dual (full screen): each family's group sits behind its
+    // own labelled divider — the ICMP group keeps the sort; the tcp divider
+    // carries a leading space so the groups don't run into each other.
+    if dual {
+        header_cells.push(divider("│icmp"));
+    }
     if dual || family == crate::app::ProbeFamily::Icmp {
         header_cells.extend([hcell(1, "last"), hcell(2, "avg"), hcell(3, "p95")]);
         if icmp_max {
@@ -2198,10 +2208,7 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         header_cells.extend([plain("jit"), plain("loss")]);
     }
     if dual {
-        header_cells.push(Cell::from(Span::styled(
-            "│tcp",
-            Style::new().fg(theme::accent()).bold(),
-        )));
+        header_cells.push(divider(" │tcp"));
         header_cells.extend([plain("last"), plain("avg"), plain("p95")]);
         if tcp_max {
             header_cells.push(plain("max"));
@@ -2298,8 +2305,12 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
             idc(t.addr.to_string()),
         ];
         if dual {
-            cells.extend(family_cells(&icmp, dim_hop, icmp_max));
             cells.push(Cell::from(Span::styled("│", Style::new().fg(theme::dim()))));
+            cells.extend(family_cells(&icmp, dim_hop, icmp_max));
+            cells.push(Cell::from(Span::styled(
+                " │",
+                Style::new().fg(theme::dim()),
+            )));
             cells.extend(family_cells(&tcp, dim_hop, tcp_max));
         } else if family == crate::app::ProbeFamily::Tcp {
             cells.extend(family_cells(&tcp, dim_hop, icmp_max));
@@ -2315,16 +2326,21 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         Constraint::Length(2),
         Constraint::Min(14),
         Constraint::Min(16),
-        Constraint::Length(8),
-        Constraint::Length(8),
-        Constraint::Length(8),
     ];
+    if dual {
+        widths.push(Constraint::Length(5)); // the │icmp divider
+    }
+    widths.extend([
+        Constraint::Length(8),
+        Constraint::Length(8),
+        Constraint::Length(8),
+    ]);
     if icmp_max {
         widths.push(Constraint::Length(8));
     }
     widths.extend([Constraint::Length(6), Constraint::Length(6)]);
     if dual {
-        widths.push(Constraint::Length(4)); // the │tcp divider
+        widths.push(Constraint::Length(5)); // the ' │tcp' divider
         widths.extend([
             Constraint::Length(8),
             Constraint::Length(8),
@@ -2356,9 +2372,13 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         title.push_str(&format!(" capped at {}", s.window_samples()));
     }
     // Which family the split-view metric columns describe ([i] toggles);
-    // full screen shows both, labelled by the │tcp divider.
-    if !dual && family == crate::app::ProbeFamily::Tcp {
-        title.push_str(" · tcp :443");
+    // full screen shows both, labelled by the │icmp and │tcp dividers.
+    if !dual {
+        title.push_str(if family == crate::app::ProbeFamily::Tcp {
+            " · tcp :443"
+        } else {
+            " · icmp"
+        });
     }
     if let Some(t) = s.targets.get(s.graph_target) {
         // Same staleness contract as the cells below: jit/sd/bloat are
@@ -2564,7 +2584,7 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
         (area, None)
     };
 
-    let title = format!("Path · {}  ({status})", m.target);
+    let title = format!("Path · icmp · {}  ({status})", m.target);
     let b = block(&title, active);
     let inner = b.inner(list_area);
 
@@ -6630,6 +6650,7 @@ mod tests {
         // Healthy ICMP: the split view defaults to it — no tcp marker.
         let out = draw(&s, 170, 40);
         assert!(!out.contains("tcp :443"));
+        assert!(out.contains("· icmp"), "split view names its family");
         assert!(out.contains("10.0ms"));
         assert!(!out.contains("33.0ms"));
 
@@ -6655,6 +6676,7 @@ mod tests {
         s.focus = Panel::Quality;
         s.fullscreen = true;
         let out = draw(&s, 170, 45);
+        assert!(out.contains("│icmp"), "icmp group labelled in dual view");
         assert!(out.contains("│tcp"));
         assert!(out.contains("33.0ms"), "tcp numbers in the dual view");
 
