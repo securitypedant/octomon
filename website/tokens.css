@@ -9,6 +9,7 @@
   --octo-green:    #3FCF5C; /* primary: links, prompt, healthy state */
   --octo-magenta:  #B249B9; /* secondary accent, rules, upload traffic */
   --octo-amber:    #E8B03A; /* warnings, the fault arm in the logo */
+  --octo-red:      #E0524D; /* critical state, the eyes in the logo */
   --octo-white:    #F4F7FA; /* headings, body on dark */
   --octo-muted:    #8A96A4; /* secondary text, captions */
   --octo-line:     #343C46; /* hairlines, card borders */

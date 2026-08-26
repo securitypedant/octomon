@@ -81,31 +81,49 @@
   }
   nav.links { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px 22px; font-family: var(--octo-mono); font-size: 0.95rem; }
 
-  /* hero */
+  /* hero: text and art are real flex siblings, so they can never overlap.
+     The glows the old baked-in background carried now live here as CSS. */
   .hero {
     position: relative;
-    background-color: var(--octo-ink); /* readable before/without the image */
-    background-image: url('/images/octomon-hero-plain.png');
-    background-image: image-set(
-      url('/images/octomon-hero-plain.avif') type('image/avif'),
-      url('/images/octomon-hero-plain.webp') type('image/webp'),
-      url('/images/octomon-hero-plain.png') type('image/png'));
-    background-size: cover;
-    background-position: right center;
+    background-color: var(--octo-ink);
+    background-image:
+      radial-gradient(1100px 640px at 10% 0%, color-mix(in srgb, var(--octo-green) 14%, transparent), transparent 70%),
+      radial-gradient(1100px 700px at 96% 100%, color-mix(in srgb, var(--octo-magenta) 18%, transparent), transparent 70%);
     border-bottom: 2px solid var(--octo-magenta); /* decorative rule */
   }
+  .hero-flex { display: flex; align-items: center; gap: clamp(24px, 3.5vw, 56px); }
   .hero-inner {
-    min-height: 480px;
+    min-height: 440px;
     display: flex; flex-direction: column; justify-content: center;
-    padding: 72px 0;
-    max-width: 46%;
+    padding: 64px 0 24px;
+    flex: 1 1 38%; min-width: 0;
+    /* the headline sizes against this column, not the viewport */
+    container-type: inline-size;
   }
-  .hero h1 { font-size: clamp(2.4rem, 5.4vw, 4.4rem); }
+  /* 13.5cqw keeps "OR THE INTERNET?" (the widest line) inside the column at
+     every width; nowrap is the guarantee that it never splits. */
+  .hero h1 { font-size: clamp(2rem, 13.5cqw, 4.4rem); white-space: nowrap; }
+  /* the art takes the bigger share and, on wide screens, bleeds past the
+     wrap to the viewport's right edge so it renders ~20% larger */
+  .hero-art {
+    flex: 1 1 62%; min-width: 0; height: auto; align-self: center;
+    padding-top: 24px;
+    margin-right: min(0px, calc((1120px - 100vw) / 2));
+  }
+  /* the plain-language line runs the full width under both columns */
+  .hero p.sub-risky {
+    font-family: var(--octo-mono);
+    font-style: italic;
+    color: var(--octo-amber);
+    font-size: clamp(1rem, 1.8vw, 1.35rem);
+    margin: 0;
+    padding: 20px 0 44px;
+  }
   .hero p.sub {
     color: var(--octo-muted);
     font-size: clamp(1rem, 1.7vw, 1.3rem);
     max-width: 34em;
-    margin: 0 0 1.6em;
+    margin: 0;
   }
 
   /* command blocks: terminal register, one prompt per command line. The
@@ -269,11 +287,15 @@
   }
   footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; }
 
+  /* tablets: the mark shouldn't hug the edge */
+  @media (max-width: 1180px) {
+    .nav .mark { margin-left: 12px; }
+  }
   @media (max-width: 860px) {
-    .hero { background-position: 72% center; }
-    .hero-inner { max-width: 100%; min-height: 0; padding: 56px 0; }
-    /* keep the headline readable over the art on small screens */
-    .hero h1, .hero p.sub { text-shadow: 0 1px 14px var(--octo-deep), 0 0 34px var(--octo-deep); }
+    /* stack: text first, art below at full width */
+    .hero-flex { flex-direction: column; align-items: stretch; gap: 0; }
+    .hero-inner { min-height: 0; padding: 56px 0 8px; }
+    .hero-art { width: 100%; max-width: 560px; margin: 0 auto; padding: 0 0 24px; }
     /* minmax(0, …), never bare 1fr: a bare 1fr track can't shrink below the
        longest command line, and the whole page scrolls sideways on phones —
        the inner .cmd-scroll only gets to scroll once its card can shrink. */
@@ -287,8 +309,13 @@
     /* the nav becomes two deliberate rows: the mark, then all links on one
        line — better than a ragged wrap with one link orphaned below. */
     nav.links { flex-basis: 100%; margin-left: 0; justify-content: space-between; gap: 6px 8px; font-size: 0.85rem; }
+    /* air under the two-row menu before the hero starts */
+    .nav { padding-bottom: 24px; }
+    /* the mark centres above the links row */
+    .nav .mark { margin: 0 auto; }
     section { padding: 44px 0; }
-    .hero-inner { padding: 44px 0; }
+    /* air between the two-row menu and the headline */
+    .hero-inner { padding: 64px 0 8px; }
     .hero h1 { font-size: clamp(2.1rem, 9vw, 2.8rem); }
     .install-card { padding: 16px; }
     .cmd-scroll { font-size: 0.8rem; }
@@ -325,8 +352,8 @@
           <g transform="rotate(14 106 64)"><rect x="102" y="60" width="8" height="60" rx="4"/></g>
         </g>
         <path d="M22 70 C22 42 38 18 64 18 C90 18 106 42 106 70 Z" fill="var(--octo-green)"/>
-        <rect x="44" y="38" width="11" height="18" rx="1.5" fill="var(--octo-ink)"/>
-        <rect x="73" y="38" width="11" height="18" rx="1.5" fill="var(--octo-ink)"/>
+        <rect x="44" y="38" width="11" height="18" rx="1.5" fill="var(--octo-red)"/>
+        <rect x="73" y="38" width="11" height="18" rx="1.5" fill="var(--octo-red)"/>
       </svg>
       <span class="wordmark">octomon</span>
     </a>
@@ -334,7 +361,7 @@
       <a href="/#install">install</a>
       <a href="/#features">features</a>
       <a href="/#video">video</a>
-      <a href="/understand#faq">faq</a>
+      <a href="/understand">faq</a>
       <a href="/understand#glossary">glossary</a>
       <a href="https://github.com/securitypedant/octomon">github</a>
     </nav>
@@ -343,12 +370,17 @@
 
 <main>
   <div class="hero">
-    <div class="wrap">
+    <div class="wrap hero-flex">
       <div class="hero-inner">
         <h1>Is it Wi-Fi,<br>your ISP<br>or the Internet?</h1>
         <p class="sub">Latency, bandwidth, network config in a
         terminal app with a built-in dashboard and analysis to help diagnose the data.</p>
       </div>
+      <img class="hero-art" src="/images/octomon-hero-mock.svg" alt=""
+        width="1260" height="900" fetchpriority="high">
+    </div>
+    <div class="wrap">
+      <p class="sub-risky">&hellip;in other words, &ldquo;what the F&amp;#K is going on with my Internet?&rdquo;</p>
     </div>
   </div>
 

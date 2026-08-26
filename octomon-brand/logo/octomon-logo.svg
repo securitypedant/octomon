@@ -13,7 +13,7 @@
   </g>
   <!-- mantle -->
   <path d="M22 70 C22 42 38 18 64 18 C90 18 106 42 106 70 Z" fill="#3FCF5C"/>
-  <!-- eyes, as terminal cursor blocks -->
-  <rect x="44" y="38" width="11" height="18" rx="1.5" fill="#15181D"/>
-  <rect x="73" y="38" width="11" height="18" rx="1.5" fill="#15181D"/>
+  <!-- eyes, as terminal cursor blocks (red: the alert state) -->
+  <rect x="44" y="38" width="11" height="18" rx="1.5" fill="#E0524D"/>
+  <rect x="73" y="38" width="11" height="18" rx="1.5" fill="#E0524D"/>
 </svg>

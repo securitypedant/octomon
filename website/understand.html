@@ -157,6 +157,10 @@
     /* the nav becomes two deliberate rows: the mark, then all links on one
        line — better than a ragged wrap with one link orphaned below. */
     nav.links { flex-basis: 100%; margin-left: 0; justify-content: space-between; gap: 6px 8px; font-size: 0.85rem; }
+    /* air under the two-row menu before the page head */
+    .nav { padding-bottom: 24px; }
+    /* the mark centres above the links row */
+    .nav .mark { margin: 0 auto; }
     section { padding: 44px 0; }
     .pagehead { padding: 40px 0 32px; }
     summary { padding: 14px 16px; }
@@ -188,8 +192,8 @@
           <g transform="rotate(14 106 64)"><rect x="102" y="60" width="8" height="60" rx="4"/></g>
         </g>
         <path d="M22 70 C22 42 38 18 64 18 C90 18 106 42 106 70 Z" fill="var(--octo-green)"/>
-        <rect x="44" y="38" width="11" height="18" rx="1.5" fill="var(--octo-ink)"/>
-        <rect x="73" y="38" width="11" height="18" rx="1.5" fill="var(--octo-ink)"/>
+        <rect x="44" y="38" width="11" height="18" rx="1.5" fill="var(--octo-red)"/>
+        <rect x="73" y="38" width="11" height="18" rx="1.5" fill="var(--octo-red)"/>
       </svg>
       <span class="wordmark">octomon</span>
     </a>
@@ -197,7 +201,7 @@
       <a href="/#install">install</a>
       <a href="/#features">features</a>
       <a href="/#video">video</a>
-      <a href="/understand#faq">faq</a>
+      <a href="/understand">faq</a>
       <a href="/understand#glossary">glossary</a>
       <a href="https://github.com/securitypedant/octomon">github</a>
     </nav>
@@ -207,10 +211,17 @@
 <main>
   <div class="pagehead">
     <div class="wrap">
-      <h1>Understand<br>your connection</h1>
-      <p class="lede">How octomon judges what it measures — and what the terms
-      on screen actually mean. Short answers here; the analysis overlay
-      (<kbd>y</kbd>) always shows its evidence in the app itself.</p>
+      <h1>Where did octomon get its name?</h1>
+      <p class="lede">An octopus has a central brain, but also a distributed
+      nervous system: ganglia in each arm act as mini-brains, doing intelligent
+      processing right where the data is gathered. Each arm senses its own
+      patch of the world, and the central brain composes those local findings
+      into one complete picture of its environment.</p>
+      <p class="lede">This tool does the same thing, but for your Internet
+      connection. Each panel — connection quality, bandwidth, network,
+      machine — probes and grades its own layer, and the analysis on top pulls
+      those local judgements into a single answer about what's actually
+      going on.</p>
     </div>
   </div>
 
