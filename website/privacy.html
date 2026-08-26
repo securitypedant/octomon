@@ -216,9 +216,13 @@
       latency reading that works even on networks that block ping).</p>
       <p>That answer goes <strong>to you and is stored nowhere</strong>. The
       endpoint keeps no logs. The single thing it counts is: <em>one request
-      happened, from octomon version x.y.z</em>: the version from the user
-      agent, and nothing else. The version is useful (it shows which builds
-      are alive in the wild) and describes the software, not you. No IP address, no location, no identifier
+      happened, from octomon version x.y.z, because of a start, a network
+      change, or the 15-minute refresh</em>: the version and one of those
+      three constant labels, and nothing else. Every octomon in the world
+      sends the identical labels, so they link nothing to anyone; the version
+      describes the software, not you. Together they let the graph below
+      estimate how many octomons are running, with no identifier of any
+      kind. No IP address, no location, no identifier
       of any kind is retained, which also means we <em>cannot</em> count
       unique users, only requests, a deliberate limitation.</p>
       <p>Don't want even that? Set <code>edge_check_url = ""</code> in
@@ -242,7 +246,10 @@
       <p>This graph is everything we can see: <strong>/edge requests per day,
       by octomon version</strong>, for the last 30 days. Day buckets keep it
       coarse in time, and the version (like <code>0.8.1</code>) names a
-      public software build, not a person. There is no other dashboard, private or
+      public software build, not a person. The line over the bars is the
+      fleet estimate: every running octomon refreshes /edge on a 15-minute
+      tick, so refresh calls ÷ 96 ≈ the average number running that day. An
+      estimate by design; you can recompute it from the same public data. There is no other dashboard, private or
       otherwise.</p>
       <div class="card graph-card">
         <h3>/edge requests · last 30 days</h3>
@@ -305,9 +312,18 @@
   const days = [...new Set(series.map((r) => r.day))].sort();
   const versions = [...new Set(series.map((r) => r.version))].sort();
   const byDay = new Map(days.map((d) => [d, new Map()]));
-  for (const r of series) byDay.get(r.day).set(r.version, r.calls);
+  const refreshByDay = new Map(days.map((d) => [d, 0]));
+  for (const r of series) {
+    const m = byDay.get(r.day);
+    m.set(r.version, (m.get(r.version) ?? 0) + r.calls);
+    if (r.why === "refresh") refreshByDay.set(r.day, refreshByDay.get(r.day) + r.calls);
+  }
   const totals = days.map((d) => versions.reduce((s, v) => s + (byDay.get(d).get(v) ?? 0), 0));
   const peak = Math.max(...totals, 1);
+  // The fleet estimate: a running octomon refreshes every 15 minutes, so a
+  // full day of one instance is 96 refresh calls.
+  const est = days.map((d) => refreshByDay.get(d) / 96);
+  const estPeak = Math.max(...est, 0);
 
   const W = Math.max(540, days.length * 26), H = 260, PAD = 34;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
@@ -328,11 +344,27 @@
     }
   });
   out += `<text x="${PAD - 6}" y="16" fill="#8A96A4" font-size="10" text-anchor="start" font-family="monospace">peak ${peak}/day</text>`;
+  let estNote = "";
+  if (estPeak > 0) {
+    // The estimate rides its own scale over the bars, as a dotted line.
+    const pts = days
+      .map((d, i) => {
+        const x = PAD + (i * (W - PAD * 2)) / days.length + bw / 2;
+        const y = H - 24 - ((H - 60) * est[i]) / estPeak;
+        return `${x},${y}`;
+      })
+      .join(" ");
+    out += `<polyline points="${pts}" fill="none" stroke="#F4F7FA" stroke-width="1.5" stroke-dasharray="4 3"><title>estimated octomons running (avg per day)</title></polyline>`;
+    out += `<text x="${W - PAD}" y="16" fill="#F4F7FA" font-size="10" text-anchor="end" font-family="monospace">est. running, peak ≈${estPeak < 10 ? estPeak.toFixed(1) : Math.round(estPeak)}</text>`;
+    estNote = " · fleet line = refresh calls ÷ 96.";
+  } else {
+    estNote = " · the fleet-estimate line appears once 0.8.2+ clients start reporting call reasons.";
+  }
   svg.innerHTML = out;
   legend.innerHTML = versions
     .map((v, vi) => `<span class="key"><span class="swatch" style="background:${colors[vi % colors.length]}"></span>octomon ${v}</span>`)
-    .join("");
-  note.textContent = "updated hourly · day buckets · version and count only, by design, so nobody can be traced through it.";
+    .join("") + '<span class="key"><span class="swatch" style="background:#F4F7FA"></span>est. running (avg)</span>';
+  note.textContent = "updated hourly · day buckets · version, reason and count only, by design, so nobody can be traced through it." + estNote;
 })();
 </script>
 

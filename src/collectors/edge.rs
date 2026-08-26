@@ -31,23 +31,37 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config, changed: Arc<Notify>)
     else {
         return;
     };
+    // Each call names its reason with one of three constant labels — every
+    // octomon in the world sends the identical strings, so the label links
+    // nothing to anyone, but it lets the /privacy page turn call counts into
+    // an honest fleet estimate: refreshes tick every 15 minutes, so
+    // refresh-calls ÷ 96 ≈ instances running that day, no identifiers needed.
+    let mut why = "start";
     loop {
         // A failed refresh keeps the last answer — stale edge facts beat
         // none, and the panel row shows measurements, not health. A
         // *network change* is different: the old answer describes the old
         // path, so it is cleared below before the re-fetch.
-        if let Some(info) = fetch(&client, &url).await {
+        if let Some(info) = fetch(&client, &with_reason(&url, why)).await {
             state.lock().unwrap().edge = Some(info);
         }
         tokio::select! {
             _ = changed.notified() => {
                 state.lock().unwrap().edge = None;
+                why = "netchange";
                 // Let the new network settle before asking.
                 tokio::time::sleep(Duration::from_secs(3)).await;
             }
-            _ = tokio::time::sleep(REFRESH) => {}
+            _ = tokio::time::sleep(REFRESH) => { why = "refresh"; }
         }
     }
+}
+
+/// `url` with the call's reason as a query parameter, whatever the base URL
+/// already carries.
+fn with_reason(url: &str, why: &str) -> String {
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}why={why}")
 }
 
 async fn fetch(client: &reqwest::Client, url: &str) -> Option<EdgeInfo> {
@@ -80,6 +94,20 @@ pub fn parse(text: &str) -> Option<EdgeInfo> {
 #[cfg(test)]
 mod tests {
     use super::parse;
+
+    #[test]
+    fn reasons_ride_the_query_string_either_way() {
+        use super::with_reason;
+        assert_eq!(
+            with_reason("https://octomon.dev/edge", "start"),
+            "https://octomon.dev/edge?why=start"
+        );
+        // A custom edge_check_url that already carries a query keeps it.
+        assert_eq!(
+            with_reason("https://example.com/edge?token=x", "refresh"),
+            "https://example.com/edge?token=x&why=refresh"
+        );
+    }
 
     #[test]
     fn edge_answers_parse_and_junk_does_not() {

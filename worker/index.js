@@ -9,8 +9,9 @@
 // them TO THE CALLER. It stores nothing about the caller: no logging of
 // request data, no KV/R2 writes, and the single Analytics Engine datapoint
 // (when the EDGE_STATS binding exists) carries only octomon's own version
-// string and a count — no IP, no location, no user agent echo. Workers Logs
-// stay disabled for this worker.
+// string, the call's reason (one of three constant labels every client
+// sends identically: start / netchange / refresh) and a count — no IP, no
+// location, no user agent echo. Workers Logs stay disabled for this worker.
 
 // The full octomon version ("0.8.1") out of our own client's User-Agent
 // ("octomon/0.8.1 (…)"), "other" for anything else — browsers poking the
@@ -21,7 +22,13 @@ function versionOf(ua) {
   return m ? m[1] : "other";
 }
 
-function edgeAnswer(request, env, ctx) {
+// The call's reason: three constant labels, identical across the whole
+// fleet, so they identify nothing — but refresh calls tick every 15 minutes,
+// which lets the /privacy graph estimate running instances without any
+// identifier (refreshes per day ÷ 96 ≈ average octomons alive that day).
+const WHYS = new Set(["start", "netchange", "refresh"]);
+
+function edgeAnswer(request, url, env, ctx) {
   const cf = request.cf ?? {};
   const body = {
     ip: request.headers.get("cf-connecting-ip") ?? "",
@@ -36,12 +43,16 @@ function edgeAnswer(request, env, ctx) {
     ts: Math.floor(Date.now() / 1000),
   };
   if (env.EDGE_STATS) {
-    // The whole record: one version string, one count. This is the entire
+    // The whole record: version, reason, one count. This is the entire
     // input to the graph on /privacy.
+    const whyParam = url.searchParams.get("why");
     ctx.waitUntil(
       Promise.resolve(
         env.EDGE_STATS.writeDataPoint({
-          blobs: [versionOf(request.headers.get("user-agent"))],
+          blobs: [
+            versionOf(request.headers.get("user-agent")),
+            WHYS.has(whyParam) ? whyParam : "",
+          ],
           doubles: [1],
         }),
       ).catch(() => {}),
@@ -68,11 +79,12 @@ async function edgeStats(env) {
   const sql = `
     SELECT toStartOfInterval(timestamp, INTERVAL '1' DAY) AS day,
            blob1 AS version,
+           blob2 AS why,
            sum(_sample_interval * double1) AS calls
     FROM octomon_edge
     WHERE timestamp > now() - INTERVAL '30' DAY
-    GROUP BY day, version
-    ORDER BY day, version`;
+    GROUP BY day, version, why
+    ORDER BY day, version, why`;
   const resp = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/analytics_engine/sql`,
     {
@@ -91,6 +103,7 @@ async function edgeStats(env) {
   const series = (data.data ?? []).map((r) => ({
     day: r.day,
     version: r.version,
+    why: r.why ?? "",
     calls: Math.round(Number(r.calls) || 0),
   }));
   return new Response(JSON.stringify({ series }) + "\n", {
@@ -122,7 +135,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === "/edge") {
-      return edgeAnswer(request, env, ctx);
+      return edgeAnswer(request, url, env, ctx);
     }
     if (url.pathname === "/edge/stats") {
       return edgeStats(env);
