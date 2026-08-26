@@ -242,18 +242,9 @@ impl TargetStat {
             .ok()
     }
 
-    /// Packet loss over the sliding window, as a percentage.
-    pub fn loss_pct(&self) -> f64 {
-        if self.window.is_empty() {
-            return 0.0;
-        }
-        let lost = self.window.iter().filter(|ok| !**ok).count();
-        lost as f64 / self.window.len() as f64 * 100.0
-    }
-
-    /// Loss over only the most recent `n` outcomes. The full window takes
-    /// [`WINDOW`] seconds to reflect an outage, far too slow for *detection*;
-    /// display keeps using [`Self::loss_pct`].
+    /// Loss over only the most recent `n` outcomes — detection uses a short
+    /// `n` to react inside half a minute; display passes the stats window,
+    /// so the loss shown always covers the period the header claims.
     pub fn recent_loss_pct(&self, n: usize) -> f64 {
         let take = n.min(self.window.len());
         if take == 0 {
@@ -324,7 +315,11 @@ impl TargetStat {
     }
 }
 
-const WINDOW: usize = 100;
+/// Probe outcomes (hit/miss) kept per target. Matches [`HISTORY`] so the
+/// loss column can honour the longest (15m) stats window — it used to hold
+/// 100, which silently pinned every loss figure to the last 100 probes no
+/// matter what window the header claimed. A thousand booleans per target.
+const WINDOW: usize = HISTORY;
 
 /// Latency samples kept per target. Bounds memory, and with it the longest
 /// window the statistics can actually cover — see [`AppState::window_samples`].
@@ -1519,11 +1514,19 @@ mod tests {
         for _ in 0..5 {
             t.record_loss(); // in-flight probes from the old network
         }
-        assert_eq!(t.loss_pct(), 0.0, "switchover losses are not the path's");
+        assert_eq!(
+            t.recent_loss_pct(WINDOW),
+            0.0,
+            "switchover losses are not the path's"
+        );
         assert_eq!(t.sent, 0, "not even counted as sent");
         t.record_reply(12.0); // the new path works — the grace is over
         t.record_loss();
-        assert_eq!(t.loss_pct(), 50.0, "losses after first proof are real");
+        assert_eq!(
+            t.recent_loss_pct(WINDOW),
+            50.0,
+            "losses after first proof are real"
+        );
     }
 
     #[test]
@@ -1570,6 +1573,11 @@ mod tests {
     #[test]
     fn the_window_ladder_only_ever_widens() {
         let mut s = AppState::new(vec![]);
+        // 30s default: sessions mostly diagnose what is happening *now*, and
+        // 30 keeps one dropped ping a yellow 3%, not a red 7% (see
+        // `cycle_window`).
+        assert_eq!(s.window_secs, 30);
+        s.cycle_window();
         assert_eq!(s.window_secs, 60);
         s.cycle_window();
         assert_eq!(s.window_secs, 300);
@@ -1577,7 +1585,7 @@ mod tests {
         assert_eq!(s.window_secs, 900);
         // Wraps back to the start rather than stepping down mid-cycle.
         s.cycle_window();
-        assert_eq!(s.window_secs, 60);
+        assert_eq!(s.window_secs, 30);
     }
 
     #[test]
@@ -1717,7 +1725,7 @@ mod tests {
             t.record_loss();
         }
         // The display window dilutes the outage; detection must not.
-        assert_eq!(t.loss_pct(), 20.0);
+        assert_eq!(t.recent_loss_pct(WINDOW), 20.0);
         assert_eq!(t.recent_loss_pct(20), 100.0);
         assert_eq!(t.recent_loss_pct(0), 0.0, "empty ask, no division by zero");
     }
@@ -1764,7 +1772,7 @@ mod tests {
         t.record_loss();
         t.record_reply(12.0);
         t.record_loss();
-        assert_eq!(t.loss_pct(), 50.0);
+        assert_eq!(t.recent_loss_pct(WINDOW), 50.0);
     }
 }
 
@@ -2251,7 +2259,7 @@ impl AppState {
             bw_col_other: 1,
             selected: 0,
             graph_target: 0,
-            window_secs: 60,
+            window_secs: 30,
             samples_per_sec: 1.0,
             graph_marker: ratatui::symbols::Marker::Braille,
             bits_units: false,
@@ -2734,19 +2742,26 @@ impl AppState {
         }
     }
 
-    /// Cycle the stats window: 1m → 5m → 15m → 1m.
+    /// Cycle the stats window: 30s → 1m → 5m → 15m → 30s.
     ///
     /// Ascending, so repeated presses go one direction rather than widening
-    /// twice and then snapping narrower. Each stop is several times the last:
-    /// neighbouring windows that differ by 2x produce near-identical averages,
-    /// which wastes a stop. Nothing shorter than a minute, because p95 over a
-    /// few dozen samples is just "second worst" and jumps on any single spike;
-    /// `last` already covers the immediate picture.
+    /// twice and then snapping narrower. 30s is the default: most sessions
+    /// are diagnosing something happening *now*, and a minute-deep window
+    /// kept a recovered connection looking broken long after it came back.
+    /// 30 rather than 15 because the loss colour bands (warn ≥ 1%, bad ≥ 5%)
+    /// make a single dropped ping in a 15-sample window read 6.7% — a red
+    /// cell over one lost packet; over 30 samples the same drop is a 3.3%
+    /// yellow, and red needs two. The 30s→1m step is closer than the rest of
+    /// the ladder likes, but at the short end the window is really a *drain
+    /// time* — how long an ended incident stays in the figures — and halving
+    /// that is a real difference; widen when the question is "how has it
+    /// been", not "how is it".
     pub fn cycle_window(&mut self) {
         self.window_secs = match self.window_secs {
+            w if w < 60 => 60,
             w if w < 300 => 300,
             w if w < 900 => 900,
-            _ => 60,
+            _ => 30,
         };
     }
 
@@ -2767,7 +2782,8 @@ impl AppState {
                 3 => st.p95.unwrap_or(f64::INFINITY),
                 4 => st.max.unwrap_or(f64::INFINITY),
                 5 => t.jitter_ms,
-                6 => t.loss_pct(),
+                // The figure the cell shows: loss over the stats window.
+                6 => t.recent_loss_pct(n),
                 _ => 0.0,
             }
         };

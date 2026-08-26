@@ -1902,24 +1902,52 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
 
     let rows = order.iter().skip(first).take(rows_avail).map(|&i| {
         let t = &s.targets[i];
-        let loss = t.loss_pct();
         let st = t.stats(n);
+        let loss = t.recent_loss_pct(n);
+        let rtt_ref = crate::verdict::rtt_reference(t, s);
+        let loss_ref = crate::verdict::loss_reference(t, s);
+        // Loss as it stands *right now*: the detection-sized slice of the
+        // window. When the window still carries an ended incident, this is
+        // what lets the row start relaxing before the figures do.
+        let now_loss = t.recent_loss_pct(th::RECENT.min(n));
         // A mid-path router that never answers ICMP is not a fault — the
         // analysis already treats it that way — so it reads dim, not red.
-        let color = if t.is_path_hop() && loss >= th::LOSS_DOWN_PCT {
-            Color::DarkGray
-        } else {
-            latency_color(
-                t.last_rtt_ms,
-                loss,
-                crate::verdict::rtt_reference(t, s),
-                crate::verdict::loss_reference(t, s),
-            )
+        let dim_hop = t.is_path_hop() && loss >= th::LOSS_DOWN_PCT;
+        // Every stat cell grades itself, so recovery reads as the row
+        // greening from the left: `last` and the name turn green the moment
+        // replies return, while p95/max/loss hold their colour until the
+        // incident ages out of the window — "now is fine, the history is
+        // still draining" at a glance.
+        let cell = |text: String, color: Color| {
+            let c = if dim_hop { Color::DarkGray } else { color };
+            Cell::from(Span::styled(text, Style::new().fg(c)))
         };
+        let rtt_c = |v: Option<f64>| match v {
+            Some(ms) => rtt_color(ms, rtt_ref),
+            None => Color::DarkGray,
+        };
+        let jit_color = if t.jitter_ms < th::PERF_JITTER_STEPS_MS[1] {
+            Color::Green
+        } else if t.jitter_ms < th::PERF_JITTER_STEPS_MS[2] {
+            Color::Yellow
+        } else {
+            Color::Red
+        };
+        let loss_color = match crate::verdict::loss_grade(loss, loss_ref) {
+            crate::verdict::RttGrade::Good => Color::Green,
+            crate::verdict::RttGrade::Warn => Color::Yellow,
+            crate::verdict::RttGrade::Bad => Color::Red,
+        };
+        // ↓ marks loss that is pure momentum: the recent probes are clean
+        // and the figure is an ended incident draining out of the window.
+        let aging = loss >= 0.5 && now_loss == 0.0;
+        // The identity columns wear the *current* condition — last reply and
+        // fresh loss — not the windowed history beside them.
+        let identity = latency_color(t.last_rtt_ms, now_loss, rtt_ref, loss_ref);
         let marker = if i == s.graph_target { "►" } else { "" };
-        let mut style = Style::new().fg(color);
+        let mut row_style = Style::new();
         if focused && i == s.selected {
-            style = style
+            row_style = row_style
                 .bg(Color::Rgb(40, 40, 55))
                 .add_modifier(Modifier::BOLD);
         }
@@ -1931,16 +1959,22 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         };
         Row::new(vec![
             Cell::from(Span::styled(marker, Style::new().fg(Color::Cyan))),
-            Cell::from(label),
-            Cell::from(t.addr.to_string()),
-            Cell::from(fmt_ms(t.last_rtt_ms)),
-            Cell::from(fmt_ms(st.mean)),
-            Cell::from(fmt_ms(st.p95)),
-            Cell::from(fmt_ms(st.max)),
-            Cell::from(format!("{:.1}", t.jitter_ms)),
-            Cell::from(format!("{loss:.0}%")),
+            cell(label, identity),
+            cell(t.addr.to_string(), identity),
+            cell(
+                fmt_ms(t.last_rtt_ms),
+                latency_color(t.last_rtt_ms, 0.0, rtt_ref, loss_ref),
+            ),
+            cell(fmt_ms(st.mean), rtt_c(st.mean)),
+            cell(fmt_ms(st.p95), rtt_c(st.p95)),
+            cell(fmt_ms(st.max), rtt_c(st.max)),
+            cell(format!("{:.1}", t.jitter_ms), jit_color),
+            cell(
+                format!("{loss:.0}%{}", if aging { "↓" } else { "" }),
+                loss_color,
+            ),
         ])
-        .style(style)
+        .style(row_style)
     });
     // The metric columns are fixed; the name and address split whatever the
     // panel has left, so a long hostname is not clipped at 13 characters while
@@ -2262,7 +2296,7 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                 cells.extend((2..widths_u.len()).map(|_| Cell::from("—")));
                 return Row::new(cells).style(style);
             };
-            let loss = stat.loss_pct();
+            let loss = stat.recent_loss_pct(n);
             let st = stat.stats(n);
             let mut style =
                 Style::new().fg(latency_color(stat.last_rtt_ms, loss, stat.floor_ms(), None));
@@ -2464,7 +2498,7 @@ fn hop_chart(f: &mut Frame, m: &crate::app::HopMonitor, n: usize, area: Rect, ma
                 Style::new().fg(JITTER_COLOR),
             ),
             Span::styled(
-                format!(" · loss {:.0}% ", stat.loss_pct()),
+                format!(" · loss {:.0}% ", stat.recent_loss_pct(n)),
                 Style::new().fg(Color::DarkGray),
             ),
         ])))
@@ -2748,9 +2782,9 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
     if s.fullscreen {
         // Zoomed ([z]): the bottom band becomes one full-width table — the
         // graphs above stay where the eye already was. It stays drawn while
-        // the [y] analysis floats over it, so closing the overlay lands back
-        // on the table instead of on a re-shuffled panel.
-        if s.overlay == Overlay::Zoom || (s.zoom_behind && s.overlay == Overlay::Triage) {
+        // the [y] analysis or a [W]hois floats over it, so closing the
+        // overlay lands back on the table instead of on a re-shuffled panel.
+        if s.overlay == Overlay::Zoom || (s.zoom_behind && s.overlay != Overlay::None) {
             zoom_band(f, s, rows[2]);
             return;
         }
@@ -3399,7 +3433,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("s", "run speed test"),
         row("P", "pause / resume the display"),
         row("r", "re-probe network info"),
-        row("w", "stats window 1m/5m/15m"),
+        row("w", "stats window 30s/1m/5m/15m"),
         row("l / D", "CSV recording / zip bundle"),
         row("y", "connection analysis"),
         row("e / c / M", "events / ports / marker"),
@@ -5219,6 +5253,51 @@ mod tests {
         assert!(draw(&s, 120, 30).contains("learning from scratch"));
         assert!(out.contains("d deletes"), "delete hint in the footer");
         assert!(out.contains("press L or Esc to close"));
+    }
+
+    /// After an outage ends, the windowed loss figure is momentum, not the
+    /// present: once the recent probes are clean it carries a ↓ so the eye
+    /// reads "draining out", not "still broken".
+    #[test]
+    fn recovered_loss_wears_the_aging_arrow() {
+        let mut s = AppState::new(vec![]);
+        s.window_secs = 60;
+        let mut t = crate::app::TargetStat::new(
+            "Cloudflare".into(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)),
+        );
+        // A 30 s outage, then 25 clean seconds: the 1m window still holds
+        // the losses, the recent slice is spotless.
+        for _ in 0..10 {
+            t.record_reply(10.0);
+        }
+        for _ in 0..30 {
+            t.record_loss();
+        }
+        for _ in 0..25 {
+            t.record_reply(10.0);
+        }
+        s.targets.push(t);
+        let out = draw(&s, 160, 40);
+        assert!(out.contains("%↓"), "aging loss carries the arrow");
+
+        // Mid-outage — recent probes still failing — no arrow: the loss is
+        // current, not history.
+        let mut s2 = AppState::new(vec![]);
+        s2.window_secs = 60;
+        let mut t2 = crate::app::TargetStat::new(
+            "Cloudflare".into(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)),
+        );
+        for _ in 0..30 {
+            t2.record_reply(10.0);
+        }
+        for _ in 0..10 {
+            t2.record_loss();
+        }
+        s2.targets.push(t2);
+        let out = draw(&s2, 160, 40);
+        assert!(!out.contains("%↓"), "live loss has no arrow");
     }
 
     #[test]

@@ -127,7 +127,9 @@ pub fn classify(
 }
 
 /// Whether this machine has IPv6 that is *supposed* to work: a global address,
-/// not just the automatic link-local (fe80::) or a ULA-only setup.
+/// not just the automatic link-local (fe80::), a ULA-only setup, or the
+/// deprecated site-local range (fec0::/10, RFC 3879) that NAT hypervisors
+/// (UTM/QEMU SLAAC) hand out with no route to the v6 internet behind it.
 pub fn has_global_v6(addrs: &[String]) -> bool {
     addrs.iter().any(|a| {
         let Some(ip) = a.split('/').next().and_then(|s| s.parse::<Ipv6Addr>().ok()) else {
@@ -136,7 +138,8 @@ pub fn has_global_v6(addrs: &[String]) -> bool {
         let seg = ip.segments();
         let link_local = (seg[0] & 0xffc0) == 0xfe80;
         let unique_local = (seg[0] & 0xfe00) == 0xfc00;
-        !link_local && !unique_local && !ip.is_loopback() && !ip.is_unspecified()
+        let site_local = (seg[0] & 0xffc0) == 0xfec0;
+        !link_local && !unique_local && !site_local && !ip.is_loopback() && !ip.is_unspecified()
     })
 }
 
@@ -383,12 +386,15 @@ mod tests {
     }
 
     /// fe80:: (automatic, always present) and ULA must not make a v4-only LAN
-    /// read as "IPv6 broken".
+    /// read as "IPv6 broken". Neither must fec0:: — deprecated site-local,
+    /// which UTM/QEMU NAT advertises to guests with nothing routable behind
+    /// it; that VM's "v6 broken" alarm was noise.
     #[test]
     fn v6_applicability_requires_a_global_address() {
         assert!(!has_global_v6(&[]));
         assert!(!has_global_v6(&["fe80::1c2a:ffee/64".into()]));
         assert!(!has_global_v6(&["fd00:abcd::5/64".into()]));
+        assert!(!has_global_v6(&["fec0::5866:cbff:fef9:bcc8/64".into()]));
         assert!(!has_global_v6(&["not-an-ip".into()]));
         assert!(has_global_v6(&[
             "fe80::1/64".into(),

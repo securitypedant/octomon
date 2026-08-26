@@ -162,7 +162,7 @@ fn format_rows(s: &AppState, stamp: &str) -> String {
             "target",
             &t.label,
             "loss_pct",
-            format!("{:.2}", t.loss_pct()),
+            format!("{:.2}", t.recent_loss_pct(n)),
             "%",
         );
         row(
@@ -187,7 +187,7 @@ fn format_rows(s: &AppState, stamp: &str) -> String {
                 "hop",
                 &subject,
                 "loss_pct",
-                format!("{:.2}", st.loss_pct()),
+                format!("{:.2}", st.recent_loss_pct(n)),
                 "%",
             );
         }

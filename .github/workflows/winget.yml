@@ -1,0 +1,56 @@
+# Winget: after each release, submit a version-bump PR to microsoft/winget-pkgs
+# so `winget install octomon` / `winget upgrade octomon` track the release.
+#
+# Same trigger shape as deb.yml, for the same reason: a `release: published`
+# trigger would never fire — dist creates the release with the workflow's own
+# GITHUB_TOKEN, and token-created events do not start other workflows.
+# workflow_dispatch covers manual recovery for an existing tag.
+#
+# wingetcreate downloads the two Windows zips from the release, computes their
+# SHA256s, rewrites the existing manifest under manifests/s/SimonThorpe/Octomon,
+# and opens the PR from the token owner's fork. It can only *update*: the
+# package must already exist in winget-pkgs (the initial 0.7.3 submission —
+# see packaging/winget/README.md).
+#
+# Secrets: WINGET_TOKEN — a classic PAT with the `public_repo` scope, used to
+# fork microsoft/winget-pkgs and open the PR. The workflow's own GITHUB_TOKEN
+# cannot reach a third-party repository.
+name: Winget
+permissions:
+  contents: read
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to submit to winget (e.g. v0.7.4)"
+        required: true
+
+jobs:
+  winget:
+    # On workflow_run: only after a successful Release run for a version tag
+    # (its head_branch is the tag name for tag-push runs).
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+    steps:
+      - name: Submit manifest update to winget-pkgs
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          $version = $env:TAG.TrimStart("v")
+          $base = "https://github.com/securitypedant/octomon/releases/download/$env:TAG"
+          Invoke-WebRequest -Uri https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          ./wingetcreate.exe update SimonThorpe.Octomon `
+            --version $version `
+            --urls "$base/octomon-x86_64-pc-windows-msvc.zip" "$base/octomon-aarch64-pc-windows-msvc.zip" `
+            --submit `
+            --token $env:WINGET_TOKEN

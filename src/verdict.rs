@@ -57,8 +57,8 @@ pub mod thresholds {
     pub const CLOCK_BAD_MS: f64 = 300_000.0;
     pub const CPU_HOT_PCT: f32 = 90.0;
     pub const MEM_HOT_PCT: f32 = 90.0;
-    /// Outcomes considered for *detection*. The display window (100) takes
-    /// 100 s to reflect an outage; 20 reacts inside half a minute.
+    /// Outcomes considered for *detection*. The user's stats window can look
+    /// back as far as 15 minutes; 20 reacts inside half a minute.
     pub const RECENT: usize = 20;
     /// Below this many outcomes a probe has no opinion, only noise.
     pub const MIN_SAMPLES: usize = 5;
@@ -108,6 +108,18 @@ pub mod thresholds {
     pub const FLAP_GRACE_SECS: u64 = 45;
     /// No verdict at all until this much uptime — early probes are still queued.
     pub const WARMUP_SECS: u64 = 10;
+    /// A Degraded finding standing continuously this long stops being an
+    /// episode and becomes the location's weather: a hotel network dropping
+    /// 30% of ICMP *all day* is what normal looks like there, and blocking
+    /// the baseline on it forever means the location can never establish —
+    /// which is exactly what the learned loss normals exist to grade against.
+    pub const WEATHER_SECS: u64 = 600;
+    /// Bufferbloat only votes in the performance grade while the speed test
+    /// that measured it is this fresh. The grade reads as *current*
+    /// performance; a +294 ms reading from a quarter of an hour ago pinning
+    /// "poor" under four green rungs is a contradiction, not information (the
+    /// speed-test line keeps showing older results with their age).
+    pub const PERF_BLOAT_FRESH_SECS: u64 = 300;
 }
 use thresholds as th;
 
@@ -696,16 +708,8 @@ pub fn link_state(s: &AppState) -> LinkState {
                 .and_then(|ip| ip.parse::<std::net::Ipv4Addr>().ok())
                 .is_some_and(|ip| ip.is_link_local())
         });
-    let has_global_v6 = n.ipv6.iter().any(|a| {
-        a.split('/')
-            .next()
-            .and_then(|ip| ip.parse::<std::net::Ipv6Addr>().ok())
-            .is_some_and(|ip| {
-                !ip.is_loopback()
-                    && (ip.segments()[0] & 0xffc0) != 0xfe80
-                    && (ip.segments()[0] & 0xfe00) != 0xfc00
-            })
-    });
+    // One rulebook with the HTTP prober: fe80/ULA/site-local don't count.
+    let has_global_v6 = crate::collectors::http::has_global_v6(&n.ipv6);
     if v4_self_assigned && !has_global_v6 {
         return LinkState::SelfAssigned;
     }
@@ -2111,11 +2115,21 @@ fn performance(s: &AppState, with_data: &[&TargetStat]) -> Option<Performance> {
         format!("loss {loss:.0}%"),
         grade(loss, th::PERF_LOSS_STEPS_PCT),
     ));
-    // Bufferbloat, when a speed test has measured it. Graded on the same
-    // boundaries the speed-test panel uses, so one +108 ms never reads
-    // "poor" there and something milder here.
-    if let (Some(idle), Some(loaded)) = (s.speedtest.idle_latency_ms, s.speedtest.loaded_latency_ms)
-    {
+    // Bufferbloat, when a *fresh* speed test has measured it. Graded on the
+    // same boundaries the speed-test panel uses, so one +108 ms never reads
+    // "poor" there and something milder here. A stale reading no longer
+    // votes: the grade is "performance now", and a bad bloat number from a
+    // quarter of an hour ago pinning "poor" beneath all-green rungs is a
+    // contradiction — the speed-test line still shows it, with its age.
+    let bloat_fresh = s
+        .speedtest
+        .last_run
+        .is_some_and(|t| t.elapsed().as_secs() <= th::PERF_BLOAT_FRESH_SECS);
+    if let (true, Some(idle), Some(loaded)) = (
+        bloat_fresh,
+        s.speedtest.idle_latency_ms,
+        s.speedtest.loaded_latency_ms,
+    ) {
         let bloat = (loaded - idle).max(0.0);
         let [excellent, good, moderate, _] = th::BLOAT_STEPS_MS;
         parts.push((
@@ -2375,19 +2389,25 @@ fn build_rungs(
     // demonstrably pass through it. Those hops are counted as silent instead
     // of being allowed to paint the rung red with a loss no one experiences.
     let mut silent = 0usize;
+    // Whether traffic demonstrably gets past the gateway — a later hop or the
+    // destination itself answering. Distinguishes "early hops are ICMP-silent"
+    // from "nothing past the gateway answers at all".
+    let mut path_forwards = false;
     let early: Vec<f64> = s
         .hop_monitor
         .as_ref()
         .map(|m| {
-            let answers_beyond = |ttl: u8| {
-                m.hops.iter().any(|o| {
-                    o.ttl > ttl
-                        && o.stat.as_ref().is_some_and(|st| {
-                            st.window.len() >= th::MIN_SAMPLES
-                                && st.recent_loss_pct(th::RECENT) < th::LOSS_BAD_PCT
-                        })
+            let healthy = |o: &crate::app::MonitoredHop| {
+                o.stat.as_ref().is_some_and(|st| {
+                    st.window.len() >= th::MIN_SAMPLES
+                        && st.recent_loss_pct(th::RECENT) < th::LOSS_BAD_PCT
                 })
             };
+            let answers_beyond = |ttl: u8| m.hops.iter().any(|o| o.ttl > ttl && healthy(o));
+            path_forwards = m
+                .hops
+                .iter()
+                .any(|o| (o.ttl > 1 || o.addr == Some(m.dest)) && healthy(o));
             m.hops
                 .iter()
                 .filter(|h| h.ttl >= 2 && h.ttl <= 4)
@@ -2406,11 +2426,29 @@ fn build_rungs(
                 .collect()
         })
         .unwrap_or_default();
-    rungs.push(if early.is_empty() && silent == 0 {
+    rungs.push(if s.hop_monitor.is_none() {
         Rung {
             area: Area::IspPath,
             status: RungStatus::Unknown,
             detail: "no path monitor — [m] to watch every hop".to_string(),
+        }
+    } else if early.is_empty() && silent == 0 {
+        // The monitor IS running; the early hops just never answered the
+        // walk — routine behind carrier-grade or hypervisor NAT. Saying "no
+        // path monitor" here read as the tool ignoring the one the user
+        // started.
+        if path_forwards {
+            Rung {
+                area: Area::IspPath,
+                status: RungStatus::Ok,
+                detail: "early hops never answer (ICMP-silent) · path forwards".to_string(),
+            }
+        } else {
+            Rung {
+                area: Area::IspPath,
+                status: RungStatus::Unknown,
+                detail: "watching the path — no hops answering yet".to_string(),
+            }
         }
     } else if early.is_empty() {
         // Every measured early hop is ICMP-silent while the path forwards.
@@ -3239,6 +3277,22 @@ fn latency_shaped(f: &Finding) -> bool {
         || (f.cause == Cause::GatewayLan && f.summary.contains("latency inflated"))
 }
 
+/// A finding that skews none of the numbers a fold records. The baseline
+/// learns v4 ICMP round trips, loss, DNS timing and signal — broken IPv6
+/// (while v4 works) and a wrong system clock touch none of those, yet either
+/// can stand for a machine's whole life on some networks (a v4-only VM NAT,
+/// an unsynced clock) and used to hold the location at "learning from
+/// scratch" forever.
+fn skews_nothing_folded(f: &Finding) -> bool {
+    matches!(f.cause, Cause::Ipv6Broken | Cause::ClockSkew)
+}
+
+/// Standing long enough that this is the network's weather, not an episode.
+fn is_weather(f: &Finding) -> bool {
+    f.since
+        .is_some_and(|t| t.elapsed().as_secs() >= th::WEATHER_SECS)
+}
+
 fn baseline_step(
     s: &mut AppState,
     healthy_run: &mut u32,
@@ -3301,19 +3355,29 @@ fn baseline_step(
         }
     }
 
-    // The fold gate, refined twice by field failures. Rule one: an incident
-    // must never teach the baseline. Rule two (the refinement): an incident
-    // only blocks the numbers it actually *skews* — a congested evening or a
+    // The fold gate, refined three times by field failures. Rule one: an
+    // *incident* must never teach the baseline. Rule two: an incident only
+    // blocks the numbers it actually *skews* — a congested evening or a
     // loaded machine skews latency while leaving loss, signal and medium
     // honest, and a hotel that is congested all evening (or a machine that
     // always has agents running) would otherwise sit at "learning from
-    // scratch" forever, never able to establish at all. So:
-    //   - Down-class findings, or non-latency Degraded ones (loss, DNS,
-    //     captive…): nothing folds.
-    //   - only latency-shaped trouble (inflation/bufferbloat findings, or
-    //     own load visibly inflating the paths): fold with the latency
-    //     fields blanked — the location still establishes, and its latency
-    //     normals fill in during genuinely clean minutes.
+    // scratch" forever, never able to establish at all. Rule three (the VM
+    // and hotel refinement): a Degraded finding that has stood for
+    // WEATHER_SECS is not an episode any more, it is what this network *is*
+    // — a working-but-poor connection is still a baseline, and the learned
+    // loss normals exist precisely so such a location can be graded against
+    // its own weather instead of staying solid red forever. So:
+    //   - Insufficient data, or any Down-class finding: nothing folds — a
+    //     connection that isn't working is not a baseline.
+    //   - findings that skew nothing the fold records (broken IPv6 while v4
+    //     works, a wrong system clock): ignored outright.
+    //   - latency-shaped trouble (inflation/bufferbloat findings, or own
+    //     load visibly inflating the paths): fold with the latency fields
+    //     blanked — the location establishes, and its latency normals fill
+    //     in during genuinely clean minutes.
+    //   - other Degraded findings (loss, DNS…): block while young; once
+    //     standing past WEATHER_SECS the minute folds in full — that loss
+    //     IS the location's normal.
     // Note-class findings never block: a note can be a permanent trait of a
     // location (a gateway that drops ICMP as policy).
     let mut blocked = false;
@@ -3323,10 +3387,14 @@ fn baseline_step(
         Verdict::Insufficient(_) => blocked = true,
         Verdict::Problems(fs) => {
             for f in fs.iter().filter(|f| f.severity >= Severity::Degraded) {
-                if f.severity >= Severity::Down || !latency_shaped(f) {
+                if f.severity >= Severity::Down {
                     blocked = true;
-                } else {
+                } else if skews_nothing_folded(f) {
+                    // fold untouched
+                } else if latency_shaped(f) {
                     latency_suspect = true;
+                } else if !is_weather(f) {
+                    blocked = true;
                 }
             }
         }
@@ -3532,6 +3600,29 @@ mod tests {
         let p = evaluate(&s).performance.expect("has data");
         assert_eq!(p.grade, PerfGrade::Poor, "got: {}", p.detail);
         assert!(p.detail.contains("latency 400ms (poor)"), "{}", p.detail);
+    }
+
+    /// Bufferbloat votes in the grade only while the speed test that measured
+    /// it is fresh: a +294 ms reading from a quarter-hour ago pinning "poor"
+    /// under four green rungs contradicted everything else on screen.
+    #[test]
+    fn stale_bloat_readings_do_not_vote_in_the_performance_grade() {
+        let mut s = healthy_state();
+        s.speedtest.idle_latency_ms = Some(12.0);
+        s.speedtest.loaded_latency_ms = Some(306.0);
+
+        // Fresh test: the bad bloat is current performance and votes.
+        s.speedtest.last_run = Some(Instant::now());
+        let p = evaluate(&s).performance.expect("has data");
+        assert_eq!(p.grade, PerfGrade::Poor, "got: {}", p.detail);
+        assert!(p.detail.contains("bloat +294ms"), "{}", p.detail);
+
+        // The same reading a quarter of an hour later: dropped from the line
+        // (the speed-test panel still shows it, with its age).
+        s.speedtest.last_run = Instant::now().checked_sub(Duration::from_secs(900));
+        let p = evaluate(&s).performance.expect("has data");
+        assert_eq!(p.grade, PerfGrade::Excellent, "got: {}", p.detail);
+        assert!(!p.detail.contains("bloat"), "{}", p.detail);
     }
 
     /// Like [`probe`], but every reply at the given RTT.
@@ -3912,6 +4003,59 @@ mod tests {
         let t = evaluate(&s);
         assert_eq!(t.findings[0].cause, Cause::IspHop, "{:?}", causes(&t));
         assert!(t.findings[0].summary.contains("hop 3"));
+    }
+
+    /// Behind hypervisor/carrier NAT no early hop ever answers the walk. The
+    /// rung used to claim "no path monitor — [m] to watch every hop" while
+    /// exactly that monitor was running; now it reports what is actually
+    /// known: the hops are silent and the path demonstrably forwards.
+    #[test]
+    fn a_running_monitor_with_silent_early_hops_is_not_called_absent() {
+        let mut s = healthy_state();
+        let dead = |ttl: u8| crate::app::MonitoredHop {
+            ttl,
+            addr: None,
+            stat: None,
+        };
+        let dest = IpAddr::V4(Ipv4Addr::new(104, 18, 18, 40));
+        let m = crate::app::HopMonitor {
+            target: "octomon.dev".into(),
+            dest,
+            hops: vec![
+                crate::app::MonitoredHop {
+                    ttl: 1,
+                    addr: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
+                    stat: Some(probe("gateway", [192, 168, 1, 1], 20, 0)),
+                },
+                dead(2),
+                dead(3),
+                dead(4),
+                crate::app::MonitoredHop {
+                    ttl: crate::app::MonitoredHop::DEST_TTL,
+                    addr: Some(dest),
+                    stat: Some(probe("octomon.dev", [104, 18, 18, 40], 20, 0)),
+                },
+            ],
+            discovering: false,
+            generation: 1,
+            selected: 0,
+        };
+        s.hop_monitor = Some(m.clone());
+        let t = evaluate(&s);
+        let rung = t.rungs.iter().find(|r| r.area == Area::IspPath).unwrap();
+        assert_eq!(rung.status, RungStatus::Ok, "{}", rung.detail);
+        assert!(rung.detail.contains("path forwards"), "{}", rung.detail);
+        assert!(!rung.detail.contains("no path monitor"), "{}", rung.detail);
+
+        // Nothing beyond the gateway answering at all: unknown, but still
+        // reported as a watch in progress rather than an absent monitor.
+        let mut quiet = m;
+        quiet.hops.pop();
+        s.hop_monitor = Some(quiet);
+        let t = evaluate(&s);
+        let rung = t.rungs.iter().find(|r| r.area == Area::IspPath).unwrap();
+        assert_eq!(rung.status, RungStatus::Unknown, "{}", rung.detail);
+        assert!(rung.detail.contains("watching the path"), "{}", rung.detail);
     }
 
     #[test]
@@ -5183,6 +5327,88 @@ mod tests {
         let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
         assert!(matches!(io, BaselineIo::None));
         assert_eq!(healthy_run, 0);
+    }
+
+    /// The VM bug: a permanently standing "IPv6 broken while IPv4 works"
+    /// held the location at "learning from scratch" forever — though every
+    /// number the fold records is a v4 measurement the finding cannot skew.
+    #[test]
+    fn findings_that_skew_nothing_folded_never_block_the_fold() {
+        let mut s = healthy_state();
+        if let Some(earlier) = Instant::now().checked_sub(Duration::from_secs(300)) {
+            s.started = earlier;
+        }
+        let (key, label) = crate::baseline::fingerprint(&s.netinfo).expect("fingerprintable");
+        s.baseline_key = Some(key);
+        s.baseline = Some(crate::baseline::Baseline {
+            label,
+            ..Default::default()
+        });
+        s.verdict.current = Verdict::Problems(vec![fake(Cause::Ipv6Broken)]);
+
+        let mut healthy_run = 59;
+        let mut run_suspect = false;
+        let mut last_speed = Some(0);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        assert!(
+            matches!(io, BaselineIo::Save { .. }),
+            "v6-broken still folds"
+        );
+        let b = s.baseline.as_ref().unwrap();
+        assert_eq!(b.samples, 1);
+        assert!(b.gateway_ms.is_some(), "v4 numbers fold untouched");
+        assert!(b.gateway_loss_pct.is_some());
+    }
+
+    /// A Degraded finding standing past WEATHER_SECS is the location's
+    /// weather, not an episode: the minute folds in full, which is the only
+    /// way a hotel-grade network can ever learn the loss normal it is meant
+    /// to be graded against. The same finding while young still blocks.
+    #[test]
+    fn persistent_degradation_becomes_weather_and_folds() {
+        let mut s = healthy_state();
+        if let Some(earlier) = Instant::now().checked_sub(Duration::from_secs(3600)) {
+            s.started = earlier;
+        }
+        let (key, label) = crate::baseline::fingerprint(&s.netinfo).expect("fingerprintable");
+        s.baseline_key = Some(key);
+        s.baseline = Some(crate::baseline::Baseline {
+            label,
+            ..Default::default()
+        });
+        let lossy = Finding {
+            summary: "connection degraded but usable — heavy packet loss".into(),
+            ..fake(Cause::UsableDegraded)
+        };
+        // Young: an incident. Nothing folds.
+        s.verdict.current = Verdict::Problems(vec![Finding {
+            since: Instant::now().checked_sub(Duration::from_secs(30)),
+            ..lossy.clone()
+        }]);
+        let mut healthy_run = 59;
+        let mut run_suspect = false;
+        let mut last_speed = Some(0);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        assert!(
+            matches!(io, BaselineIo::None),
+            "a young episode still blocks"
+        );
+        assert_eq!(healthy_run, 0);
+
+        // The same finding standing 11 minutes: weather. Folds in full.
+        s.verdict.current = Verdict::Problems(vec![Finding {
+            since: Instant::now().checked_sub(Duration::from_secs(660)),
+            ..lossy
+        }]);
+        healthy_run = 59;
+        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        assert!(matches!(io, BaselineIo::Save { .. }), "weather establishes");
+        let b = s.baseline.as_ref().unwrap();
+        assert_eq!(b.samples, 1);
+        assert!(
+            b.gateway_loss_pct.is_some(),
+            "the weather itself is learned"
+        );
     }
 
     #[test]

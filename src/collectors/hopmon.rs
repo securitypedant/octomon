@@ -429,7 +429,7 @@ mod tests {
                     "  {:>2}  {:<16} loss {:>3.0}%  last {:?}  sent {}",
                     h.ttl,
                     h.addr.map(|a| a.to_string()).unwrap_or_default(),
-                    st.loss_pct(),
+                    st.recent_loss_pct(usize::MAX),
                     st.last_rtt_ms,
                     st.sent
                 ),

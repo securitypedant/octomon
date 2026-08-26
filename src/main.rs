@@ -1009,9 +1009,10 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.input_mode = InputMode::ConfirmReset;
                 }
                 KeyCode::Esc => {
-                    // From the analysis-over-zoom, Esc peels one layer: back
-                    // to the zoomed table, not all the way out.
-                    s.overlay = if s.zoom_behind && s.overlay == Overlay::Triage {
+                    // From an overlay floating above the zoom (analysis,
+                    // whois), Esc peels one layer: back to the zoomed table,
+                    // not all the way out.
+                    s.overlay = if s.zoom_behind && s.overlay != Overlay::Zoom {
                         Overlay::Zoom
                     } else {
                         Overlay::None
@@ -1090,8 +1091,18 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 }
                 KeyCode::Char('W') => {
                     s.overlay = if s.overlay == Overlay::Whois {
-                        Overlay::None
+                        // Whois asked from the zoomed table floats above it;
+                        // closing lands back on the zoom, not the split view.
+                        if s.zoom_behind {
+                            s.zoom_behind = false;
+                            Overlay::Zoom
+                        } else {
+                            Overlay::None
+                        }
                     } else if let Some(addr) = s.selected_addr() {
+                        if s.overlay == Overlay::Zoom {
+                            s.zoom_behind = true;
+                        }
                         s.whois_scroll = 0;
                         side = Side::Whois(addr);
                         Overlay::Whois
@@ -2120,7 +2131,7 @@ fn snapshot_text(s: &AppState) -> String {
             ms(st.max),
             t.jitter_ms,
             st.stddev,
-            t.loss_pct(),
+            t.recent_loss_pct(n),
             t.recv,
             t.sent
         );
@@ -2533,7 +2544,7 @@ fn doctor_json(s: &AppState, full: bool) -> (String, i32) {
                 "mean_ms": st.mean,
                 "p95_ms": st.p95,
                 "jitter_ms": t.jitter_ms,
-                "loss_pct": t.loss_pct(),
+                "loss_pct": t.recent_loss_pct(n),
                 "sent": t.sent,
                 "recv": t.recv,
                 "web_status": t.web.status.label(),
