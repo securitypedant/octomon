@@ -296,8 +296,7 @@ Notes:
 - The only octomon-operated endpoint is `octomon.dev/edge`, which exists
   purely to deepen the monitoring: it returns your connection's edge view *to
   you* and **stores nothing about you** — no logs, no identifiers. The single
-  thing it counts is requests per octomon version (major.minor only), and
-  that count is
+  thing it counts is requests per octomon version, and that count is
   published, in full, at [octomon.dev/privacy](https://octomon.dev/privacy) —
   the only dashboard that exists. Set `edge_check_url = ""` to never call it.
   No other telemetry of any kind is collected.

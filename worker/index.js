@@ -12,11 +12,12 @@
 // string and a count — no IP, no location, no user agent echo. Workers Logs
 // stay disabled for this worker.
 
-/// The octomon version family ("0.8") out of our own client's User-Agent
-/// ("octomon/0.8.0 (…)"), "other" for anything else — browsers poking the
-/// endpoint out of curiosity get counted without being fingerprinted.
-function versionFamily(ua) {
-  const m = /^octomon\/(\d+\.\d+)/.exec(ua ?? "");
+// The full octomon version ("0.8.1") out of our own client's User-Agent
+// ("octomon/0.8.1 (…)"), "other" for anything else — browsers poking the
+// endpoint out of curiosity get counted without being fingerprinted. The
+// version names the software build, not the person running it.
+function versionOf(ua) {
+  const m = /^octomon\/(\d+\.\d+(?:\.\d+)?)/.exec(ua ?? "");
   return m ? m[1] : "other";
 }
 
@@ -35,12 +36,12 @@ function edgeAnswer(request, env, ctx) {
     ts: Math.floor(Date.now() / 1000),
   };
   if (env.EDGE_STATS) {
-    // The whole record: one version family, one count. This is the entire
+    // The whole record: one version string, one count. This is the entire
     // input to the graph on /privacy.
     ctx.waitUntil(
       Promise.resolve(
         env.EDGE_STATS.writeDataPoint({
-          blobs: [versionFamily(request.headers.get("user-agent"))],
+          blobs: [versionOf(request.headers.get("user-agent"))],
           doubles: [1],
         }),
       ).catch(() => {}),
@@ -55,9 +56,9 @@ function edgeAnswer(request, env, ctx) {
 }
 
 // The public aggregate behind the /privacy graph: daily request counts per
-// octomon version family for the last 30 days, queried from Analytics
-// Engine and cached for an hour. Deliberately coarse — day buckets and
-// version *families* — so even a fleet of one cannot be traced through it.
+// octomon version for the last 30 days, queried from Analytics Engine and
+// cached for an hour. Day buckets keep it coarse in time; the version names
+// a public software build, not a person.
 async function edgeStats(env) {
   if (!env.AE_QUERY_TOKEN || !env.CF_ACCOUNT_ID) {
     return new Response(JSON.stringify({ series: [] }) + "\n", {

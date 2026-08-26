@@ -216,8 +216,9 @@
       latency reading that works even on networks that block ping).</p>
       <p>That answer goes <strong>to you and is stored nowhere</strong>. The
       endpoint keeps no logs. The single thing it counts is: <em>one request
-      happened, from octomon version x.y</em>: the major.minor version from
-      the user agent, and nothing else. No IP address, no location, no identifier
+      happened, from octomon version x.y.z</em>: the version from the user
+      agent, and nothing else. The version is useful (it shows which builds
+      are alive in the wild) and describes the software, not you. No IP address, no location, no identifier
       of any kind is retained, which also means we <em>cannot</em> count
       unique users, only requests, a deliberate limitation.</p>
       <p>Don't want even that? Set <code>edge_check_url = ""</code> in
@@ -239,10 +240,9 @@
     <div class="wrap">
       <h2>Our whole dashboard, published</h2>
       <p>This graph is everything we can see: <strong>/edge requests per day,
-      by octomon version</strong>, for the last 30 days. It is deliberately
-      coarse (day buckets, and the version's major.minor only, like
-      <code>0.8</code>, never exact builds) so even a fleet of one cannot be
-      traced through it. There is no other dashboard, private or
+      by octomon version</strong>, for the last 30 days. Day buckets keep it
+      coarse in time, and the version (like <code>0.8.1</code>) names a
+      public software build, not a person. There is no other dashboard, private or
       otherwise.</p>
       <div class="card graph-card">
         <h3>/edge requests · last 30 days</h3>
@@ -332,7 +332,7 @@
   legend.innerHTML = versions
     .map((v, vi) => `<span class="key"><span class="swatch" style="background:${colors[vi % colors.length]}"></span>octomon ${v}</span>`)
     .join("");
-  note.textContent = "updated hourly · day buckets · major.minor versions only, by design, so nobody can be traced through it.";
+  note.textContent = "updated hourly · day buckets · version and count only, by design, so nobody can be traced through it.";
 })();
 </script>
 
