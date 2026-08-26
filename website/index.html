@@ -567,7 +567,7 @@ sudo apt update &amp;&amp; sudo apt install octomon">copy</button>
         <p>Each target gets an ICMP probe every second. The <kbd>w</kbd> window
         (30s to 15m) sets how many of those outcomes the table summarises, and
         every cell grades itself over that window: the name and
-        <span class="mono-inline">last</span> wear the current condition while
+        <span class="mono-inline">last</span> columns display the current condition while
         avg, p95, max, jitter (RFC 3550 interarrival) and loss carry the
         history. A recovered path visibly greens from the left as the incident
         drains out, with a <span class="mono-inline">↓</span> on loss that is
@@ -576,7 +576,7 @@ sudo apt update &amp;&amp; sudo apt install octomon">copy</button>
         <p>Underneath, each network is fingerprinted on SSID plus gateway MAC,
         so DHCP renewals and mesh roams keep one identity and the same LAN over
         copper and over radio count as two different normals. What normal means
-        there is learned as slow EWMAs (exponentially weighted moving average)
+        is learned as slow EWMAs (exponentially weighted moving average)
         folded once per clean minute: latency to your gateway and to the best
         remote address (typical and p95), resolver response time, Wi-Fi signal
         strength, and crucially how much ICMP loss is usual there. A
