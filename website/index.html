@@ -373,7 +373,7 @@
     <div class="wrap hero-flex">
       <div class="hero-inner">
         <h1>Is it Wi-Fi,<br>your ISP<br>or the Internet?</h1>
-        <p class="sub">Latency, bandwidth, network config in a
+        <p class="sub">Latency, bandwidth, network config and device performance in a
         terminal app with a built-in dashboard and analysis to help diagnose the data.</p>
       </div>
       <img class="hero-art" src="/images/octomon-hero-mock.svg" alt=""
@@ -560,43 +560,48 @@ sudo apt update &amp;&amp; sudo apt install octomon">copy</button>
     <div class="wrap">
       <h2>Now, versus normal</h2>
       <div class="why-card">
-        <p>octomon is not an observability platform, and it doesn't want your
-        last six hours. It answers one question: <em>how is my connection right
-        now, and is that normal for where I'm sitting?</em> Each target gets an
-        ICMP probe every second. The <kbd>w</kbd> window (30s to 15m) sets how
-        many of those outcomes the table summarises, and every cell grades
-        itself over that window: the name and <span class="mono-inline">last</span>
-        wear the current condition while avg, p95, max, jitter (RFC 3550
-        interarrival) and loss carry the recent history. A recovered path
-        visibly greens from the left as the incident drains out, with a
-        <span class="mono-inline">↓</span> on loss that is history rather than
-        happening.</p>
+        <p>octomon is not an observability platform, and it doesn't want weeks
+        of your network data. It answers one question: <em>how is my connection
+        right now, and is that normal for where I'm sitting?</em></p>
+
+        <p>Each target gets an ICMP probe every second. The <kbd>w</kbd> window
+        (30s to 15m) sets how many of those outcomes the table summarises, and
+        every cell grades itself over that window: the name and
+        <span class="mono-inline">last</span> wear the current condition while
+        avg, p95, max, jitter (RFC 3550 interarrival) and loss carry the
+        history. A recovered path visibly greens from the left as the incident
+        drains out, with a <span class="mono-inline">↓</span> on loss that is
+        history rather than happening.</p>
 
         <p>Underneath, each network is fingerprinted on SSID plus gateway MAC,
         so DHCP renewals and mesh roams keep one identity and the same LAN over
         copper and over radio count as two different normals. What normal means
-        there is learned as slow EWMAs folded once per clean minute: gateway
-        and best-anchor RTT and p95, resolver latency, RSSI, and crucially the
-        usual ICMP loss. A minute tainted by an active finding never teaches
-        the baseline; a degraded state that stands long enough is reclassified
-        as that location's weather and does. Comparisons stay silent until five
+        there is learned as slow EWMAs (exponentially weighted moving average)
+        folded once per clean minute: latency to your gateway and to the best
+        remote address (typical and p95), resolver response time, Wi-Fi signal
+        strength, and crucially how much ICMP loss is usual there. A
+        minute tainted by an active network issue never teaches the baseline; a
+        degraded state that stands long enough is reclassified as that
+        location's weather and does. Comparisons stay silent until five
         minutes have been learned, and the baseline persists across runs, so a
         session that <em>starts</em> broken is still judged against what this
-        network can do.</p>
+        network can (or cannot) do.</p>
 
         <p>The grading is relative with absolute floors: latency within 1.5x
         of the path's floor is fine and beyond 3x is bad, loss within 1.5x of
         the learned normal is fine, with office-LAN absolutes as the fallback
         when nothing has been learned yet. That's what keeps plane Wi-Fi
         honest. It drops 20 to 40% of ICMP as permanent weather (control-plane
-        deprioritisation, not path failure) while TCP still flows, which
-        octomon confirms with an HTTP probe per address family. So instead of
+        deprioritisation, not path failure) while TCP still flows — which
+        octomon proves by making a small real web request, over both IPv4 and
+        IPv6 (when available), to confirm actual traffic still gets through. So instead of
         a wall of red and a false outage, one line:
         <span style="font-family: var(--octo-mono); color: var(--octo-amber);">▲ connection degraded but usable, web traffic still getting through</span>.</p>
 
         <p>Hotel Wi-Fi is the mirror case: fine at noon, congested every
-        evening. Latency-shaped findings fold latency-blind, so the 9pm
-        inflation never redefines normal, and the analysis can say
+        evening. While a latency problem is active, the latency numbers are
+        left out of the learning, so the 9pm inflation never redefines what
+        normal means, and the analysis can say
         <span style="font-family: var(--octo-mono);">gateway 41ms vs ~9ms normal here</span>
         and name the network as the culprit. Findings themselves pass
         hysteresis (raise on 4 of the last 6 evaluations, clear only after a
