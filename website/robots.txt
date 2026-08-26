@@ -1,0 +1,8 @@
+# octomon.dev — everything on the site is public and welcome to be indexed,
+# by search engines and AI crawlers alike. The apt repository is excluded
+# only because crawling package pools and indexes helps nobody.
+User-agent: *
+Disallow: /apt/
+Allow: /
+
+Sitemap: https://octomon.dev/sitemap.xml
