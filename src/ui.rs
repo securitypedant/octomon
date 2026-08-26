@@ -924,6 +924,46 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// The octomon mark in half-block art, coloured like the logo: green dome and
+/// legs, the sixth leg amber (the fault arm), red eyes. 18 columns, 10 rows.
+fn welcome_art() -> Vec<Line<'static>> {
+    let g = Style::new().fg(Color::Green);
+    let a = Style::new().fg(Color::Yellow);
+    let r = Style::new().fg(Color::Red);
+    let eyes = || {
+        Line::from(vec![
+            Span::styled(" ████", g),
+            Span::styled("██", r),
+            Span::styled("████", g),
+            Span::styled("██", r),
+            Span::styled("████ ", g),
+        ])
+    };
+    let legs_long = || {
+        Line::from(vec![
+            Span::styled(" █ █ █ █ █ ", g),
+            Span::styled("█", a),
+            Span::styled(" █ █  ", g),
+        ])
+    };
+    vec![
+        Line::from(Span::styled("     ▄▄▄▄▄▄▄▄     ", g)),
+        Line::from(Span::styled("   ▄▄████████▄▄   ", g)),
+        Line::from(Span::styled(" ▄██████████████▄ ", g)),
+        eyes(),
+        eyes(),
+        Line::from(Span::styled(" ████████████████ ", g)),
+        legs_long(),
+        legs_long(),
+        legs_long(),
+        Line::from(vec![
+            Span::styled("   █   █   ", g),
+            Span::styled("█", a),
+            Span::styled("   █  ", g),
+        ]),
+    ]
+}
+
 /// First-run welcome: what the tool answers, and that it learns each network's
 /// normal. Shown once, then persisted away.
 fn explainer_overlay(f: &mut Frame, area: Rect) {
@@ -965,7 +1005,16 @@ fn explainer_overlay(f: &mut Frame, area: Rect) {
     // Breathing room inside the border: 1 column each side, 1 row above and
     // below.
     let pad = Padding::new(1, 1, 1, 1);
-    let w = (78u16 + 2).min(area.width);
+    // With room to spare, the mark sits to the left of the text; on narrow
+    // terminals the text keeps the whole box.
+    const ART_W: u16 = 18;
+    const ART_GAP: u16 = 2;
+    let with_art = area.width >= 78 + 2 + ART_W + ART_GAP;
+    let w = if with_art {
+        78 + 2 + ART_W + ART_GAP
+    } else {
+        (78u16 + 2).min(area.width)
+    };
     let h = (lines.len() as u16 + 2 + 2).min(area.height);
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
@@ -984,7 +1033,23 @@ fn explainer_overlay(f: &mut Frame, area: Rect) {
         .border_style(Style::new().fg(Color::Cyan));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    if with_art {
+        let cols = Layout::horizontal([
+            Constraint::Length(ART_W),
+            Constraint::Length(ART_GAP),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+        let art = welcome_art();
+        // The mark centres vertically against the text column.
+        let pad_top = inner.height.saturating_sub(art.len() as u16) / 2;
+        let mut padded: Vec<Line> = (0..pad_top).map(|_| Line::from("")).collect();
+        padded.extend(art);
+        f.render_widget(Paragraph::new(padded), cols[0]);
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), cols[2]);
+    } else {
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    }
 }
 
 /// The session timeline, newest first: what changed and when. This is the
