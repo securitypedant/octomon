@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>octomon — privacy</title>
+<title>octomon: privacy</title>
 <meta name="description" content="What octomon sends, what we can see, and proof: the only dashboard we have is published on this page. Nothing about you is recorded.">
 <link rel="canonical" href="https://octomon.dev/privacy">
 <link rel="icon" type="image/png" sizes="32x32" href="/images/octomon-logo-32.png">
@@ -11,13 +11,13 @@
 <link rel="apple-touch-icon" sizes="180x180" href="/images/octomon-icon-tile.png">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://octomon.dev/privacy">
-<meta property="og:title" content="octomon — privacy">
+<meta property="og:title" content="octomon: privacy">
 <meta property="og:description" content="Nothing about you is recorded. The only dashboard we have is published on this page.">
 <meta property="og:image" content="https://octomon.dev/images/octomon-og-card.png">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="stylesheet" href="/tokens.css">
 <style>
-  /* Every colour on this page is a token from tokens.css — no hex here. */
+  /* Every colour on this page is a token from tokens.css, no hex here. */
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
   @media (prefers-reduced-motion: reduce) {
@@ -175,7 +175,7 @@
     <div class="wrap">
       <h1>Privacy</h1>
       <p class="lede">octomon measures <em>your</em> connection, on <em>your</em>
-      machine, for <em>you</em>. Nothing about you is recorded by us — and this
+      machine, for <em>you</em>. Nothing about you is recorded by us, and this
       page is the proof: the only dashboard we have is published below, for
       everyone to see.</p>
     </div>
@@ -185,16 +185,22 @@
     <div class="wrap">
       <h2>The promise</h2>
       <p><strong>Everything octomon learns stays on your machine.</strong>
-      Baselines, incident history, speed tests, recordings — all local files
+      Baselines, incident history, speed tests, recordings: all local files
       you can read, export, or erase (<code>Ctrl+R</code> erases everything).
       No telemetry, no accounts, no identifiers.</p>
-      <p>As a <em>network</em> tool, octomon does make outbound requests — to
+      <p>As a <em>network</em> tool, octomon does make outbound requests, to
       ping targets, resolvers, time servers and speed-test backends. Every
       endpoint it contacts, when, why, and exactly what is sent is listed in the
       <a href="https://github.com/securitypedant/octomon#network--privacy">README's
       network table</a>. Every request identifies itself honestly as
-      <code>octomon/&lt;version&gt; (network monitoring tool; +https://octomon.dev)</code>
-      — never a browser costume.</p>
+      <code>octomon/&lt;version&gt; (network monitoring tool; +https://octomon.dev)</code>,
+      never a browser costume.</p>
+      <p>A word on where this ethic comes from: octomon's author works at
+      Cloudflare, a company with a long-standing
+      <a href="https://www.cloudflare.com/privacypolicy/">commitment to
+      privacy</a>. octomon is a personal project, not a Cloudflare product,
+      but it inherits that same moral compass: collect nothing you don't
+      need, and be able to prove it.</p>
     </div>
   </section>
 
@@ -205,22 +211,22 @@
       network change, and every 15 minutes. Its only purpose is to improve the
       quality and depth of the monitoring: the Cloudflare edge answers with
       facts about your connection that your machine cannot see from the
-      inside — which PoP is serving you, which ISP network your traffic
+      inside: which PoP is serving you, which ISP network your traffic
       arrives from, and the edge's own TCP round-trip measurement of you (a
       latency reading that works even on networks that block ping).</p>
       <p>That answer goes <strong>to you and is stored nowhere</strong>. The
       endpoint keeps no logs. The single thing it counts is: <em>one request
-      happened, from octomon version x.y</em> — the version family from the
+      happened, from octomon version x.y</em>: the version family from the
       user agent, and nothing else. No IP address, no location, no identifier
       of any kind is retained, which also means we <em>cannot</em> count
-      unique users, only requests — a deliberate limitation.</p>
+      unique users, only requests, a deliberate limitation.</p>
       <p>Don't want even that? Set <code>edge_check_url = ""</code> in
       octomon's config and it is never called. The row simply disappears from
       the Network panel.</p>
       <div class="card">
         <h3>the fine print, honestly</h3>
         <p>octomon.dev is served by Cloudflare, so Cloudflare's platform
-        handles the HTTP requests the way it does for every site behind it —
+        handles the HTTP requests the way it does for every site behind it;
         that is true of any request to this domain, not just /edge. The
         website (not the tool) uses Cloudflare Web Analytics, which is
         cookieless. Our own code on /edge stores the version-family count
@@ -234,8 +240,8 @@
       <h2>Our whole dashboard, published</h2>
       <p>This graph is everything we can see: <strong>/edge requests per day,
       by octomon version family</strong>, for the last 30 days. It is
-      deliberately coarse — day buckets, version families like
-      <code>0.8</code> rather than exact versions — so even a fleet of one
+      deliberately coarse (day buckets, version families like
+      <code>0.8</code> rather than exact versions) so even a fleet of one
       cannot be traced through it. There is no other dashboard, private or
       otherwise.</p>
       <div class="card graph-card">
@@ -245,7 +251,7 @@
         <p class="graph-note" id="edge-note">loading the live numbers…</p>
       </div>
       <p style="margin-top:18px">The data behind it is public too:
-      <a href="/edge/stats"><code>octomon.dev/edge/stats</code></a> — the same
+      <a href="/edge/stats"><code>octomon.dev/edge/stats</code></a>: the same
       aggregate this page renders, and the only readout the endpoint's
       counter can produce.</p>
     </div>
@@ -254,8 +260,8 @@
   <section>
     <div class="wrap">
       <h2>Your own data, on your own disk</h2>
-      <p>The files octomon keeps locally — CSV recordings, learned baselines,
-      incident history — include your SSIDs, gateway and addresses. Treat them
+      <p>The files octomon keeps locally (CSV recordings, learned baselines,
+      incident history) include your SSIDs, gateway and addresses. Treat them
       as you would any file describing your network, especially the
       <code>Shift+D</code> support bundle, which is designed to be shared with
       whoever is helping you debug.</p>
@@ -289,11 +295,11 @@
     const resp = await fetch("/edge/stats");
     series = (await resp.json()).series ?? [];
   } catch {
-    note.textContent = "the stats endpoint isn't answering right now — try again later.";
+    note.textContent = "the stats endpoint isn't answering right now; try again later.";
     return;
   }
   if (!series.length) {
-    note.textContent = "no requests recorded yet — the counter is brand new.";
+    note.textContent = "no requests recorded yet; the counter is brand new.";
     return;
   }
   const days = [...new Set(series.map((r) => r.day))].sort();
@@ -326,7 +332,7 @@
   legend.innerHTML = versions
     .map((v, vi) => `<span class="key"><span class="swatch" style="background:${colors[vi % colors.length]}"></span>octomon ${v}</span>`)
     .join("");
-  note.textContent = "updated hourly · day buckets · version families only — by design, so nobody can be traced through it.";
+  note.textContent = "updated hourly · day buckets · version families only, by design, so nobody can be traced through it.";
 })();
 </script>
 

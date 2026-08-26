@@ -3,21 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>octomon — understand your connection</title>
-<meta name="description" content="Answers to the questions octomon's analysis raises — baselines, colors, hysteresis, speed tests — and a plain-English glossary of the networking terms on screen.">
+<title>octomon: understand your connection</title>
+<meta name="description" content="Answers to the questions octomon's analysis raises (baselines, colors, hysteresis, speed tests) and a plain-English glossary of the networking terms on screen.">
 <link rel="canonical" href="https://octomon.dev/understand">
 <link rel="icon" type="image/png" sizes="32x32" href="/images/octomon-logo-32.png">
 <link rel="icon" type="image/png" sizes="512x512" href="/images/octomon-icon-tile.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/images/octomon-icon-tile.png">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://octomon.dev/understand">
-<meta property="og:title" content="octomon — understand your connection">
+<meta property="og:title" content="octomon: understand your connection">
 <meta property="og:description" content="How octomon judges your connection, and what all those networking terms actually mean.">
 <meta property="og:image" content="https://octomon.dev/images/octomon-og-card.png">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="stylesheet" href="/tokens.css">
 <style>
-  /* Every colour on this page is a token from tokens.css — no hex here. */
+  /* Every colour on this page is a token from tokens.css, no hex here. */
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
   @media (prefers-reduced-motion: reduce) {
@@ -148,14 +148,14 @@
   footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; }
 
   @media (max-width: 860px) {
-    /* minmax(0, …), never bare 1fr — see index.html's install grid. */
+    /* minmax(0, …), never bare 1fr; see index.html's install grid. */
     .terms { grid-template-columns: minmax(0, 1fr); }
   }
   /* phones */
   @media (max-width: 600px) {
     .wrap { padding: 0 16px; }
     /* the nav becomes two deliberate rows: the mark, then all links on one
-       line — better than a ragged wrap with one link orphaned below. */
+       line, better than a ragged wrap with one link orphaned below. */
     nav.links { flex-basis: 100%; margin-left: 0; justify-content: space-between; gap: 6px 8px; font-size: 0.85rem; }
     /* air under the two-row menu before the page head */
     .nav { padding-bottom: 24px; }
@@ -219,8 +219,8 @@
       patch of the world, and the central brain composes those local findings
       into one complete picture of its environment.</p>
       <p class="lede">This tool does the same thing, but for your Internet
-      connection. Each panel — connection quality, bandwidth, network,
-      machine — probes and grades its own layer, and the analysis on top pulls
+      connection. Each panel (connection quality, bandwidth, network,
+      machine) probes and grades its own layer, and the analysis on top pulls
       those local judgements into a single answer about what's actually
       going on.</p>
     </div>
@@ -238,15 +238,15 @@
           <div class="a">
             <p>Every network you join is fingerprinted (Wi-Fi name plus the
             router's hardware address, so it survives address changes and mesh
-            roaming) and gets its own <em>baseline</em>. Once a minute — but
-            only when the connection is behaving — octomon folds that minute's
+            roaming) and gets its own <em>baseline</em>. Once a minute, but
+            only when the connection is behaving, octomon folds that minute's
             latency, loss, DNS timing and signal strength into the baseline as
             a running average. After about five learned minutes the location is
             "established" and judgments become relative to <em>its</em> normal.</p>
             <p>Minutes with an active problem never teach the baseline, so an
             outage can't redefine "normal". One refinement: a minute that is
             only latency-congested (a busy hotel evening) still teaches the
-            honest parts — loss and signal — while its inflated round trips are
+            honest parts (loss and signal) while its inflated round trips are
             discarded.</p>
           </div>
         </details>
@@ -260,7 +260,7 @@
             office is a red flag; on a satellite-backed hotel network whose
             normal <em>is</em> 200&nbsp;ms, it's just Tuesday. Plane Wi-Fi
             running 30% packet loss while the web still works reads as that
-            network's weather — the same 30% at home is an incident.</p>
+            network's weather; the same 30% at home is an incident.</p>
             <p>The floors mean a clean network never gets graded leniently:
             learning only ever <em>raises</em> the bar for what counts as
             unusual, never lowers what counts as good.</p>
@@ -273,14 +273,14 @@
             <p>The <em>performance</em> line in the analysis (and the word in
             the footer) is the deliberate opposite of everything above it: it
             ignores the location's learned normal entirely and grades the same
-            measurements on one universal scale. Four components are graded —
+            measurements on one universal scale. Four components are graded:
             latency (the median across the anchor targets), jitter, packet
-            loss, and bufferbloat once a speed test has measured it — each
+            loss, and bufferbloat once a speed test has measured it, each
             into excellent / good / fair / poor at fixed steps: latency at
             50/150/300&nbsp;ms, jitter at 10/30/80&nbsp;ms, loss at
             0.5/2/5%.</p>
             <p>The overall grade is the <em>worst</em> component, because one
-            bad dimension is what you feel — 80&nbsp;ms of jitter ruins a call
+            bad dimension is what you feel: 80&nbsp;ms of jitter ruins a call
             no matter how clean the loss number is. The two readings answer
             different questions on purpose: every rung can be green ("nothing
             is wrong <em>for this network</em>") while performance reads poor
@@ -295,8 +295,8 @@
             <p>No. A speed test saturates your link on purpose, so while it
             runs (and briefly after), octomon attributes the resulting loss and
             latency to its own test instead of raising alarms about the
-            network. Bufferbloat measured under that load is still reported —
-            that's the honest reading of the moment — but it's labeled as the
+            network. Bufferbloat measured under that load is still reported
+            (that's the honest reading of the moment), but it's labeled as the
             test's doing.</p>
             <p>Speed tests also <em>teach</em>: the result is stored per
             network (with the serving server), and becomes the capacity octomon
@@ -311,7 +311,7 @@
             <p>Deliberately. The graphs are raw truth, updated every second.
             The analysis applies hysteresis: a finding must show up repeatedly
             before it raises, and must stay quiet for a stretch before it
-            clears — with a grace period so a fault that flaps every half
+            clears, with a grace period so a fault that flaps every half
             minute reads as one episode, not twenty. One dropped ping is not
             an outage, and an analysis that repainted itself every second
             would be noise, not judgment.</p>
@@ -321,12 +321,12 @@
         <details>
           <summary>The gateway shows 100% loss but my internet works fine. Is octomon wrong?</summary>
           <div class="a">
-            <p>Almost certainly not — your router is ignoring pings addressed
+            <p>Almost certainly not: your router is ignoring pings addressed
             to itself while forwarding everything else perfectly, a common
             policy on airport, hotel and office networks. octomon checks the
             consensus: if targets <em>beyond</em> the gateway answer cleanly,
             every packet demonstrably passed through it, so the claim becomes
-            a note — "gateway drops ICMP (forwarding fine)" — rather than a
+            a note, "gateway drops ICMP (forwarding fine)", rather than a
             red alarm. A genuinely dead gateway takes everything behind it
             down within seconds, and that state does read as an outage.</p>
           </div>
@@ -337,8 +337,8 @@
           <div class="a">
             <p>It's the honest verdict for plane and hotel Wi-Fi: ping-based
             measurements look like an outage (heavy loss, huge latency), yet
-            octomon's web check — a real HTTPS request, exercising DNS, TCP
-            and TLS end to end — keeps succeeding. Working web traffic is
+            octomon's web check (a real HTTPS request, exercising DNS, TCP
+            and TLS end to end) keeps succeeding. Working web traffic is
             direct evidence no amount of ICMP loss outweighs, so instead of
             crying outage the verdict says: expect slow pages and stalling
             calls, not a dead connection.</p>
@@ -348,8 +348,8 @@
         <details>
           <summary>Why does a middle hop show 100% loss when later hops are fine?</summary>
           <div class="a">
-            <p>Routers answer traceroute probes with their control plane —
-            the same little CPU that runs the router — and many rate-limit or
+            <p>Routers answer traceroute probes with their control plane
+            (the same little CPU that runs the router), and many rate-limit or
             ignore that work entirely while forwarding your actual traffic at
             full speed in hardware. If a hop shows loss but every hop
             <em>after</em> it is clean, your packets clearly made it through;
@@ -365,7 +365,7 @@
             <p>Because sometimes it's right to. octomon watches its host's own
             traffic per process, and when latency inflates while your machine
             is pushing a large share of the link's known capacity, the finding
-            says so: <em>"this machine is loading the link (mostly firefox) —
+            says so: <em>"this machine is loading the link (mostly firefox),
             likely self-induced bufferbloat"</em>. When your machine is quiet,
             it says that too, and points at other users or the access point.
             Blaming the network for your own ISO download helps nobody.</p>
@@ -378,7 +378,7 @@
             <p>Three usual suspects: shared capacity genuinely changed (hotel
             evenings), the provider picked a different server, or a public
             test server was rate-limiting. octomon records which server ran
-            each test and on which network — zoom the history
+            each test and on which network; zoom the history
             (<kbd>z</kbd>) to compare like with like, and delete
             (<kbd>d</kbd>) results you know were the server's fault.</p>
           </div>
@@ -390,8 +390,8 @@
             <p>No. Baselines, incident history and speed-test results live in
             a local data directory on your machine; there is no account, no
             telemetry, no cloud. The only network traffic octomon generates is
-            its own measurements — pings, DNS queries, HTTPS checks and the
-            speed tests you trigger — and the README documents every endpoint
+            its own measurements (pings, DNS queries, HTTPS checks and the
+            speed tests you trigger), and the README documents every endpoint
             it contacts and why. The <code>--doctor</code> report redacts
             addresses by default so it's safe to paste into an ISP ticket.</p>
           </div>
@@ -404,13 +404,13 @@
   <section id="glossary">
     <div class="wrap">
       <h2>Glossary</h2>
-      <p class="lede">The terms on octomon's screens, in plain language — each
+      <p class="lede">The terms on octomon's screens, in plain language, each
       with one good link for the full story.</p>
       <div class="terms">
 
         <div class="term">
           <h3>latency</h3>
-          <p>How long data takes to get somewhere — the delay, not the volume.
+          <p>How long data takes to get somewhere: the delay, not the volume.
           A connection can be huge and still slow to react: bandwidth is how
           wide the pipe is, latency is how long the pipe is. It's what makes
           video calls awkward and games unplayable long before downloads
@@ -421,7 +421,7 @@
         <div class="term">
           <h3>RTT · round-trip time</h3>
           <p>The time for a packet to reach a destination <em>and for the
-          reply to come back</em> — what a ping measures, and what octomon's
+          reply to come back</em>, what a ping measures, and what octomon's
           latency columns show. Measured in milliseconds; a wired LAN runs
           ~1–5&nbsp;ms, a good home connection ~10–30&nbsp;ms to major sites,
           satellite links hundreds.</p>
@@ -432,7 +432,7 @@
           <h3>jitter</h3>
           <p>How much the latency <em>varies</em> from packet to packet. A
           steady 80&nbsp;ms is fine for a call; latency bouncing between 20
-          and 300&nbsp;ms is not, even though it averages less — the receiver
+          and 300&nbsp;ms is not, even though it averages less; the receiver
           can't tell when the next packet will arrive. Real-time audio and
           video care about jitter more than about latency itself.</p>
           <p class="more"><a href="https://en.wikipedia.org/wiki/Jitter">more →</a></p>
@@ -441,7 +441,7 @@
         <div class="term">
           <h3>packet loss</h3>
           <p>The share of packets that never arrive. TCP hides small amounts
-          by resending — you experience it as slowness, not absence — but
+          by resending (you experience it as slowness, not absence), but
           real-time traffic can't wait for resends, so calls break up. octomon
           judges loss over a recent window, against what's normal for the
           network you're on.</p>
@@ -450,7 +450,7 @@
 
         <div class="term">
           <h3>p95 · 95th percentile</h3>
-          <p>The value 95% of samples stay under — so a p95 of 200&nbsp;ms
+          <p>The value 95% of samples stay under, so a p95 of 200&nbsp;ms
           means one ping in twenty was worse than that. Averages hide spikes;
           the p95 is roughly "how bad are the bad moments", which is usually
           what you actually feel.</p>
@@ -463,7 +463,7 @@
           load (a big upload, a cloud backup) packets wait in line, and your
           20&nbsp;ms connection quietly becomes 400&nbsp;ms. It's why video
           calls die when someone starts a download. octomon measures it as the
-          "bloat" figure — latency under load minus latency at idle.</p>
+          "bloat" figure: latency under load minus latency at idle.</p>
           <p class="more"><a href="https://www.bufferbloat.net/projects/bloat/wiki/Introduction/">more →</a></p>
         </div>
 
@@ -483,7 +483,7 @@
           <p>How your device gets its network settings when it joins: the
           router leases it an IP address and tells it the gateway and DNS
           servers to use. When DHCP fails you get a self-assigned
-          169.254.x.x address and nothing works — one of the first things
+          169.254.x.x address and nothing works, one of the first things
           octomon's ladder checks.</p>
           <p class="more"><a href="https://en.wikipedia.org/wiki/Dynamic_Host_Configuration_Protocol">more →</a></p>
         </div>
@@ -491,7 +491,7 @@
         <div class="term">
           <h3>gateway</h3>
           <p>The first hop out: the router your device sends everything to
-          when the destination isn't on your local network — at home, your
+          when the destination isn't on your local network; at home, your
           Wi-Fi router. If the gateway is unreachable, nothing beyond your own
           walls is, which is why it sits near the bottom of octomon's triage
           ladder.</p>
@@ -500,7 +500,7 @@
 
         <div class="term">
           <h3>ICMP</h3>
-          <p>The internet's control-message protocol — what ping and
+          <p>The internet's control-message protocol, what ping and
           traceroute are built on. Useful because everything speaks it;
           misleading because routers deprioritize or block it as policy, so
           ICMP can look terrible while real traffic flows. octomon
@@ -513,7 +513,7 @@
           <h3>MTU · maximum transmission unit</h3>
           <p>The largest packet a link will carry, typically 1500 bytes. When
           a link in the path is narrower (VPNs, PPPoE) and the messages that
-          would say so get blocked, big packets vanish silently — a "path MTU
+          would say so get blocked, big packets vanish silently: a "path MTU
           black hole": pings and small pages work, big downloads and VPNs
           stall. octomon probes for this explicitly.</p>
           <p class="more"><a href="https://www.cloudflare.com/learning/network-layer/what-is-mtu/">more →</a></p>
@@ -523,7 +523,7 @@
           <h3>NAT · CGNAT</h3>
           <p>Address translation: your router puts many devices behind one
           public IP. Carrier-grade NAT (CGNAT) is the same trick applied by
-          your ISP to whole neighborhoods — you're behind <em>two</em> layers,
+          your ISP to whole neighborhoods; you're behind <em>two</em> layers,
           which breaks inbound connections, port forwarding and some games.
           octomon detects double-NAT by looking at who answers at hop 2.</p>
           <p class="more"><a href="https://en.wikipedia.org/wiki/Network_address_translation">more →</a></p>
@@ -532,8 +532,8 @@
         <div class="term">
           <h3>captive portal</h3>
           <p>The sign-in page hotel and airport networks put in front of the
-          internet. Until you satisfy it, the network intercepts your traffic
-          — DNS may answer and pings may fly, but nothing real gets through,
+          internet. Until you satisfy it, the network intercepts your traffic;
+          DNS may answer and pings may fly, but nothing real gets through,
           which confuses most diagnostics. octomon detects the interception
           and says so before judging anything else.</p>
           <p class="more"><a href="https://en.wikipedia.org/wiki/Captive_portal">more →</a></p>
@@ -544,7 +544,7 @@
           <p>A trick that maps the path your packets take: send probes with
           increasing time-to-live values and each router in line reveals
           itself as it discards one. Each router is a "hop". It shows
-          <em>where</em> along the path delay or loss begins — octomon runs it
+          <em>where</em> along the path delay or loss begins; octomon runs it
           once with <kbd>t</kbd> or continuously with <kbd>m</kbd>.</p>
           <p class="more"><a href="https://en.wikipedia.org/wiki/Traceroute">more →</a></p>
         </div>
@@ -553,14 +553,14 @@
           <h3>TTL · time to live</h3>
           <p>A counter in every packet that each router decrements; at zero
           the packet is discarded. It exists to stop lost packets circling
-          forever — and traceroute exploits it deliberately to make each
+          forever, and traceroute exploits it deliberately to make each
           router along the path identify itself.</p>
           <p class="more"><a href="https://www.cloudflare.com/learning/cdn/glossary/time-to-live-ttl/">more →</a></p>
         </div>
 
         <div class="term">
           <h3>RSSI · dBm</h3>
-          <p>Wi-Fi signal strength, in decibel-milliwatts — negative numbers
+          <p>Wi-Fi signal strength, in decibel-milliwatts: negative numbers
           where closer to zero is stronger: −40&nbsp;dBm is excellent,
           −70&nbsp;dBm is getting marginal, −85&nbsp;dBm is barely holding on.
           Because the scale is logarithmic, a few dBm of difference matters
@@ -570,7 +570,7 @@
 
         <div class="term">
           <h3>anycast</h3>
-          <p>One address, announced from many places at once — the routing
+          <p>One address, announced from many places at once; the routing
           system delivers you to the nearest. It's how 1.1.1.1 and most CDNs
           answer quickly worldwide, and why the "same" server can be a
           different machine from your hotel than from your home. octomon's
