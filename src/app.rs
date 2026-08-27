@@ -1662,6 +1662,7 @@ mod tests {
             up_bps: 0.0,
         };
         let mut s = AppState::new(vec![]);
+        s.bw_view = BwView::Remotes;
         s.remotes = vec![
             remote("151.101.193.111", 443, "firefox"),
             remote("2606:4700:4700::1111", 53, "mDNSResponder"),
@@ -1675,6 +1676,41 @@ mod tests {
         s.bw_filter = "no-such".into();
         assert!(s.remote_order().is_empty());
         assert_eq!(s.remote_order_all().len(), 2, "the bundle stays complete");
+    }
+
+    /// '/' on one table must not narrow the other: each table keeps its own
+    /// filter, parked and swapped alongside its sort when 'n' switches.
+    #[test]
+    fn each_talkers_table_keeps_its_own_filter() {
+        let proc = |name: &str| ProcBandwidth {
+            name: name.into(),
+            ..Default::default()
+        };
+        let mut s = AppState::new(vec![]);
+        s.processes = vec![proc("firefox"), proc("rsync")];
+        s.remotes = vec![RemoteBandwidth {
+            addr: "151.101.193.111".parse().unwrap(),
+            port: 443,
+            ports: 1,
+            process: "curl".into(),
+            down_bytes: 0,
+            up_bytes: 0,
+            total_bytes: 0,
+            share: 0.0,
+            down_bps: 0.0,
+            up_bps: 0.0,
+        }];
+        // Typed while the processes table is shown…
+        s.bw_filter = "fire".into();
+        assert_eq!(s.process_order(), vec![0]);
+        assert_eq!(s.remote_order(), vec![0], "remotes keep every row");
+        // …and parked by the swap 'n' performs: the remotes table arrives
+        // unfiltered while the processes filter waits, still applied.
+        std::mem::swap(&mut s.bw_filter, &mut s.bw_filter_other);
+        s.bw_view = BwView::Remotes;
+        assert_eq!(s.remote_order(), vec![0]);
+        assert_eq!(s.process_order(), vec![0], "parked filter still narrows");
+        assert!(s.bw_filter.is_empty(), "the shown table starts unfiltered");
     }
 
     #[test]
@@ -2373,11 +2409,15 @@ pub struct AppState {
     pub pinned_procs: Vec<String>,
     /// Remote addresses pinned to the top of the remotes table, same idea.
     pub pinned_remotes: Vec<IpAddr>,
-    /// Case-insensitive substring filter over both talkers tables ('/'):
-    /// processes match on name or pid, remotes on address, port, or process.
-    /// Empty = no filter. Session-only, and never applied to the support
-    /// bundle's CSVs — those stay complete.
+    /// Case-insensitive substring filter over the *shown* talkers table
+    /// ('/'): processes match on name or pid, remotes on address, port, or
+    /// process. Empty = no filter. Session-only, and never applied to the
+    /// support bundle's CSVs — those stay complete.
     pub bw_filter: String,
+    /// The other table's filter, parked while this one is shown and swapped
+    /// alongside its sort on `n` — filtering processes must not silently
+    /// narrow the remotes, or the other way round.
+    pub bw_filter_other: String,
 
     // --- Connection Quality interaction ---
     /// Cursor over the target list (Quality panel).
@@ -2609,6 +2649,7 @@ impl AppState {
             bw_reset: false,
             bw_view: BwView::Processes,
             bw_filter: String::new(),
+            bw_filter_other: String::new(),
             remote_sel: 0,
             proc_sel: 0,
             follow_proc: None,
@@ -2708,6 +2749,7 @@ impl AppState {
         self.bw_col_other = live.bw_col_other;
         self.bw_sort_other = live.bw_sort_other;
         self.bw_filter = live.bw_filter.clone();
+        self.bw_filter_other = live.bw_filter_other.clone();
         self.zoom_view = live.zoom_view;
         self.zoom_behind = live.zoom_behind;
         self.proc_details = live.proc_details.clone();
@@ -3028,6 +3070,16 @@ impl AppState {
         }
     }
 
+    /// The '/' filter that applies to `view`, resolved like
+    /// [`Self::sort_for`]: live for the shown table, parked for the other.
+    pub fn filter_for(&self, view: BwView) -> &str {
+        if self.bw_view == view {
+            &self.bw_filter
+        } else {
+            &self.bw_filter_other
+        }
+    }
+
     /// Whether the '/' filter keeps this process row: name or pid.
     fn proc_matches(&self, i: usize, needle: &str) -> bool {
         let p = &self.processes[i];
@@ -3048,7 +3100,7 @@ impl AppState {
     /// filter drops. Shared by the renderer and the cursor, so ↑/↓ walk the
     /// rows as drawn.
     pub fn process_order(&self) -> Vec<usize> {
-        let needle = self.bw_filter.trim().to_lowercase();
+        let needle = self.filter_for(BwView::Processes).trim().to_lowercase();
         let order = (0..self.processes.len())
             .filter(|&i| needle.is_empty() || self.proc_matches(i, &needle))
             .collect();
@@ -3096,7 +3148,7 @@ impl AppState {
 
     /// Indices into `remotes` in display order; see [`Self::process_order`].
     pub fn remote_order(&self) -> Vec<usize> {
-        let needle = self.bw_filter.trim().to_lowercase();
+        let needle = self.filter_for(BwView::Remotes).trim().to_lowercase();
         let order = (0..self.remotes.len())
             .filter(|&i| needle.is_empty() || self.remote_matches(i, &needle))
             .collect();

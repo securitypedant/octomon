@@ -1314,6 +1314,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         let st: &mut AppState = &mut s;
                         std::mem::swap(&mut st.bw_sort, &mut st.bw_sort_other);
                         std::mem::swap(&mut st.bw_col, &mut st.bw_col_other);
+                        std::mem::swap(&mut st.bw_filter, &mut st.bw_filter_other);
                     }
                     s.bw_view = view;
                     s.sub_pane = pane;
@@ -1818,6 +1819,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         let st: &mut AppState = &mut s;
                         std::mem::swap(&mut st.bw_sort, &mut st.bw_sort_other);
                         std::mem::swap(&mut st.bw_col, &mut st.bw_col_other);
+                        std::mem::swap(&mut st.bw_filter, &mut st.bw_filter_other);
                     }
                     s.bw_view = view;
                     s.sub_pane = pane;

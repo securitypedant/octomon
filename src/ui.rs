@@ -212,8 +212,9 @@ fn zoom_processes(f: &mut Frame, s: &AppState, area: Rect) {
         &[0, 4, 5, 6, 7, 8, 9, 2, 3],
     );
     let order = s.process_order();
-    if order.is_empty() && !s.bw_filter.trim().is_empty() {
-        return no_filter_match(f, table_area, "processes", s.bw_filter.trim());
+    let filter = s.filter_for(BwView::Processes).trim();
+    if order.is_empty() && !filter.is_empty() {
+        return no_filter_match(f, table_area, "processes", filter);
     }
     let (pos, sel_idx) = s.proc_cursor();
     let (table_area, first, visible) = talkers_scroll(f, table_area, order.len(), pos);
@@ -348,8 +349,9 @@ fn zoom_remotes(f: &mut Frame, s: &AppState, area: Rect) {
         &[0, 1, 4, 5, 6, 7, 8, 2, 3],
     );
     let order = s.remote_order();
-    if order.is_empty() && !s.bw_filter.trim().is_empty() {
-        return no_filter_match(f, area, "remote addresses", s.bw_filter.trim());
+    let filter = s.filter_for(BwView::Remotes).trim();
+    if order.is_empty() && !filter.is_empty() {
+        return no_filter_match(f, area, "remote addresses", filter);
     }
     let (pos, sel_idx) = s.remote_cursor();
     let (area, first, visible) = talkers_scroll(f, area, order.len(), pos);
@@ -3694,8 +3696,9 @@ fn top_talkers_view(f: &mut Frame, s: &AppState, area: Rect, view: BwView) {
     // Rows as drawn (the sort, when one is active), scrolled to keep the
     // cursor's position in view, with a cue beside them when there is more.
     let order = s.process_order();
-    if order.is_empty() && !s.bw_filter.trim().is_empty() {
-        return no_filter_match(f, inner, "processes", s.bw_filter.trim());
+    let filter = s.filter_for(BwView::Processes).trim();
+    if order.is_empty() && !filter.is_empty() {
+        return no_filter_match(f, inner, "processes", filter);
     }
     let cursor_on = s.on_process_list();
     let (pos, sel_idx) = s.proc_cursor();
@@ -3899,8 +3902,9 @@ fn top_remotes(f: &mut Frame, s: &AppState, area: Rect) {
     let header = talkers_header(s, &labels[..ncols], BwView::Remotes, 2);
 
     let order = s.remote_order();
-    if order.is_empty() && !s.bw_filter.trim().is_empty() {
-        return no_filter_match(f, area, "remote addresses", s.bw_filter.trim());
+    let filter = s.filter_for(BwView::Remotes).trim();
+    if order.is_empty() && !filter.is_empty() {
+        return no_filter_match(f, area, "remote addresses", filter);
     }
     let cursor_on = s.selected_remote().is_some();
     let (pos, sel_idx) = s.remote_cursor();
