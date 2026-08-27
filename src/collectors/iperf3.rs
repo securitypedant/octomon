@@ -72,7 +72,14 @@ async fn run_dir(
             out = &mut child => break out,
             _ = ticker.tick() => {
                 let frac = (started.elapsed().as_secs_f64() / SECONDS as f64).min(1.0);
-                update(state, base + frac * 0.5, 0.0);
+                // Live rate from octomon's own interface counters — the same
+                // truth the Bandwidth graphs draw — since `-J` says nothing
+                // until the run ends.
+                let bps = {
+                    let s = state.lock().unwrap();
+                    if reverse { s.throughput.down_bps } else { s.throughput.up_bps }
+                };
+                update(state, base + frac * 0.5, bps * 8.0 / 1e6);
             }
         }
     };

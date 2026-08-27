@@ -215,8 +215,10 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>) {
                     crate::verdict::Severity::Info,
                     crate::app::EventCategory::Speedtest,
                     format!(
-                        "speed test: {:.0}↓ / {:.0}↑ Mb/s ({})",
-                        r.down_mbps, r.up_mbps, r.provider
+                        "speed test: {} down / {} up ({})",
+                        crate::util::fmt_mbps(r.down_mbps),
+                        crate::util::fmt_mbps(r.up_mbps),
+                        r.provider
                     ),
                 );
             }

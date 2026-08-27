@@ -596,6 +596,8 @@ enum Side {
     Whois(IpAddr),
     /// Persist an iPerf3 server added from the [I] prompt.
     AddIperf3(config::Iperf3Server),
+    /// Forget an iPerf3 server ([V]): (server name, provider now selected).
+    RemoveIperf3(String, String),
     /// Read the OS routing table for the [T] overlay (a blocking shell-out).
     LoadRoutes,
     SaveProvider(String),
@@ -1656,6 +1658,32 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.fullscreen = true;
                     s.overlay = Overlay::Zoom;
                 }
+                // Shift+V removes the *selected* provider when it is an
+                // iPerf3 one. The three built-ins stay: their endpoints are
+                // edited in config.toml, and a wheel that can lose Cloudflare
+                // to a slip of the finger would be worse than the itch.
+                KeyCode::Char('V') if s.focus == Panel::Bandwidth => {
+                    let selected = s
+                        .speedtest_provider_names
+                        .get(s.speedtest_provider_idx)
+                        .cloned();
+                    if let Some(n) = selected {
+                        if let Some(short) = n.strip_prefix("iPerf3 · ").map(str::to_string) {
+                            s.speedtest_provider_names.retain(|x| *x != n);
+                            if s.speedtest_provider_idx >= s.speedtest_provider_names.len() {
+                                s.speedtest_provider_idx = 0;
+                            }
+                            let now = s.speedtest_provider_names[s.speedtest_provider_idx].clone();
+                            s.notice = Some(format!("removed {n} — provider now {now}"));
+                            side = Side::RemoveIperf3(short, now);
+                        } else {
+                            s.notice = Some(
+                                "built-in providers stay — their endpoints are edited in config.toml"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
                 // Shift+I adds an iPerf3 server (Bandwidth panel): a name and
                 // where it listens, saved to the config and onto the [v] wheel.
                 KeyCode::Char('I') if s.focus == Panel::Bandwidth => {
@@ -1899,6 +1927,11 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
             }
         }
         Side::Whois(addr) => collectors::whois::start(ctx.state.clone(), addr),
+        Side::RemoveIperf3(name, now_selected) => {
+            tokio::task::spawn_blocking(move || {
+                config::Config::persist_iperf3_removed(&name, &now_selected);
+            });
+        }
         Side::AddIperf3(server) => {
             tokio::task::spawn_blocking(move || {
                 config::Config::persist_iperf3_added(&server);

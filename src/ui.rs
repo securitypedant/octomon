@@ -947,10 +947,12 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             // The stats render in fixed-width slots (label dim, value plain)
             // so the entries line up into scannable columns instead of each
             // row being its own dot-separated ribbon.
+            // The trailing space is part of the slot, so a value that fills
+            // its width still can't press against whatever follows.
             let slot = |label: &str, val: String, w: usize| -> Vec<Span<'static>> {
                 vec![
                     Span::styled(format!("{label} "), Style::new().fg(theme::dim())),
-                    Span::styled(format!("{val:<w$}"), Style::new().fg(theme::text())),
+                    Span::styled(format!("{val:<w$} "), Style::new().fg(theme::text())),
                 ]
             };
             for (i, (key, b)) in all.iter().enumerate().skip(first).take(visible.max(1)) {
@@ -1010,25 +1012,27 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                 // Every slot appears in every row ("—" when unlearned), so
                 // the numbers form columns the eye can walk vertically.
                 let mut stats: Vec<Span> = vec![Span::raw("  ")];
-                stats.extend(slot("gateway", ms(b.gateway_ms, b.gateway_loss_pct), 8));
-                stats.extend(slot("internet", ms(b.anchor_ms, b.anchor_loss_pct), 8));
-                stats.extend(slot("tcp", ms(b.anchor_tcp_ms, None), 7));
-                stats.extend(slot("web", ms(b.web_ttfb_ms, None), 7));
-                stats.extend(slot("DNS", ms(b.dns_ms, None), 7));
+                stats.extend(slot("gateway", ms(b.gateway_ms, b.gateway_loss_pct), 7));
+                stats.extend(slot("internet", ms(b.anchor_ms, b.anchor_loss_pct), 7));
+                stats.extend(slot("tcp", ms(b.anchor_tcp_ms, None), 6));
+                stats.extend(slot("web", ms(b.web_ttfb_ms, None), 6));
+                stats.extend(slot("DNS", ms(b.dns_ms, None), 6));
                 stats.extend(slot(
                     "rssi",
                     b.rssi_dbm
                         .map(|r| format!("{r:.0}dBm"))
                         .unwrap_or_else(|| "—".into()),
-                    7,
+                    6,
                 ));
                 stats.extend(slot(
                     "speed",
                     match (b.down_mbps, b.up_mbps) {
-                        (Some(d), Some(u)) => format!("{d:.0}↓/{u:.0}↑"),
+                        (Some(d), Some(u)) => {
+                            format!("{}↓/{}↑", fmt_speed_compact(d), fmt_speed_compact(u))
+                        }
                         _ => "—".into(),
                     },
-                    9,
+                    11,
                 ));
                 stats.push(Span::styled(
                     format!("{} healthy", crate::util::fmt_minutes(b.samples as u64)),
@@ -3538,10 +3542,10 @@ fn render_speedtest(f: &mut Frame, s: &AppState, area: Rect) {
     let st = &s.speedtest;
     if s.speedtest_enabled && matches!(st.status, SpeedStatus::Running) {
         let label = format!(
-            "speedtest · {} {:.0}%  {:.1} Mb/s",
+            "speedtest · {} {:.0}%  {}",
             st.phase,
             st.progress * 100.0,
-            st.live_mbps
+            crate::util::fmt_mbps(st.live_mbps)
         );
         // The phase reads "Cloudflare · upload", so an equality test against
         // "upload" never matched and the bar stayed green for both directions.
@@ -3942,7 +3946,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("W", "whois: who owns address"),
         Line::from(""),
         head("Bandwidth"),
-        row("v / I", "cycle / add iPerf3 server"),
+        row("v / I / V", "provider cycle · add · del"),
         row("n", "procs → remotes → history"),
         row("W / a", "whois / add sel. remote"),
         row("p / u", "pin / unpin row at the top"),
@@ -4391,28 +4395,32 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
     }
 
     // The edge's view of this connection, when the /edge check is on and has
-    // answered: the PoP serving you, your ISP by name, and the edge's own
-    // TCP RTT measurement — the far end's version of "how far away are you".
+    // answered, split into what each fact is: the ISP is *whose network you
+    // are on* — a first-class answer, not a clause — and the edge row is the
+    // Cloudflare PoP serving you plus its own TCP measurement of this
+    // machine (the far end saying how far away you are, no ICMP involved).
     if let Some(e) = &s.edge {
-        let mut spans = vec![
-            Span::styled(format!("{:<9}", "edge"), Style::new().fg(theme::dim())),
-            Span::styled(e.colo.clone(), Style::new().fg(theme::text())),
-        ];
         if !e.isp.is_empty() {
-            spans.push(Span::styled(
-                format!(" · {}", e.isp),
-                Style::new().fg(theme::text()),
-            ));
+            let mut spans = vec![
+                Span::styled(format!("{:<9}", "isp"), Style::new().fg(theme::dim())),
+                Span::styled(e.isp.clone(), Style::new().fg(theme::text())),
+            ];
             if e.asn != 0 {
                 spans.push(Span::styled(
                     format!(" (AS{})", e.asn),
                     Style::new().fg(theme::dim()),
                 ));
             }
+            lines.push(Line::from(spans));
         }
+        let mut spans = vec![
+            Span::styled(format!("{:<9}", "edge"), Style::new().fg(theme::dim())),
+            Span::styled(e.colo.clone(), Style::new().fg(theme::text())),
+            Span::styled(" · nearest Cloudflare PoP", Style::new().fg(theme::dim())),
+        ];
         if let Some(rtt) = e.tcp_rtt_ms {
             spans.push(Span::styled(
-                format!(" · tcp rtt {rtt:.0}ms"),
+                format!(" · sees this machine at {rtt:.0}ms"),
                 Style::new().fg(theme::text()),
             ));
         }
@@ -5386,6 +5394,20 @@ fn speedtest_line(s: &AppState) -> Line<'static> {
 
 // --- formatting & color helpers -------------------------------------------
 
+/// A learned speed, compact enough for the locations overlay's columns:
+/// "943M", "1.2G", "750K" — the arrows and slot label carry the rest.
+fn fmt_speed_compact(mbps: f64) -> String {
+    if mbps >= 10_000.0 {
+        format!("{:.0}G", mbps / 1000.0)
+    } else if mbps >= 1000.0 {
+        format!("{:.1}G", mbps / 1000.0)
+    } else if mbps >= 1.0 {
+        format!("{mbps:.0}M")
+    } else {
+        format!("{:.0}K", mbps * 1000.0)
+    }
+}
+
 /// An age as people read one: seconds only while they are still short,
 /// then the minutes/hours/days ladder ("2m", "1h 5m").
 fn fmt_ago(secs: u64) -> String {
@@ -5405,7 +5427,7 @@ fn fmt_ms(v: Option<f64>) -> String {
 
 fn fmt_mbps(v: Option<f64>) -> String {
     match v {
-        Some(m) => format!("{m:.1} Mb/s"),
+        Some(m) => crate::util::fmt_mbps(m),
         None => "—".to_string(),
     }
 }
@@ -5799,7 +5821,7 @@ mod tests {
             "auto label shown next to the name"
         );
         assert!(out.contains("gateway ~4ms"));
-        assert!(out.contains("speed 310↓/28↑"));
+        assert!(out.contains("speed 310M↓/28M↑"));
         assert!(out.contains("40m healthy"));
         assert!(out.contains("● current"), "the active network is marked");
         assert!(
@@ -7316,7 +7338,7 @@ mod tests {
             "monitor every hop (MTR)",
             "pin / unpin row at the top",
             "whois: who owns address",
-            "cycle / add iPerf3 server",
+            "provider cycle · add · del",
             "procs → remotes → history",
             "full-screen: DNS + history",
             "events / ports / marker",

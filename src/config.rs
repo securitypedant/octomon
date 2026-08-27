@@ -448,6 +448,16 @@ impl Config {
         Self::update_on_disk(|cfg| cfg.speedtest_provider = name.to_string());
     }
 
+    /// Forget an iPerf3 server removed with [V], and persist whichever
+    /// provider selection is left standing.
+    pub fn persist_iperf3_removed(name: &str, now_selected: &str) {
+        let (name, now) = (name.to_string(), now_selected.to_string());
+        Self::update_on_disk(move |cfg| {
+            cfg.iperf3_servers.retain(|s| s.name != name);
+            cfg.speedtest_provider = now;
+        });
+    }
+
     /// Remember an iPerf3 server added from the [I] prompt. Same name = an
     /// update, so a typo'd host can be re-entered rather than duplicated.
     pub fn persist_iperf3_added(server: &Iperf3Server) {

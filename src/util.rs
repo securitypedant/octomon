@@ -19,6 +19,18 @@ pub const USER_AGENT: &str = concat!(
     " (network monitoring tool; +https://octomon.dev)"
 );
 
+/// A throughput in Mb/s as people read one: gigabit links say "1.24 Gb/s"
+/// instead of "1240 Mb/s" (loopback iPerf3 runs say 90 Gb/s, not 90000).
+pub fn fmt_mbps(mbps: f64) -> String {
+    if mbps >= 1000.0 {
+        format!("{:.2} Gb/s", mbps / 1000.0)
+    } else if mbps >= 100.0 {
+        format!("{mbps:.0} Mb/s")
+    } else {
+        format!("{mbps:.1} Mb/s")
+    }
+}
+
 /// A count of minutes as people read time: "40m", "5h 20m", "2d 10h".
 /// "3458 min" asks the reader to do arithmetic mid-glance; two units are
 /// plenty, so days drop the minutes.
