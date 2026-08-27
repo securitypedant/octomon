@@ -11,6 +11,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio::io::AsyncBufReadExt as _;
+
 use crate::app::AppState;
 
 use super::speedtest::{Report, set_phase, update};
@@ -41,6 +43,13 @@ pub async fn run(
 
 /// One direction; `base` is where this run's share of the progress bar
 /// starts (download owns the first half, upload the second).
+///
+/// Runs with `-i 1 --forceflush` and streams the interval lines as they
+/// print, so the live figure is iperf3's own per-second measurement — the
+/// interface counters were tried first and lied whenever the test didn't
+/// cross the default interface (a loopback server most of all). The final
+/// number is the summary's *receiver* rate: what was actually delivered,
+/// whichever end that was.
 async fn run_dir(
     state: &Arc<Mutex<AppState>>,
     host: &str,
@@ -54,37 +63,20 @@ async fn run_dir(
         host,
         "-p",
         &port.to_string(),
-        "-J",
         "-t",
         &SECONDS.to_string(),
+        "-i",
+        "1",
+        "--forceflush",
     ]);
     if reverse {
         cmd.arg("-R");
     }
-    cmd.stdin(std::process::Stdio::null());
-    // `-J` prints nothing until the run ends, so the bar advances on the
-    // clock while the child works; the Bandwidth graphs show the live truth.
-    let started = std::time::Instant::now();
-    let mut ticker = tokio::time::interval(Duration::from_millis(250));
-    let mut child = std::pin::pin!(cmd.output());
-    let out = loop {
-        tokio::select! {
-            out = &mut child => break out,
-            _ = ticker.tick() => {
-                let frac = (started.elapsed().as_secs_f64() / SECONDS as f64).min(1.0);
-                // Live rate from octomon's own interface counters — the same
-                // truth the Bandwidth graphs draw — since `-J` says nothing
-                // until the run ends.
-                let bps = {
-                    let s = state.lock().unwrap();
-                    if reverse { s.throughput.down_bps } else { s.throughput.up_bps }
-                };
-                update(state, base + frac * 0.5, bps * 8.0 / 1e6);
-            }
-        }
-    };
-    let out = match out {
-        Ok(out) => out,
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(
                 "iperf3 binary not found — install it (brew install iperf3 / apt install iperf3)"
@@ -93,34 +85,81 @@ async fn run_dir(
         }
         Err(e) => return Err(format!("iperf3: {e}")),
     };
-    // iperf3 -J reports its own errors as JSON on stdout with a nonzero
-    // exit; parse either way and prefer the JSON's story.
-    parse_mbps(&String::from_utf8_lossy(&out.stdout), reverse)
+    let stdout = child.stdout.take().expect("piped");
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+
+    let started = std::time::Instant::now();
+    let mut ticker = tokio::time::interval(Duration::from_millis(250));
+    let mut live = 0.0f64;
+    let mut receiver: Option<f64> = None;
+    let mut sender: Option<f64> = None;
+    loop {
+        let frac = (started.elapsed().as_secs_f64() / SECONDS as f64).min(1.0);
+        tokio::select! {
+            line = lines.next_line() => match line {
+                Ok(Some(l)) => {
+                    let Some(mbps) = rate_mbps(&l) else { continue };
+                    if l.contains("receiver") {
+                        receiver = Some(mbps);
+                    } else if l.contains("sender") {
+                        sender = Some(mbps);
+                    } else {
+                        live = mbps;
+                        update(state, base + frac * 0.5, live);
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => return Err(format!("iperf3 output: {e}")),
+            },
+            _ = ticker.tick() => update(state, base + frac * 0.5, live),
+        }
+    }
+    let status = child.wait().await.map_err(|e| format!("iperf3: {e}"))?;
+    if let Some(mbps) = receiver.or(sender) {
+        return Ok(mbps);
+    }
+    // No summary: the run failed — iperf3 puts the reason on stderr
+    // ("iperf3: error - unable to connect…", "…server is busy…").
+    let mut err = String::new();
+    if let Some(mut se) = child.stderr.take() {
+        use tokio::io::AsyncReadExt as _;
+        let _ = se.read_to_string(&mut err).await;
+    }
+    let err = err.trim();
+    if err.is_empty() {
+        Err(format!("iperf3 exited ({status}) with no result"))
+    } else {
+        Err(err.trim_start_matches("iperf3: ").to_string())
+    }
 }
 
-/// Mb/s out of `iperf3 -J` output. Download runs use `-R`, so the client is
-/// the receiving side and `sum_received` is the number; uploads read
-/// `sum_sent` — what actually left this machine, retransmits excluded.
-pub fn parse_mbps(json: &str, reverse: bool) -> Result<f64, String> {
-    let v: serde_json::Value =
-        serde_json::from_str(json.trim()).map_err(|e| format!("iperf3 output: {e}"))?;
-    if let Some(err) = v["error"].as_str() {
-        return Err(format!("iperf3: {err}"));
+/// The Mb/s out of one iperf3 line, `None` for lines that carry no rate
+/// (headers, separators, the connect banner). Works on interval and summary
+/// lines alike: the number sits immediately before the "…bits/sec" token.
+///   [  5]   1.00-2.00   sec  1.10 GBytes  9.46 Gbits/sec
+///   [  5]   0.00-8.00   sec  10.9 GBytes  11.7 Gbits/sec   receiver
+fn rate_mbps(line: &str) -> Option<f64> {
+    let mut prev: Option<&str> = None;
+    for tok in line.split_whitespace() {
+        if let Some(unit) = tok.strip_suffix("bits/sec") {
+            let value: f64 = prev?.parse().ok()?;
+            let factor = match unit {
+                "G" => 1000.0,
+                "M" => 1.0,
+                "K" => 0.001,
+                "T" => 1_000_000.0,
+                "" => 0.000_001,
+                _ => return None,
+            };
+            return Some(value * factor);
+        }
+        prev = Some(tok);
     }
-    let sum = if reverse {
-        &v["end"]["sum_received"]
-    } else {
-        &v["end"]["sum_sent"]
-    };
-    sum["bits_per_second"]
-        .as_f64()
-        .map(|b| b / 1e6)
-        .ok_or_else(|| "iperf3: no throughput in the result".to_string())
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_mbps;
 
     /// The whole runner against a real local server. Ignored: needs the
     /// iperf3 binary and a free port — run it by hand with `-- --ignored`.
@@ -152,18 +191,34 @@ mod tests {
     }
 
     #[test]
-    fn iperf3_json_parses_throughput_and_surfaces_errors() {
-        let ok = r#"{"start":{},"intervals":[],"end":{
-            "sum_sent":{"bits_per_second":94123456.0,"retransmits":12},
-            "sum_received":{"bits_per_second":93000000.0}}}"#;
-        assert_eq!(parse_mbps(ok, false).unwrap().round(), 94.0);
-        assert_eq!(parse_mbps(ok, true).unwrap().round(), 93.0);
-
-        // The busy-server case every public iperf3 host hits constantly.
-        let busy = r#"{"error":"the server is busy running a test. try again later"}"#;
-        let e = parse_mbps(busy, true).unwrap_err();
-        assert!(e.contains("busy"), "{e}");
-
-        assert!(parse_mbps("not json", true).is_err());
+    fn iperf3_lines_parse_to_mbps_and_noise_does_not() {
+        use super::rate_mbps;
+        // Interval and summary lines, across the unit ladder.
+        assert_eq!(
+            rate_mbps("[  5]   1.00-2.00   sec  1.10 GBytes  9.46 Gbits/sec"),
+            Some(9460.0)
+        );
+        assert_eq!(
+            rate_mbps("[  5]   2.00-3.00   sec  11.2 MBytes  94.1 Mbits/sec    0    331 KBytes"),
+            Some(94.1)
+        );
+        assert_eq!(
+            rate_mbps("[  5]   0.00-8.00   sec  10.9 GBytes  11.7 Gbits/sec  receiver"),
+            Some(11700.0)
+        );
+        assert_eq!(
+            rate_mbps("[  5]   3.00-4.00   sec  32.0 KBytes   262 Kbits/sec"),
+            Some(0.262)
+        );
+        // Headers, separators and the banner carry no rate.
+        assert_eq!(
+            rate_mbps("- - - - - - - - - - - - - - - - - - - - - - - - -"),
+            None
+        );
+        assert_eq!(
+            rate_mbps("[ ID] Interval           Transfer     Bitrate"),
+            None
+        );
+        assert_eq!(rate_mbps("Connecting to host 127.0.0.1, port 5277"), None);
     }
 }
