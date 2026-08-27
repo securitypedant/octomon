@@ -6850,6 +6850,8 @@ mod tests {
     #[test]
     fn edge_row_names_the_colo_city() {
         let mut s = AppState::new(vec![]);
+        // The panel says nothing at all without an interface.
+        s.netinfo.iface = "en0".into();
         s.edge = Some(crate::app::EdgeInfo {
             ip: "203.0.113.9".into(),
             asn: 33363,
