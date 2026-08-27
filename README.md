@@ -239,6 +239,7 @@ octomon --help
 | `n` | Processes → remote addresses → speed-test history (full-screen) |
 | `W` / `a` | Whois the selected remote address / add it as a target |
 | `d` | Delete the selected speed test from the history (full-screen history pane) |
+| `/` | Filter the talkers tables to rows matching typed text (process name or pid, remote address, port) — `Enter` keeps it, `Esc` clears it |
 | `I` | Add an iPerf3 server (`Name=host[:port]`) — saved to config, cycled with `v` |
 | `z` | Zoom the active table to 80% of the screen: every column, full names/addresses, per-process pid + path + command line, per-test server + network |
 | **Network** | |

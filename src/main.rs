@@ -845,6 +845,24 @@ fn move_cursor(s: &mut AppState, delta: isize) {
     }
 }
 
+/// The split now↓/now↑ sort keys (7/8) exist only as zoom columns; when the
+/// zoom closes, a column cursor left on one would be invisible in the compact
+/// header (the same reasoning as q_col on leaving full screen). Fold it back
+/// to the combined "now" key. The sort itself is kept — its arrow lands on
+/// the compact "now" column, which is what the split keys refine.
+fn unzoom_bw_cols(s: &mut AppState) {
+    let other = match s.bw_view {
+        BwView::Processes => BwView::Remotes,
+        BwView::Remotes => BwView::Processes,
+    };
+    if s.bw_col > 6 {
+        s.bw_col = s.bw_view.combined_now_key();
+    }
+    if s.bw_col_other > 6 {
+        s.bw_col_other = other.combined_now_key();
+    }
+}
+
 fn handle_key(ctx: &Ctx, key: KeyEvent) {
     if key.kind == KeyEventKind::Release {
         return;
@@ -1041,6 +1059,32 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 _ => {}
             },
 
+            // --- modal text entry: filtering the talkers tables ---
+            // The filter applies while it is typed — the table narrowing live
+            // is the feedback. Enter keeps it, Esc clears it: a filter left
+            // behind by a cancel would read as lost rows, not as a filter.
+            InputMode::TalkersFilter => match key.code {
+                KeyCode::Enter => {
+                    s.input_mode = InputMode::Normal;
+                    s.bw_filter = s.input_buffer.trim().to_string();
+                    s.input_buffer.clear();
+                }
+                KeyCode::Esc => {
+                    s.input_mode = InputMode::Normal;
+                    s.input_buffer.clear();
+                    s.bw_filter.clear();
+                }
+                KeyCode::Backspace => {
+                    s.input_buffer.pop();
+                    s.bw_filter = s.input_buffer.trim().to_string();
+                }
+                KeyCode::Char(c) if s.input_buffer.len() < 40 => {
+                    s.input_buffer.push(c);
+                    s.bw_filter = s.input_buffer.trim().to_string();
+                }
+                _ => {}
+            },
+
             InputMode::NameNetwork => match key.code {
                 KeyCode::Enter => {
                     let name = s.input_buffer.trim().to_string();
@@ -1084,6 +1128,9 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     // From an overlay floating above the zoom (analysis,
                     // whois), Esc peels one layer: back to the zoomed table,
                     // not all the way out.
+                    if s.overlay == Overlay::Zoom {
+                        unzoom_bw_cols(&mut s);
+                    }
                     s.overlay = if s.zoom_behind && s.overlay != Overlay::Zoom {
                         Overlay::Zoom
                     } else {
@@ -1227,7 +1274,10 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 // and n cycles which table is zoomed, as it does unzoomed.
                 // The speed-test keys stay live too — watching the history
                 // zoomed is exactly when one wants to run another.
-                KeyCode::Char('z') if s.overlay == Overlay::Zoom => s.overlay = Overlay::None,
+                KeyCode::Char('z') if s.overlay == Overlay::Zoom => {
+                    unzoom_bw_cols(&mut s);
+                    s.overlay = Overlay::None;
+                }
                 KeyCode::Char('s')
                     if s.overlay == Overlay::Zoom
                         && s.speedtest_enabled
@@ -1286,18 +1336,30 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 {
                     side = delete_selected_speedtest(&mut s);
                 }
-                // The zoomed talkers sort exactly like their compact versions:
-                // ←/→ move the column cursor, Enter sorts and flips. The
-                // speed-test history stays chronological.
-                KeyCode::Left
+                // The zoomed talkers sort like their compact versions — ←/→
+                // move the column cursor, Enter sorts and flips — but the
+                // cursor walks the columns as the zoom draws them, split
+                // now↓/now↑ included. The speed-test history stays
+                // chronological.
+                KeyCode::Left | KeyCode::Right
                     if s.overlay == Overlay::Zoom && s.zoom_view != app::ZoomView::Speedtests =>
                 {
-                    s.bw_col = s.bw_col.saturating_sub(1);
+                    let order = s.bw_view.zoom_key_order();
+                    let pos = order.iter().position(|&k| k == s.bw_col).unwrap_or(0);
+                    let pos = if key.code == KeyCode::Left {
+                        pos.saturating_sub(1)
+                    } else {
+                        (pos + 1).min(order.len() - 1)
+                    };
+                    s.bw_col = order[pos];
                 }
-                KeyCode::Right
+                // '/' filters the zoomed table too — a long process list is
+                // exactly where a filter earns its keep.
+                KeyCode::Char('/')
                     if s.overlay == Overlay::Zoom && s.zoom_view != app::ZoomView::Speedtests =>
                 {
-                    s.bw_col = (s.bw_col + 1).min(6);
+                    s.input_buffer = s.bw_filter.clone();
+                    s.input_mode = InputMode::TalkersFilter;
                 }
                 KeyCode::Enter
                     if s.overlay == Overlay::Zoom && s.zoom_view != app::ZoomView::Speedtests =>
@@ -1718,6 +1780,15 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     if s.focus == Panel::Bandwidth && s.sub_pane == SubPane::Secondary =>
                 {
                     side = delete_selected_speedtest(&mut s);
+                }
+                // '/' filters the talkers tables to rows matching a typed
+                // substring — process name or pid, remote address, port, or
+                // process. Live while typing; Enter keeps it, Esc clears it.
+                KeyCode::Char('/')
+                    if s.focus == Panel::Bandwidth && s.sub_pane == SubPane::Primary =>
+                {
+                    s.input_buffer = s.bw_filter.clone();
+                    s.input_mode = InputMode::TalkersFilter;
                 }
                 // Bandwidth: move the top-talkers column cursor and sort.
                 KeyCode::Left if s.focus == Panel::Bandwidth => {
@@ -2194,7 +2265,7 @@ fn processes_csv(s: &AppState) -> String {
     use std::fmt::Write as _;
     let mut out =
         String::from("name,pid,down_bytes,up_bytes,total_bytes,share_pct,retx,down_bps,up_bps\n");
-    for i in s.process_order() {
+    for i in s.process_order_all() {
         let p = &s.processes[i];
         let _ = writeln!(
             out,
@@ -2219,7 +2290,7 @@ fn remotes_csv(s: &AppState) -> String {
     let mut out = String::from(
         "remote,port,ports_seen,process,down_bytes,up_bytes,total_bytes,share_pct,down_bps,up_bps\n",
     );
-    for i in s.remote_order() {
+    for i in s.remote_order_all() {
         let r = &s.remotes[i];
         let _ = writeln!(
             out,

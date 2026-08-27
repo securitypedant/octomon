@@ -650,6 +650,27 @@ pub enum BwView {
     Remotes,
 }
 
+impl BwView {
+    /// The zoomed table's sortable columns in visual order, as `bw_col` sort
+    /// keys — ←/→ walk this list while zoomed, so the cursor visits the split
+    /// now↓/now↑ columns where they are drawn, just before the combined now↕.
+    pub fn zoom_key_order(self) -> &'static [usize] {
+        match self {
+            BwView::Processes => &[0, 7, 8, 1, 2, 3, 4, 5, 6],
+            BwView::Remotes => &[0, 1, 7, 8, 2, 3, 4, 5, 6],
+        }
+    }
+
+    /// The compact table's combined "now" sort key — where the zoom-only
+    /// now↓/now↑ keys fold back to when the zoom closes.
+    pub fn combined_now_key(self) -> usize {
+        match self {
+            BwView::Processes => 1,
+            BwView::Remotes => 2,
+        }
+    }
+}
+
 /// A single traceroute hop.
 #[derive(Clone)]
 pub struct Hop {
@@ -1586,6 +1607,76 @@ mod tests {
         assert_eq!(s.process_order(), vec![2, 1, 0]);
     }
 
+    /// The '/' filter narrows the process table by name or pid, and the
+    /// zoom's split now↓/now↑ sort keys (7/8) rank by one direction of the
+    /// live rate — while the bundle's CSV order stays complete regardless.
+    #[test]
+    fn talkers_filter_and_split_now_sort_keys() {
+        let proc = |name: &str, pid: u32, d: f64, u: f64| ProcBandwidth {
+            name: name.into(),
+            pid,
+            down_bps: d,
+            up_bps: u,
+            ..Default::default()
+        };
+        let mut s = AppState::new(vec![]);
+        s.processes = vec![
+            proc("firefox", 100, 50.0, 900.0),
+            proc("rsync", 250, 800.0, 10.0),
+            proc("Spotify", 300, 400.0, 400.0),
+        ];
+        // Case-insensitive on the name; pids match on their digits.
+        s.bw_filter = "SPOT".into();
+        assert_eq!(s.process_order(), vec![2]);
+        s.bw_filter = "25".into();
+        assert_eq!(s.process_order(), vec![1]);
+        s.bw_filter = "   ".into();
+        assert_eq!(s.process_order().len(), 3, "whitespace is no filter");
+
+        s.bw_filter.clear();
+        s.bw_sort = Some((7, true));
+        assert_eq!(s.process_order(), vec![1, 2, 0], "now↓ ranks by download");
+        s.bw_sort = Some((8, true));
+        assert_eq!(s.process_order(), vec![0, 2, 1], "now↑ ranks by upload");
+
+        // The support bundle lists every process whatever the screen shows.
+        s.bw_filter = "firefox".into();
+        assert_eq!(s.process_order(), vec![0]);
+        assert_eq!(s.process_order_all().len(), 3);
+    }
+
+    /// The same filter reaches the remotes table through address, port, and
+    /// the owning process.
+    #[test]
+    fn remote_filter_matches_address_port_and_process() {
+        let remote = |a: &str, port: u16, process: &str| RemoteBandwidth {
+            addr: a.parse().unwrap(),
+            port,
+            ports: 1,
+            process: process.into(),
+            down_bytes: 0,
+            up_bytes: 0,
+            total_bytes: 0,
+            share: 0.0,
+            down_bps: 0.0,
+            up_bps: 0.0,
+        };
+        let mut s = AppState::new(vec![]);
+        s.remotes = vec![
+            remote("151.101.193.111", 443, "firefox"),
+            remote("2606:4700:4700::1111", 53, "mDNSResponder"),
+        ];
+        s.bw_filter = "151.101".into();
+        assert_eq!(s.remote_order(), vec![0]);
+        s.bw_filter = "443".into();
+        assert_eq!(s.remote_order(), vec![0]);
+        s.bw_filter = "mdns".into();
+        assert_eq!(s.remote_order(), vec![1]);
+        s.bw_filter = "no-such".into();
+        assert!(s.remote_order().is_empty());
+        assert_eq!(s.remote_order_all().len(), 2, "the bundle stays complete");
+    }
+
     #[test]
     fn the_current_location_is_pinned_to_the_top_of_the_list() {
         let named = |label: &str| crate::baseline::Baseline {
@@ -2072,6 +2163,8 @@ pub enum InputMode {
     RenameLocation,
     /// Typing a marker for the event timeline ("moved to the meeting room").
     Marker,
+    /// Typing a substring filter for the talkers tables ('/', Bandwidth).
+    TalkersFilter,
     /// Confirming a total reset (Ctrl+R): the word ERASE must be typed in
     /// full — a destructive action should cost more than one keystroke.
     ConfirmReset,
@@ -2261,9 +2354,12 @@ pub struct AppState {
     pub follow_remote: Option<IpAddr>,
     /// Availability of per-process attribution on this platform.
     pub proc_status: ProcStatus,
-    /// Column cursor over the top-talkers header. Processes:
-    /// 0=name,1=total,2=down,3=up,4=now,5=share,6=retx. Remotes:
-    /// 0=remote,1=process,2=total,3=down,4=up,5=now,6=share.
+    /// Column cursor over the top-talkers header, as a sort key. Processes:
+    /// 0=name,1=now,2=total,3=↓,4=↑,5=share,6=retx. Remotes:
+    /// 0=remote,1=process,2=now,3=total,4=↓,5=↑,6=share. Keys 7 (now↓) and
+    /// 8 (now↑) sort by one direction of the live rate; only the zoom draws
+    /// those as columns, so the cursor folds back to the combined "now" key
+    /// when the zoom closes (see [`BwView::combined_now_key`]).
     pub bw_col: usize,
     /// Active sort of top talkers: (column, descending). None = default order.
     pub bw_sort: Option<(usize, bool)>,
@@ -2277,6 +2373,11 @@ pub struct AppState {
     pub pinned_procs: Vec<String>,
     /// Remote addresses pinned to the top of the remotes table, same idea.
     pub pinned_remotes: Vec<IpAddr>,
+    /// Case-insensitive substring filter over both talkers tables ('/'):
+    /// processes match on name or pid, remotes on address, port, or process.
+    /// Empty = no filter. Session-only, and never applied to the support
+    /// bundle's CSVs — those stay complete.
+    pub bw_filter: String,
 
     // --- Connection Quality interaction ---
     /// Cursor over the target list (Quality panel).
@@ -2507,6 +2608,7 @@ impl AppState {
             remotes: Vec::new(),
             bw_reset: false,
             bw_view: BwView::Processes,
+            bw_filter: String::new(),
             remote_sel: 0,
             proc_sel: 0,
             follow_proc: None,
@@ -2603,6 +2705,12 @@ impl AppState {
         self.follow_remote = live.follow_remote;
         self.bw_col = live.bw_col;
         self.bw_sort = live.bw_sort;
+        self.bw_col_other = live.bw_col_other;
+        self.bw_sort_other = live.bw_sort_other;
+        self.bw_filter = live.bw_filter.clone();
+        self.zoom_view = live.zoom_view;
+        self.zoom_behind = live.zoom_behind;
+        self.proc_details = live.proc_details.clone();
         self.pinned_procs = live.pinned_procs.clone();
         self.pinned_remotes = live.pinned_remotes.clone();
         self.speed_sel = live.speed_sel;
@@ -2920,15 +3028,45 @@ impl AppState {
         }
     }
 
+    /// Whether the '/' filter keeps this process row: name or pid.
+    fn proc_matches(&self, i: usize, needle: &str) -> bool {
+        let p = &self.processes[i];
+        p.name.to_lowercase().contains(needle) || p.pid.to_string().contains(needle)
+    }
+
+    /// Whether the '/' filter keeps this remote row: address, port, or the
+    /// process talking to it.
+    fn remote_matches(&self, i: usize, needle: &str) -> bool {
+        let r = &self.remotes[i];
+        r.addr.to_string().contains(needle)
+            || r.port.to_string().contains(needle)
+            || r.process.to_lowercase().contains(needle)
+    }
+
     /// Indices into `processes` in display order: the collector's ranking by
-    /// session total unless a column sort is active. Shared by the renderer
-    /// and the cursor, so ↑/↓ walk the rows as drawn.
+    /// session total unless a column sort is active, minus rows the '/'
+    /// filter drops. Shared by the renderer and the cursor, so ↑/↓ walk the
+    /// rows as drawn.
     pub fn process_order(&self) -> Vec<usize> {
-        let mut order: Vec<usize> = (0..self.processes.len()).collect();
+        let needle = self.bw_filter.trim().to_lowercase();
+        let order = (0..self.processes.len())
+            .filter(|&i| needle.is_empty() || self.proc_matches(i, &needle))
+            .collect();
+        self.sort_processes(order)
+    }
+
+    /// Every process in display order, filter or no filter — the support
+    /// bundle's CSV must stay complete whatever the screen is showing.
+    pub fn process_order_all(&self) -> Vec<usize> {
+        self.sort_processes((0..self.processes.len()).collect())
+    }
+
+    fn sort_processes(&self, mut order: Vec<usize>) -> Vec<usize> {
         if let Some((col, desc)) = self.sort_for(BwView::Processes) {
             order.sort_by(|&i, &j| {
                 let (a, b) = (&self.processes[i], &self.processes[j]);
-                // Columns as drawn: name · now · total · ↓ · ↑ · share · retx.
+                // Columns as drawn: name · now · total · ↓ · ↑ · share · retx;
+                // 7/8 are the zoom's split now↓/now↑.
                 let o = match col {
                     0 => a.name.cmp(&b.name),
                     1 => (a.down_bps + a.up_bps).total_cmp(&(b.down_bps + b.up_bps)),
@@ -2936,6 +3074,8 @@ impl AppState {
                     4 => a.up_bytes.cmp(&b.up_bytes),
                     5 => a.share.total_cmp(&b.share),
                     6 => a.retx.cmp(&b.retx),
+                    7 => a.down_bps.total_cmp(&b.down_bps),
+                    8 => a.up_bps.total_cmp(&b.up_bps),
                     _ => a.total_bytes.cmp(&b.total_bytes),
                 };
                 if desc { o.reverse() } else { o }
@@ -2956,11 +3096,25 @@ impl AppState {
 
     /// Indices into `remotes` in display order; see [`Self::process_order`].
     pub fn remote_order(&self) -> Vec<usize> {
-        let mut order: Vec<usize> = (0..self.remotes.len()).collect();
+        let needle = self.bw_filter.trim().to_lowercase();
+        let order = (0..self.remotes.len())
+            .filter(|&i| needle.is_empty() || self.remote_matches(i, &needle))
+            .collect();
+        self.sort_remotes(order)
+    }
+
+    /// Every remote in display order, unfiltered; see
+    /// [`Self::process_order_all`].
+    pub fn remote_order_all(&self) -> Vec<usize> {
+        self.sort_remotes((0..self.remotes.len()).collect())
+    }
+
+    fn sort_remotes(&self, mut order: Vec<usize>) -> Vec<usize> {
         if let Some((col, desc)) = self.sort_for(BwView::Remotes) {
             order.sort_by(|&i, &j| {
                 let (a, b) = (&self.remotes[i], &self.remotes[j]);
-                // Columns as drawn: remote · process · now · total · ↓ · ↑ · share.
+                // Columns as drawn: remote · process · now · total · ↓ · ↑ ·
+                // share; 7/8 are the zoom's split now↓/now↑.
                 let o = match col {
                     0 => a.addr.cmp(&b.addr),
                     1 => a.process.cmp(&b.process),
@@ -2968,6 +3122,8 @@ impl AppState {
                     4 => a.down_bytes.cmp(&b.down_bytes),
                     5 => a.up_bytes.cmp(&b.up_bytes),
                     6 => a.share.total_cmp(&b.share),
+                    7 => a.down_bps.total_cmp(&b.down_bps),
+                    8 => a.up_bps.total_cmp(&b.up_bps),
                     _ => a.total_bytes.cmp(&b.total_bytes),
                 };
                 if desc { o.reverse() } else { o }

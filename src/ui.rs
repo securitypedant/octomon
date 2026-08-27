@@ -83,20 +83,21 @@ fn zoom_band(f: &mut Frame, s: &AppState, area: Rect) {
             format!(" Speed Test History · zoom ({}) ", s.speed_history.len())
         }
     };
-    if s.zoom_view != crate::app::ZoomView::Speedtests
-        && let Some(name) = follow_label(s)
-    {
-        title.push_str(&format!("· following {name} "));
+    if s.zoom_view != crate::app::ZoomView::Speedtests {
+        if let Some(name) = follow_label(s) {
+            title.push_str(&format!("· following {name} "));
+        }
+        if !s.bw_filter.trim().is_empty() {
+            title.push_str(&format!("· ⌕ {} ", s.bw_filter.trim()));
+        }
     }
-    // The talkers sort and follow from the zoom too; the history is curated
-    // from it.
+    // The talkers sort, follow, and filter from the zoom too; the history is
+    // curated from it.
     let hint = match s.zoom_view {
         crate::app::ZoomView::Speedtests => {
             " ↑↓ scroll · d delete · n next table · press z or Esc to close "
         }
-        _ => {
-            " ↑↓ scroll · ←→ ↵ sort · o follow · p/u pin · n next table · press z or Esc to close "
-        }
+        _ => " ↑↓ scroll · ←→ ↵ sort · / filter · o follow · p/u pin · n next table · z closes ",
     };
     let outer = Block::bordered()
         .padding(Padding::new(1, 1, 0, 0))
@@ -129,11 +130,11 @@ fn flex_col(widths: &[u16], ncols: usize, avail: u16, col: usize, cap: u16) -> (
     (v, flexed)
 }
 
-/// Header for a zoomed talkers table. The zoom splits some compact columns
-/// (now → now↓/now↑) and adds informational ones (pid), but the sort keeps
-/// the compact table's seven keys: `map[base]` names the zoomed column that
-/// carries each base column's cursor highlight and sort arrow — the combined
-/// "now" sort shows its arrow on now↓.
+/// Header for a zoomed talkers table. The zoom splits the compact "now" into
+/// now↓ / now↑ / now↕ (the combined rate, under its compact sort key) and
+/// adds informational columns (pid): `map[key]` names the zoomed column that
+/// carries each sort key's cursor highlight and sort arrow — keys 7/8 are
+/// the split rate columns, which only exist here.
 fn zoom_header<'a>(s: &AppState, labels: &[&'a str], view: BwView, map: &[usize]) -> Row<'a> {
     let sort = s.sort_for(view);
     Row::new(labels.iter().enumerate().map(|(i, l)| {
@@ -153,6 +154,18 @@ fn zoom_header<'a>(s: &AppState, labels: &[&'a str], view: BwView, map: &[usize]
         };
         Cell::from(Span::styled(txt, style))
     }))
+}
+
+/// What a talkers table shows when the '/' filter matches nothing: the filter
+/// itself, so the empty table reads as "your filter", never as "no traffic".
+fn no_filter_match(f: &mut Frame, area: Rect, what: &str, filter: &str) {
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!("no {what} match ⌕ {filter} — / edits, Esc clears"),
+            Style::new().fg(theme::dim()),
+        )),
+        area,
+    );
 }
 
 /// The "── selected ──…" rule above a detail block, bright enough that the
@@ -186,19 +199,22 @@ fn zoom_processes(f: &mut Frame, s: &AppState, area: Rect) {
         (area, None)
     };
 
-    const WIDTHS: [u16; 9] = [34, 7, 11, 11, 8, 8, 8, 6, 6];
+    const WIDTHS: [u16; 10] = [34, 7, 11, 11, 11, 8, 8, 8, 6, 6];
     let ncols = fitting_columns(&WIDTHS, table_area.width);
     let (flexed, name_w) = flex_col(&WIDTHS, ncols, table_area.width, 0, 40);
     let labels = [
-        "name", "pid", "now↓", "now↑", "total", "↓", "↑", "share", "retx",
+        "name", "pid", "now↓", "now↑", "now↕", "total", "↓", "↑", "share", "retx",
     ];
     let header = zoom_header(
         s,
         &labels[..ncols],
         BwView::Processes,
-        &[0, 2, 4, 5, 6, 7, 8],
+        &[0, 4, 5, 6, 7, 8, 9, 2, 3],
     );
     let order = s.process_order();
+    if order.is_empty() && !s.bw_filter.trim().is_empty() {
+        return no_filter_match(f, table_area, "processes", s.bw_filter.trim());
+    }
     let (pos, sel_idx) = s.proc_cursor();
     let (table_area, first, visible) = talkers_scroll(f, table_area, order.len(), pos);
     let rows = order.iter().skip(first).take(visible).map(|&idx| {
@@ -212,6 +228,7 @@ fn zoom_processes(f: &mut Frame, s: &AppState, area: Rect) {
             )),
             fmt_now(p.down_bps, s.bits_units),
             fmt_now(p.up_bps, s.bits_units),
+            fmt_now(p.down_bps + p.up_bps, s.bits_units),
             Cell::from(Span::styled(
                 fmt_bytes(p.total_bytes),
                 Style::new().fg(theme::bright()),
@@ -318,14 +335,22 @@ fn zoom_remotes(f: &mut Frame, s: &AppState, area: Rect) {
     // The address column is already sized for the longest realistic v6+port;
     // the leftover width goes to the *process* column — that is the one the
     // compact view truncates ("com.apple.WebKit.Netwo…").
-    const WIDTHS: [u16; 8] = [40, 22, 11, 11, 8, 8, 8, 6];
+    const WIDTHS: [u16; 9] = [40, 22, 11, 11, 11, 8, 8, 8, 6];
     let ncols = fitting_columns(&WIDTHS, area.width);
     let (flexed, _) = flex_col(&WIDTHS, ncols, area.width, 1, 30);
     let labels = [
-        "remote", "process", "now↓", "now↑", "total", "↓", "↑", "share",
+        "remote", "process", "now↓", "now↑", "now↕", "total", "↓", "↑", "share",
     ];
-    let header = zoom_header(s, &labels[..ncols], BwView::Remotes, &[0, 1, 2, 4, 5, 6, 7]);
+    let header = zoom_header(
+        s,
+        &labels[..ncols],
+        BwView::Remotes,
+        &[0, 1, 4, 5, 6, 7, 8, 2, 3],
+    );
     let order = s.remote_order();
+    if order.is_empty() && !s.bw_filter.trim().is_empty() {
+        return no_filter_match(f, area, "remote addresses", s.bw_filter.trim());
+    }
     let (pos, sel_idx) = s.remote_cursor();
     let (area, first, visible) = talkers_scroll(f, area, order.len(), pos);
     let rows = order.iter().skip(first).take(visible).map(|&idx| {
@@ -342,6 +367,7 @@ fn zoom_remotes(f: &mut Frame, s: &AppState, area: Rect) {
             )),
             fmt_now(r.down_bps, s.bits_units),
             fmt_now(r.up_bps, s.bits_units),
+            fmt_now(r.down_bps + r.up_bps, s.bits_units),
             Cell::from(Span::styled(
                 fmt_bytes(r.total_bytes),
                 Style::new().fg(theme::bright()),
@@ -1001,6 +1027,19 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                         "  ● current",
                         Style::new().fg(theme::accent()).bold(),
                     ));
+                } else if let Some(local) = b
+                    .last_seen
+                    .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                    .map(|t| t.with_timezone(&chrono::Local))
+                {
+                    // The slot "● current" fills on the active network: for
+                    // every other entry, when this machine last sat on it.
+                    // (A baseline file from before the field existed simply
+                    // has no date, and gets no slot.)
+                    name_row.push(Span::styled(
+                        format!("  · seen {}", local.format("%Y-%m-%d")),
+                        Style::new().fg(theme::dim()),
+                    ));
                 }
                 // Nothing folded in yet — freshly seen, or just deleted and
                 // re-added blank. Said loudly: the dashes below look broken
@@ -1626,6 +1665,12 @@ fn footer(f: &mut Frame, s: &AppState, area: Rect) {
             "rename location (blank clears): ",
             &s.input_buffer,
             "[Enter] save  [Esc] cancel",
+        )
+    } else if s.input_mode == InputMode::TalkersFilter {
+        input_line(
+            "filter talkers (name, pid, address): ",
+            &s.input_buffer,
+            "[Enter] keep  [Esc] clear",
         )
     } else if s.input_mode == InputMode::Marker {
         input_line(
@@ -3208,6 +3253,9 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
     if let Some(name) = follow_label(s) {
         title.push_str(&format!(" · following {name}"));
     }
+    if !s.bw_filter.trim().is_empty() {
+        title.push_str(&format!(" · ⌕ {}", s.bw_filter.trim()));
+    }
     let b = block(&title, s.focus == Panel::Bandwidth);
     let inner = b.inner(area);
     f.render_widget(b, area);
@@ -3646,6 +3694,9 @@ fn top_talkers_view(f: &mut Frame, s: &AppState, area: Rect, view: BwView) {
     // Rows as drawn (the sort, when one is active), scrolled to keep the
     // cursor's position in view, with a cue beside them when there is more.
     let order = s.process_order();
+    if order.is_empty() && !s.bw_filter.trim().is_empty() {
+        return no_filter_match(f, inner, "processes", s.bw_filter.trim());
+    }
     let cursor_on = s.on_process_list();
     let (pos, sel_idx) = s.proc_cursor();
     let (inner, first, visible) = talkers_scroll(f, inner, order.len(), pos);
@@ -3790,9 +3841,11 @@ fn talkers_header<'a>(s: &AppState, labels: &[&'a str], view: BwView, left_cols:
     Row::new(labels.iter().enumerate().map(|(i, l)| {
         let mut txt = (*l).to_string();
         // The arrow shows whichever sort this table is drawn in — the parked
-        // one too, when the other table is the active one.
+        // one too, when the other table is the active one. The zoom-only
+        // now↓/now↑ keys have no compact column; their arrow lands on the
+        // combined "now", which is what they refine.
         if let Some((c, desc)) = s.sort_for(view)
-            && c == i
+            && (if c > 6 { view.combined_now_key() } else { c }) == i
         {
             txt.push(if desc { '▼' } else { '▲' });
         }
@@ -3846,6 +3899,9 @@ fn top_remotes(f: &mut Frame, s: &AppState, area: Rect) {
     let header = talkers_header(s, &labels[..ncols], BwView::Remotes, 2);
 
     let order = s.remote_order();
+    if order.is_empty() && !s.bw_filter.trim().is_empty() {
+        return no_filter_match(f, area, "remote addresses", s.bw_filter.trim());
+    }
     let cursor_on = s.selected_remote().is_some();
     let (pos, sel_idx) = s.remote_cursor();
     let (area, first, visible) = talkers_scroll(f, area, order.len(), pos);
@@ -3954,10 +4010,10 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("W / a", "whois / add sel. remote"),
         row("p / u", "pin / unpin row at the top"),
         row("o", "follow row through re-sorts"),
+        row("/", "filter rows (Esc clears)"),
         row("d / z", "del. speed test / zoom"),
         Line::from(""),
         head("Network"),
-        row("r", "re-probe"),
         row("N", "name this network"),
         row("L", "saved network locations"),
         row("f", "full-screen: DNS + history"),
@@ -5669,6 +5725,26 @@ mod tests {
         // The band replaces the tables, not the graphs: the throughput
         // strip's titles stay on screen.
         assert!(out.contains("↓ down"), "graphs stay: {out}");
+        // The compact "now" splits three ways here: each direction and the
+        // combined rate, all present as sortable headers.
+        assert!(out.contains("now↓"), "{out}");
+        assert!(out.contains("now↑"), "{out}");
+        assert!(out.contains("now↕"), "{out}");
+        // A sort on the zoom-only now↑ key puts its arrow on that column.
+        s.bw_sort = Some((8, true));
+        assert!(draw(&s, 160, 40).contains("now↑▼"));
+        s.bw_sort = None;
+
+        // The '/' filter names itself in the title, and a filter that
+        // matches nothing says so rather than drawing an empty table.
+        s.bw_filter = "webkit".into();
+        let out = draw(&s, 160, 40);
+        assert!(out.contains("⌕ webkit"), "{out}");
+        assert!(out.contains("com.apple.WebKit.Networking"), "{out}");
+        s.bw_filter = "zzz".into();
+        let out = draw(&s, 160, 40);
+        assert!(out.contains("no processes match ⌕ zzz"), "{out}");
+        s.bw_filter.clear();
 
         // Speed tests zoomed: the server and network the compact table
         // has no room for become columns.
@@ -5689,6 +5765,37 @@ mod tests {
         assert!(out.contains("Sheraton Orlando"), "{out}");
         assert!(out.contains("server"), "{out}");
         assert!(out.contains("Speed Test History · zoom"), "{out}");
+    }
+
+    /// The compact talkers table narrows under the '/' filter, announces it
+    /// in the panel title, and explains an empty result instead of drawing a
+    /// blank table.
+    #[test]
+    fn compact_talkers_filter_narrows_and_reports_no_match() {
+        use crate::app::{ProcBandwidth, ProcStatus};
+        let mut s = AppState::new(vec![]);
+        s.focus = Panel::Bandwidth;
+        s.proc_status = ProcStatus::Supported;
+        s.processes = vec![
+            ProcBandwidth {
+                name: "firefox".into(),
+                pid: 1,
+                ..Default::default()
+            },
+            ProcBandwidth {
+                name: "rsync".into(),
+                pid: 2,
+                ..Default::default()
+            },
+        ];
+        s.bw_filter = "fire".into();
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("firefox"));
+        assert!(!out.contains("rsync"), "{out}");
+        assert!(out.contains("⌕ fire"), "title carries the filter: {out}");
+        s.bw_filter = "zzz".into();
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("no processes match ⌕ zzz"), "{out}");
     }
 
     #[test]
@@ -5842,6 +5949,23 @@ mod tests {
         assert!(draw(&s, 120, 30).contains("learning from scratch"));
         assert!(out.contains("d deletes"), "delete hint in the footer");
         assert!(out.contains("press L or Esc to close"));
+
+        // A non-current entry shows when it was last seen, in the slot
+        // "● current" occupies on the active one — which never shows a date,
+        // however fresh its own timestamp is.
+        let ts = 1_756_000_000; // 2025-08-24 UTC
+        for (_, b) in s.locations.as_mut().unwrap() {
+            b.last_seen = Some(ts);
+        }
+        let expect = chrono::DateTime::from_timestamp(ts, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("· seen %Y-%m-%d")
+            .to_string();
+        let out = draw(&s, 120, 30);
+        assert!(out.contains(&expect), "{out}");
+        assert_eq!(out.matches("· seen").count(), 1, "{out}");
+        assert!(out.contains("● current"), "{out}");
     }
 
     /// After an outage ends, the windowed loss figure is momentum, not the
@@ -7373,6 +7497,7 @@ mod tests {
             "provider cycle · add · del",
             "procs → remotes → history",
             "full-screen: DNS + history",
+            "filter rows (Esc clears)",
             "events / ports / marker",
             "del. speed test / zoom",
             "routing table",
