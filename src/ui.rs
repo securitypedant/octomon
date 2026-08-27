@@ -392,8 +392,8 @@ fn zoom_speedtests(f: &mut Frame, s: &AppState, area: Rect) {
     let labels = [
         "time",
         "provider",
-        "↓Mb/s",
-        "↑Mb/s",
+        "↓",
+        "↑",
         "bloat",
         "server",
         "network",
@@ -440,11 +440,11 @@ fn zoom_speedtests(f: &mut Frame, s: &AppState, area: Rect) {
                 Cell::from(r.when()),
                 Cell::from(r.provider.clone()),
                 Cell::from(Span::styled(
-                    format!("{:.1}", r.down_mbps),
+                    fmt_speed_compact(r.down_mbps),
                     Style::new().fg(Color::Green),
                 )),
                 Cell::from(Span::styled(
-                    format!("{:.1}", r.up_mbps),
+                    fmt_speed_compact(r.up_mbps),
                     Style::new().fg(Color::Magenta),
                 )),
                 Cell::from(bloat),
@@ -3365,8 +3365,8 @@ fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         return;
     }
 
-    let header = Row::new(["time", "provider", "↓Mb/s", "↑Mb/s", "bloat"])
-        .style(Style::new().fg(theme::dim()));
+    let header =
+        Row::new(["time", "provider", "↓", "↑", "bloat"]).style(Style::new().fg(theme::dim()));
     // Newest first; the cursor indexes this reversed order.
     let ordered: Vec<&crate::store::SpeedRecord> = s.speed_history.iter().rev().collect();
     let sel = s.speed_sel.min(ordered.len().saturating_sub(1));
@@ -3403,11 +3403,11 @@ fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
                     Style::new().fg(theme::text()),
                 ),
                 Span::styled(
-                    format!("  ↓ {:.1}", r.down_mbps),
+                    format!("  ↓ {}", crate::util::fmt_mbps(r.down_mbps)),
                     Style::new().fg(Color::Green),
                 ),
                 Span::styled(
-                    format!("  ↑ {:.1} Mb/s", r.up_mbps),
+                    format!("  ↑ {}", crate::util::fmt_mbps(r.up_mbps)),
                     Style::new().fg(Color::Magenta),
                 ),
             ]),
@@ -3464,11 +3464,11 @@ fn speedtest_results(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
                 Cell::from(r.when()),
                 Cell::from(r.provider.clone()),
                 Cell::from(Span::styled(
-                    format!("{:.0}", r.down_mbps),
+                    fmt_speed_compact(r.down_mbps),
                     Style::new().fg(Color::Green),
                 )),
                 Cell::from(Span::styled(
-                    format!("{:.0}", r.up_mbps),
+                    fmt_speed_compact(r.up_mbps),
                     Style::new().fg(Color::Magenta),
                 )),
                 Cell::from(bloat),
