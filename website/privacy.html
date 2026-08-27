@@ -191,10 +191,8 @@
   <div class="pagehead">
     <div class="wrap">
       <h1>Privacy</h1>
-      <p class="lede">octomon measures <em>your</em> connection, on <em>your</em>
-      machine, for <em>you</em>. Nothing about you is recorded by us, and this
-      page is the proof: the only dashboard we have is published below, for
-      everyone to see.</p>
+      <p class="lede">octomon measures <em>your</em> connection, on <em>your</em> machine, for <em>you</em>. Nothing about you is recorded by us, and this
+      page is the proof: the only dashboard we have is published below, for everyone to see.</p>
     </div>
   </div>
 
@@ -203,15 +201,14 @@
       <h2>The promise</h2>
       <p><strong>Everything octomon learns stays on your machine.</strong>
       Baselines, incident history, speed tests, recordings: all local files
-      you can read, export, or erase (<code>Ctrl+R</code> erases everything).
+      you can read, export, or erase (<code>Ctrl+R</code> removes everything).
       No telemetry, no accounts, no identifiers.</p>
       <p>As a <em>network</em> tool, octomon does make outbound requests, to
-      ping targets, resolvers, time servers and speed-test backends. Every
+      ping gateways and other IPs, DNS resolvers, time servers and speed-test backends. Every
       endpoint it contacts, when, why, and exactly what is sent is listed in the
       <a href="https://github.com/securitypedant/octomon#network--privacy">README's
-      network table</a>. Every request identifies itself honestly as
-      <code>octomon/&lt;version&gt; (network monitoring tool; +https://octomon.dev)</code>,
-      never a browser costume.</p>
+      network table</a>. Each request identifies itself as
+      <code>octomon/&lt;version&gt; (network monitoring tool; +https://octomon.dev)</code>.</p>
       <p>A word on where this ethic comes from: octomon's author works at
       Cloudflare, a company with a long-standing
       <a href="https://www.cloudflare.com/privacypolicy/">commitment to
@@ -226,22 +223,21 @@
       <h2>The one endpoint we operate: /edge</h2>
       <p>octomon calls <code>https://octomon.dev/edge</code> at startup, on a
       network change, and every 15 minutes. Its only purpose is to improve the
-      quality and depth of the monitoring: the Cloudflare edge answers with
+      quality of the monitoring: the Cloudflare edge answers with
       facts about your connection that your machine cannot see from the
       inside: which PoP is serving you, which ISP network your traffic
       arrives from, the edge's own TCP round-trip measurement of you (a
       latency reading that works even on networks that block ping), and the
       latest released octomon version, so the client can mention when an
-      update exists. It never updates itself.</p>
-      <p>That answer goes <strong>to you and is stored nowhere</strong>. The
-      endpoint keeps no logs. The single thing it counts is: <em>one request
+      update exists.</p>
+      <p>That answer goes <strong>to you and is stored nowhere</strong>. We
+      keep no detailed logs. The only thing we store is a count: <em>one request
       happened, from octomon version x.y.z, because of a start, a network
       change, or the 15-minute refresh</em>: the version and one of those
-      three constant labels, and nothing else. Every octomon in the world
+      three constant labels, and nothing else. Every octomon instance
       sends the identical labels, so they link nothing to anyone; the version
       describes the software, not you. Together they let the graph below
-      estimate how many octomons are running, with no identifier of any
-      kind. No IP address, no location, no identifier
+      estimate what versions of octomon are running. No IP address, no location, no identifier
       of any kind is retained, which also means we <em>cannot</em> count
       unique users, only requests, a deliberate limitation.</p>
       <p>Don't want even that? Set <code>edge_check_url = ""</code> in
@@ -268,7 +264,7 @@
       public software build, not a person. The line over the bars is the
       fleet estimate: every running octomon refreshes /edge on a 15-minute
       tick, so refresh calls ÷ 96 ≈ the average number running that day. An
-      estimate by design; you can recompute it from the same public data. There is no other dashboard, private or
+      estimate by design; you can recompute it from the same public data, <a href="/edge/stats"><code>octomon.dev/edge/stats</code></a>. There is no other dashboard, private or
       otherwise.</p>
       <div class="card graph-card">
         <h3>/edge requests · last 30 days</h3>
@@ -276,10 +272,6 @@
         <div class="legend" id="edge-legend"></div>
         <p class="graph-note" id="edge-note">loading the live numbers…</p>
       </div>
-      <p style="margin-top:18px">The data behind it is public too:
-      <a href="/edge/stats"><code>octomon.dev/edge/stats</code></a>: the same
-      aggregate this page renders, and the only readout the endpoint's
-      counter can produce.</p>
     </div>
   </section>
 
