@@ -380,7 +380,10 @@ fn zoom_speedtests(f: &mut Frame, s: &AppState, area: Rect) {
         );
         return;
     }
-    const WIDTHS: [u16; 9] = [12, 11, 8, 8, 8, 30, 20, 18, 12];
+    // provider carries "iPerf3 · {user's name}" now, which 11 columns
+    // truncated mid-word; the compact speed values gave four columns back
+    // to pay for most of it.
+    const WIDTHS: [u16; 9] = [12, 22, 6, 6, 8, 30, 20, 18, 12];
     let ncols = fitting_columns(&WIDTHS, area.width);
     // Server names (M-Lab sites, Ookla hosts) routinely outgrow 30 columns;
     // any width the pane has spare goes to that column rather than to air.
