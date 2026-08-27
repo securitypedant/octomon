@@ -256,7 +256,9 @@
     padding: 36px 40px;
     max-width: 62em;
   }
-  .why-card p { margin: 0 0 16px; line-height: 1.65; }
+  /* body copy in the muted grey the hero sub uses; the card inherits the
+     page's white otherwise, which reads harsh at paragraph length */
+  .why-card p { margin: 0 0 16px; line-height: 1.65; color: var(--octo-muted); }
   .why-card p:last-child { margin-bottom: 0; }
   .why-card .mono-inline { font-family: var(--octo-mono); font-size: 0.9em; }
   .dns-card .haiku {
@@ -319,6 +321,8 @@
       border-radius: var(--octo-radius-chip);
     }
     nav.links { display: none; }
+    /* air between the mark/burger row and the rule beneath it */
+    .nav { padding-bottom: 24px; }
     .menu-toggle:checked ~ nav.links {
       display: flex; flex-basis: 100%; flex-direction: column;
       gap: 12px; padding: 8px 2px 12px; font-size: 1rem;
@@ -492,7 +496,8 @@ sudo apt update &amp;&amp; sudo apt install octomon">copy</button>
         <div class="panel-text">
           <h3>Bandwidth</h3>
           <p>Live throughput and an on-demand speed test (<kbd>s</kbd>,
-          Cloudflare / M-Lab / LibreSpeed), with the traffic attributed: top
+          Cloudflare / M-Lab / LibreSpeed / your own iPerf3 servers), with the
+          traffic attributed: top
           talkers by process or by remote address (<kbd>n</kbd>), session
           totals, retransmits.</p>
         </div>

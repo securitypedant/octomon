@@ -2050,6 +2050,8 @@ pub enum InputMode {
     Normal,
     /// Typing a new ICMP target (IP or DNS name).
     AddTarget,
+    /// Typing a new iPerf3 server as `Name=host[:port]` ([I], Bandwidth).
+    AddIperf3,
     /// Typing a name for the current network ("Home", "Office").
     NameNetwork,
     /// Typing a name for the location selected in the [L] overlay.
@@ -3026,8 +3028,11 @@ impl AppState {
         };
         let n = self.window_samples();
         // Sort key: missing latency → +∞ so dead targets rank "worst".
+        // Columns 1–6 are the ICMP metrics; 7–12 the TCP group the dual
+        // (full-screen) view shows beside them, in the same order.
         let key = |t: &TargetStat| -> f64 {
             let st = t.stats(n);
+            let tst = t.tcp.stats(n);
             match col {
                 1 => t.last_rtt_ms.unwrap_or(f64::INFINITY),
                 2 => st.mean.unwrap_or(f64::INFINITY),
@@ -3036,6 +3041,12 @@ impl AppState {
                 5 => t.jitter_ms,
                 // The figure the cell shows: loss over the stats window.
                 6 => t.recent_loss_pct(n),
+                7 => t.tcp.last_ms.unwrap_or(f64::INFINITY),
+                8 => tst.mean.unwrap_or(f64::INFINITY),
+                9 => tst.p95.unwrap_or(f64::INFINITY),
+                10 => tst.max.unwrap_or(f64::INFINITY),
+                11 => t.tcp.jitter_ms,
+                12 => t.tcp.recent_loss_pct(n),
                 _ => 0.0,
             }
         };

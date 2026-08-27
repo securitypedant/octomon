@@ -2238,10 +2238,13 @@ fn build_rungs(
         detail: if v.cores.is_empty() {
             "no data yet".to_string()
         } else {
+            // The measure is unavailable-share; shown as its complement so
+            // the label can say what a reader actually asks ("how much
+            // memory have I got left?").
             format!(
-                "cpu {:.0}% · memory {:.0}%{}",
+                "cpu usage {:.0}% · avail memory {:.0}%{}",
                 v.cpu_pct,
-                v.mem_pressure_pct,
+                (100.0 - v.mem_pressure_pct).clamp(0.0, 100.0),
                 if v.throttled { " · THROTTLED" } else { "" }
             )
         },

@@ -1602,6 +1602,12 @@ fn footer(f: &mut Frame, s: &AppState, area: Rect) {
             &s.input_buffer,
             "[Enter] add  [Esc] cancel",
         )
+    } else if s.input_mode == InputMode::AddIperf3 {
+        input_line(
+            "add iPerf3 server (Name=host[:port]): ",
+            &s.input_buffer,
+            "[Enter] save  [Esc] cancel",
+        )
     } else if s.input_mode == InputMode::NameNetwork {
         input_line(
             "name this network (Home, Office…): ",
@@ -2293,11 +2299,11 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     }
     if dual {
         header_cells.push(divider("│ tcp"));
-        header_cells.extend([plain("last"), plain("avg"), plain("p95")]);
+        header_cells.extend([hcell(7, "last"), hcell(8, "avg"), hcell(9, "p95")]);
         if tcp_max {
-            header_cells.push(plain("max"));
+            header_cells.push(hcell(10, "max"));
         }
-        header_cells.extend([plain("jit"), plain("loss")]);
+        header_cells.extend([hcell(11, "jit"), hcell(12, "loss")]);
     }
     let header = Row::new(header_cells);
 
@@ -2391,10 +2397,7 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         if dual {
             cells.push(Cell::from(Span::styled("│", Style::new().fg(theme::dim()))));
             cells.extend(family_cells(&icmp, dim_hop, icmp_max));
-            cells.push(Cell::from(Span::styled(
-                " │",
-                Style::new().fg(theme::dim()),
-            )));
+            cells.push(Cell::from(Span::styled("│", Style::new().fg(theme::dim()))));
             cells.extend(family_cells(&tcp, dim_hop, tcp_max));
         } else if family == crate::app::ProbeFamily::Tcp {
             cells.extend(family_cells(&tcp, dim_hop, icmp_max));
@@ -3939,7 +3942,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("W", "whois: who owns address"),
         Line::from(""),
         head("Bandwidth"),
-        row("v", "cycle speed-test provider"),
+        row("v / I", "cycle / add iPerf3 server"),
         row("n", "procs → remotes → history"),
         row("W / a", "whois / add sel. remote"),
         row("p / u", "pin / unpin row at the top"),
@@ -5185,14 +5188,57 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
         core_grid(f, &v.cores, parts[5]);
     }
 
-    // CPU history sparkline (uses the remaining space).
+    // CPU history sparkline (uses the remaining space), with available
+    // memory drawn over it as a line: the two starve a machine differently
+    // (a pegged core vs. swap death) and reading them against each other is
+    // the question — "did memory dive when the CPU spiked?".
     let spark = Sparkline::default()
         .max(100)
         .data(v.cpu_hist.tail_u64(parts[6].width as usize))
         .bar_set(s.bar_set.clone())
         .style(Style::new().fg(theme::warn()))
-        .block(Block::new().title(Span::styled(" cpu history ", Style::new().fg(theme::dim()))));
+        .block(Block::new().title(Line::from(vec![
+            Span::styled(" cpu history ", Style::new().fg(theme::dim())),
+            Span::styled("· avail mem ", Style::new().fg(P95_COLOR)),
+        ])));
     f.render_widget(spark, parts[6]);
+    // The line rides the same rect: Chart plots only its dots, so the bars
+    // stay visible everywhere the line isn't.
+    let graph = Rect {
+        y: parts[6].y + 1,
+        height: parts[6].height.saturating_sub(1),
+        ..parts[6]
+    };
+    if graph.height >= 1 && graph.width >= 4 {
+        let want = graph.width as usize * 2;
+        let avail: Vec<(f64, f64)> = {
+            let mut vals: Vec<f64> = v
+                .pressure_hist
+                .data
+                .iter()
+                .rev()
+                .take(want)
+                .map(|p| (100.0 - p).clamp(0.0, 100.0))
+                .collect();
+            vals.reverse();
+            vals.iter()
+                .enumerate()
+                .map(|(i, &m)| (i as f64, m))
+                .collect()
+        };
+        if avail.len() >= 2 {
+            let xmax = (avail.len() - 1) as f64;
+            let ds = Dataset::default()
+                .marker(s.graph_marker)
+                .graph_type(GraphType::Line)
+                .style(Style::new().fg(P95_COLOR))
+                .data(&avail);
+            let chart = Chart::new(vec![ds])
+                .x_axis(Axis::default().bounds([0.0, xmax]))
+                .y_axis(Axis::default().bounds([0.0, 100.0]));
+            f.render_widget(chart, graph);
+        }
+    }
 }
 
 /// How many per-core meters sit on one row.
@@ -5289,7 +5335,7 @@ fn speedtest_line(s: &AppState) -> Line<'static> {
         SpeedStatus::Done => {
             let ago = st
                 .last_run
-                .map(|t| format!("  ({}s ago)", t.elapsed().as_secs()))
+                .map(|t| format!("  ({} ago)", fmt_ago(t.elapsed().as_secs())))
                 .unwrap_or_default();
             let mut spans = vec![
                 label,
@@ -5339,6 +5385,16 @@ fn speedtest_line(s: &AppState) -> Line<'static> {
 }
 
 // --- formatting & color helpers -------------------------------------------
+
+/// An age as people read one: seconds only while they are still short,
+/// then the minutes/hours/days ladder ("2m", "1h 5m").
+fn fmt_ago(secs: u64) -> String {
+    if secs < 100 {
+        format!("{secs}s")
+    } else {
+        crate::util::fmt_minutes(secs / 60)
+    }
+}
 
 fn fmt_ms(v: Option<f64>) -> String {
     match v {
@@ -5657,7 +5713,10 @@ mod tests {
         ] {
             assert!(out.contains(label), "ladder is missing {label:?}");
         }
-        assert!(out.contains("cpu 8%"), "healthy rungs carry their data");
+        assert!(
+            out.contains("cpu usage 8%") && out.contains("avail memory"),
+            "healthy rungs carry their data"
+        );
         assert!(
             out.contains("[m] to watch"),
             "unknown rungs say how to fill them"
@@ -6717,6 +6776,44 @@ mod tests {
         assert!(crate::verdict::checks(&s).iter().all(|c| c.name != "ICMP"));
     }
 
+    /// The │ dividers of the dual view must sit in the same buffer column in
+    /// the header and every data row — a stray pad space inside one cell
+    /// once shifted the body's tcp divider a column right of its header.
+    #[test]
+    fn dual_view_dividers_align_between_header_and_rows() {
+        use crate::app::TargetStat;
+        use std::net::{IpAddr, Ipv4Addr};
+        let mut s = AppState::new(vec![
+            TargetStat::new("Cloudflare".into(), IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+            TargetStat::new("Google".into(), IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+        ]);
+        for t in &mut s.targets {
+            for _ in 0..20 {
+                t.record_reply(10.0);
+                t.tcp.record_reply(33.0);
+            }
+        }
+        s.focus = Panel::Quality;
+        s.fullscreen = true;
+        let mut t = Terminal::new(TestBackend::new(170, 40)).unwrap();
+        t.draw(|f| render(f, &s)).unwrap();
+        let buf = t.backend().buffer();
+        let dividers = |y: u16| -> Vec<u16> {
+            // Interior columns only: x=0 and the panel edge are borders.
+            (1..168u16)
+                .filter(|x| buf[(*x, y)].symbol() == "│")
+                .collect()
+        };
+        let header = dividers(2);
+        assert_eq!(
+            header.len(),
+            2,
+            "│ icmp and │ tcp in the header: {header:?}"
+        );
+        for y in 3..5 {
+            assert_eq!(dividers(y), header, "row {y} out of column");
+        }
+    }
     /// The quality table's second family: [i] flips the split view to the
     /// TCP connect series, an ICMP blackhole flips it automatically, and
     /// full screen shows both families behind the │tcp divider.
@@ -7219,7 +7316,7 @@ mod tests {
             "monitor every hop (MTR)",
             "pin / unpin row at the top",
             "whois: who owns address",
-            "cycle speed-test provider",
+            "cycle / add iPerf3 server",
             "procs → remotes → history",
             "full-screen: DNS + history",
             "events / ports / marker",

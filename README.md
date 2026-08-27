@@ -63,7 +63,8 @@ The panels:
   and next hops, traceroutes any target (`t`), and monitors every hop on a path
   MTR-style (`m`) with per-hop loss and latency; `W` asks who owns any address.
 - **Bandwidth** — live throughput, an on-demand speed test (`s`) with a choice
-  of provider (Cloudflare / M-Lab / LibreSpeed), and per-process talkers or the
+  of provider (Cloudflare / M-Lab / LibreSpeed / your own iPerf3 servers), and
+  per-process talkers or the
   same traffic by remote address (`n`). Speed-test history is kept.
 - **Network** — interface, connection type (Wi-Fi / Ethernet / cellular / VPN
   tunnel), addresses, gateway (v4 and v6), DNS with each resolver timed, Wi-Fi
@@ -238,6 +239,7 @@ octomon --help
 | `n` | Processes → remote addresses → speed-test history (full-screen) |
 | `W` / `a` | Whois the selected remote address / add it as a target |
 | `d` | Delete the selected speed test from the history (full-screen history pane) |
+| `I` | Add an iPerf3 server (`Name=host[:port]`) — saved to config, cycled with `v` |
 | `z` | Zoom the active table to 80% of the screen: every column, full names/addresses, per-process pid + path + command line, per-test server + network |
 | **Network** | |
 | `N` | Name this network ("Home", "Office") |
@@ -247,9 +249,15 @@ octomon --help
 ## Speed-test providers
 
 `v` cycles between **Cloudflare** (`speed.cloudflare.com`), **M-Lab** (NDT7,
-nearest server via M-Lab's locate service) and **LibreSpeed** (a public server
-from the community list, or your own via `librespeed_server`). Each run
-measures download, upload and loaded-latency bufferbloat, and is saved.
+nearest server via M-Lab's locate service), **LibreSpeed** (a public server
+from the community list, or your own via `librespeed_server`), and any
+**iPerf3** servers you add: press `I` in the Bandwidth panel and enter
+`Name=host[:port]` (port defaults to 5201) — saved to the config, selected,
+and on the `v` wheel from then on. Running one shells out to the `iperf3`
+binary (`brew install iperf3` / `apt install iperf3`) for 8 seconds each
+direction against a server *you* control — no third party at all. Each run
+measures download and upload (HTTP providers also measure loaded-latency
+bufferbloat), and is saved to the history.
 
 ## Configuration
 
@@ -286,6 +294,7 @@ contacts, and why:
 | `rdap.org` (→ ARIN, RIPE, APNIC, LACNIC, AFRINIC) and `stat.ripe.net`; the system `whois` as fallback | only when you press `W` | who owns that address / which ASN announces it | the address you asked about |
 | `github.com:22`, `smtp.gmail.com:25/465/587`, `imap.gmail.com:993`, `cloudflare.com:80/443`, `1.1.1.1:53/853/443` (`egress_checks`) | only when you press `c` | which ports this network lets out | a TCP handshake or one datagram; nothing further |
 | `speed.cloudflare.com` · `locate.measurementlab.net` + an M-Lab server · `librespeed.org` list + a LibreSpeed server | only when you press `s` | speed test | filler bytes |
+| Your own configured iPerf3 servers | only when you press `s` with one selected | speed test via the `iperf3` binary | filler bytes |
 
 Notes:
 

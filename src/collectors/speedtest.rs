@@ -34,6 +34,12 @@ pub enum Provider {
     },
     /// M-Lab locate service URL.
     Mlab(String),
+    /// A user-configured iPerf3 server (shells out to the iperf3 binary).
+    Iperf3 {
+        name: String,
+        host: String,
+        port: u16,
+    },
 }
 
 impl Provider {
@@ -46,7 +52,16 @@ impl Provider {
                 server: cfg.librespeed_server.clone(),
                 list_url: cfg.librespeed_server_list.clone(),
             }),
-            _ => None,
+            _ => name.strip_prefix("iPerf3 · ").and_then(|wanted| {
+                cfg.iperf3_servers
+                    .iter()
+                    .find(|srv| srv.name == wanted)
+                    .map(|srv| Provider::Iperf3 {
+                        name: srv.name.clone(),
+                        host: srv.host.clone(),
+                        port: srv.port,
+                    })
+            }),
         }
     }
 }
@@ -110,7 +125,9 @@ fn librespeed_spec(base: &str) -> HttpSpec {
     }
 }
 
-pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>, cfg: crate::config::Config) {
+// No Config parameter: providers resolve against a fresh file read per
+// trigger, so servers added mid-session run without a restart.
+pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>) {
     let client = match reqwest::Client::builder()
         .user_agent(crate::util::USER_AGENT)
         .pool_max_idle_per_host(STREAMS)
@@ -144,8 +161,11 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>, cfg: crate::
                 format!("speed test started ({name})"),
             );
         }
+        // Resolved against a fresh read of the config file, not the startup
+        // snapshot: an iPerf3 server added with [I] a minute ago must run.
+        let cfg_now = crate::config::Config::load();
         let result = match selected.as_deref() {
-            Some(name) => match Provider::from_name(name, &cfg) {
+            Some(name) => match Provider::from_name(name, &cfg_now) {
                 Some(provider) => run_provider(&client, &state, &provider).await,
                 None => Err(format!("unknown provider '{name}'")),
             },
@@ -228,6 +248,7 @@ async fn run_provider(
             run_http(client, state, spec).await
         }
         Provider::Mlab(locate) => ndt7::run(client, state, locate).await,
+        Provider::Iperf3 { name, host, port } => super::iperf3::run(state, name, host, *port).await,
     }
 }
 

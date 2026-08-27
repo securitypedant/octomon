@@ -9,6 +9,7 @@ pub mod edge;
 pub mod egress;
 pub mod hopmon;
 pub mod http;
+pub mod iperf3;
 pub mod logger;
 pub mod ndt7;
 pub mod netinfo;

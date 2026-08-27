@@ -152,11 +152,18 @@ async fn main() -> Result<()> {
     {
         // All providers are selectable; LibreSpeed reports a hint if it has no
         // server configured when actually run.
-        let provider_names = vec![
+        let mut provider_names = vec![
             "Cloudflare".to_string(),
             "M-Lab".to_string(),
             "LibreSpeed".to_string(),
         ];
+        // Every configured iPerf3 server is a provider of its own on the
+        // same [v] wheel, named so the history reads well.
+        provider_names.extend(
+            cfg.iperf3_servers
+                .iter()
+                .map(|srv| format!("iPerf3 · {}", srv.name)),
+        );
         let norm = |s: &str| s.to_lowercase().replace('-', "");
         let sel = provider_names
             .iter()
@@ -316,7 +323,6 @@ async fn main() -> Result<()> {
         tokio::spawn(collectors::speedtest::run(
             state.clone(),
             speedtest_trigger.clone(),
-            cfg.clone(),
         ));
     }
 
@@ -588,6 +594,8 @@ enum Side {
     HopMonitor(IpAddr, String),
     /// Look up who owns an address for the [W] overlay.
     Whois(IpAddr),
+    /// Persist an iPerf3 server added from the [I] prompt.
+    AddIperf3(config::Iperf3Server),
     /// Read the OS routing table for the [T] overlay (a blocking shell-out).
     LoadRoutes,
     SaveProvider(String),
@@ -875,6 +883,47 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
 
         match s.input_mode {
             // --- modal text entry: adding a target ---
+            InputMode::AddIperf3 => match key.code {
+                KeyCode::Enter => {
+                    let buf = s.input_buffer.trim().to_string();
+                    s.input_mode = InputMode::Normal;
+                    s.input_buffer.clear();
+                    if buf.is_empty() {
+                    } else {
+                        match config::parse_iperf3(&buf) {
+                            Ok(server) => {
+                                // Onto the [v] wheel at once — and selected,
+                                // since adding it is a statement of intent.
+                                let label = format!("iPerf3 · {}", server.name);
+                                if !s.speedtest_provider_names.contains(&label) {
+                                    s.speedtest_provider_names.push(label.clone());
+                                }
+                                s.speedtest_provider_idx = s
+                                    .speedtest_provider_names
+                                    .iter()
+                                    .position(|n| *n == label)
+                                    .unwrap_or(0);
+                                s.notice = Some(format!(
+                                    "iPerf3 server saved: {} ({}:{}) — [s] runs it",
+                                    server.name, server.host, server.port
+                                ));
+                                side = Side::AddIperf3(server);
+                            }
+                            Err(e) => s.notice = Some(format!("not saved — {e}")),
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    s.input_mode = InputMode::Normal;
+                    s.input_buffer.clear();
+                }
+                KeyCode::Backspace => {
+                    s.input_buffer.pop();
+                }
+                KeyCode::Char(c) if s.input_buffer.len() < 120 => s.input_buffer.push(c),
+                _ => {}
+            },
+
             InputMode::AddTarget => match key.code {
                 KeyCode::Enter => {
                     let buf = s.input_buffer.trim().to_string();
@@ -1440,6 +1489,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 KeyCode::Esc => {
                     if s.fullscreen {
                         s.fullscreen = false;
+                        s.q_col = s.q_col.min(6);
                     } else if s.quality_view != QualityView::Graph {
                         s.quality_view = QualityView::Graph;
                     }
@@ -1468,7 +1518,14 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 }
                 KeyCode::Tab => s.focus = next_panel(s.focus),
                 KeyCode::BackTab => s.focus = prev_panel(s.focus),
-                KeyCode::Char('f') => s.fullscreen = !s.fullscreen,
+                KeyCode::Char('f') => {
+                    s.fullscreen = !s.fullscreen;
+                    // The TCP sort columns only exist full screen; a cursor
+                    // left out there would be invisible in the split view.
+                    if !s.fullscreen {
+                        s.q_col = s.q_col.min(6);
+                    }
+                }
                 // On the talkers lists, 'p' pins the row under the cursor to
                 // the top and 'u' unpins it — a session-only watch list, so
                 // one row can be tracked while the rest keeps re-sorting.
@@ -1599,6 +1656,12 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.fullscreen = true;
                     s.overlay = Overlay::Zoom;
                 }
+                // Shift+I adds an iPerf3 server (Bandwidth panel): a name and
+                // where it listens, saved to the config and onto the [v] wheel.
+                KeyCode::Char('I') if s.focus == Panel::Bandwidth => {
+                    s.input_buffer.clear();
+                    s.input_mode = InputMode::AddIperf3;
+                }
                 // 'v' cycles the speed-test provider (Bandwidth panel) + persists.
                 KeyCode::Char('v') if s.focus == Panel::Bandwidth => {
                     let n = s.speedtest_provider_names.len();
@@ -1711,7 +1774,10 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.q_col = s.q_col.saturating_sub(1);
                 }
                 KeyCode::Right if s.focus == Panel::Quality => {
-                    s.q_col = (s.q_col + 1).min(6);
+                    // Full screen shows the TCP group too (columns 7–12);
+                    // the split view stops at the ICMP loss column.
+                    let max = if s.fullscreen { 12 } else { 6 };
+                    s.q_col = (s.q_col + 1).min(max);
                 }
                 // ←/→ walk the panel's addresses one at a time (the resolvers
                 // sit side by side, so sideways is natural there); ↑/↓ hop
@@ -1833,6 +1899,12 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
             }
         }
         Side::Whois(addr) => collectors::whois::start(ctx.state.clone(), addr),
+        Side::AddIperf3(server) => {
+            tokio::task::spawn_blocking(move || {
+                config::Config::persist_iperf3_added(&server);
+                config::Config::persist_provider(&format!("iPerf3 · {}", server.name));
+            });
+        }
         Side::LoadRoutes => {
             let state = ctx.state.clone();
             tokio::spawn(async move {

@@ -125,6 +125,11 @@ pub struct Config {
     /// answer. `--theme` overrides for one run.
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// User-added iPerf3 servers ([I] in the Bandwidth panel, or edit here):
+    /// each becomes a speed-test provider [v] cycles to. Running one shells
+    /// out to the `iperf3` binary, so it must be installed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iperf3_servers: Vec<Iperf3Server>,
     /// The edge check: octomon.dev's `/edge` endpoint reports how the
     /// Cloudflare edge sees this connection — the answering PoP, the ISP's
     /// AS, and the edge's own TCP RTT measurement. Exists purely to deepen
@@ -137,6 +142,52 @@ pub struct Config {
 
 fn default_edge_check_url() -> String {
     "https://octomon.dev/edge".to_string()
+}
+
+/// One iPerf3 server: a human name and where it listens.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Iperf3Server {
+    pub name: String,
+    pub host: String,
+    #[serde(default = "default_iperf3_port")]
+    pub port: u16,
+}
+
+fn default_iperf3_port() -> u16 {
+    5201
+}
+
+/// The [I] prompt's `Name=host[:port]` into a server, with the reason when it
+/// isn't one. The name is required — it is what [v] and the history show.
+pub fn parse_iperf3(text: &str) -> Result<Iperf3Server, String> {
+    let (name, addr) = text
+        .split_once('=')
+        .ok_or("expected Name=host[:port] — e.g. homelab=192.168.1.10")?;
+    let (name, addr) = (name.trim(), addr.trim());
+    if name.is_empty() {
+        return Err("a name is required before the '=' — it labels the provider".into());
+    }
+    let addr = addr
+        .strip_prefix("iperf3://")
+        .unwrap_or(addr)
+        .trim_end_matches('/');
+    let (host, port) = match addr.rsplit_once(':') {
+        // A bare IPv6 literal has colons of its own; only a trailing
+        // all-digit segment reads as a port.
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => (
+            h.trim_matches(['[', ']']),
+            p.parse::<u16>().map_err(|_| "port out of range")?,
+        ),
+        _ => (addr.trim_matches(['[', ']']), default_iperf3_port()),
+    };
+    if host.is_empty() {
+        return Err("a host is required after the '='".into());
+    }
+    Ok(Iperf3Server {
+        name: name.to_string(),
+        host: host.to_string(),
+        port,
+    })
 }
 
 fn default_theme() -> String {
@@ -248,6 +299,7 @@ impl Default for Config {
             bar_glyphs: "auto".to_string(),
             bandwidth_units: default_bandwidth_units(),
             theme: default_theme(),
+            iperf3_servers: Vec::new(),
             edge_check_url: default_edge_check_url(),
         }
     }
@@ -394,6 +446,16 @@ impl Config {
     /// preserving other settings.
     pub fn persist_provider(name: &str) {
         Self::update_on_disk(|cfg| cfg.speedtest_provider = name.to_string());
+    }
+
+    /// Remember an iPerf3 server added from the [I] prompt. Same name = an
+    /// update, so a typo'd host can be re-entered rather than duplicated.
+    pub fn persist_iperf3_added(server: &Iperf3Server) {
+        let server = server.clone();
+        Self::update_on_disk(move |cfg| {
+            cfg.iperf3_servers.retain(|s| s.name != server.name);
+            cfg.iperf3_servers.push(server);
+        });
     }
 
     /// Record that the first-run explainer has been shown (best-effort).
