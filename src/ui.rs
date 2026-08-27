@@ -1882,20 +1882,41 @@ fn triage_lines(s: &AppState, text_w: usize) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
-    // The record: is it always like this on this network?
+    // The record: is it always like this on this network? The summary packs
+    // many segments; folded at its separators to a modest width so this one
+    // line stops dictating how wide the whole box opens.
     if let Some(h) = s.history_summary()
         && h.episodes > 0
     {
-        lines.extend(column_lines(
-            vec![Span::styled(
-                " history ",
-                Style::new().fg(theme::bright()).bold(),
-            )],
-            &h.line(),
-            Style::new().fg(theme::text()),
-            9,
-            text_w,
-        ));
+        let mut rows: Vec<String> = vec![String::new()];
+        for seg in h.line().split(" · ") {
+            let cur = rows.last_mut().expect("starts non-empty");
+            if !cur.is_empty() && cur.len() + 3 + seg.len() > 58 {
+                rows.push(seg.to_string());
+            } else {
+                if !cur.is_empty() {
+                    cur.push_str(" · ");
+                }
+                cur.push_str(seg);
+            }
+        }
+        for (i, row) in rows.iter().enumerate() {
+            let prefix = if i == 0 {
+                vec![Span::styled(
+                    " history ",
+                    Style::new().fg(theme::bright()).bold(),
+                )]
+            } else {
+                vec![Span::raw("         ")]
+            };
+            lines.extend(column_lines(
+                prefix,
+                row,
+                Style::new().fg(theme::text()),
+                9,
+                text_w,
+            ));
+        }
         lines.push(Line::from(""));
     }
     match &s.verdict.current {
