@@ -2767,7 +2767,7 @@ pub fn checks(s: &AppState) -> Vec<Check> {
         // One glance's worth: the PoP, the ISP, the far end's RTT. City,
         // country and protocol details live in the Network panel's data,
         // not here.
-        let mut detail = e.colo.clone();
+        let mut detail = e.colo_label();
         if !e.isp.is_empty() {
             detail.push_str(&format!(" · {} (AS{})", e.isp, e.asn));
         }

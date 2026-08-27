@@ -83,6 +83,7 @@ pub fn parse(text: &str) -> Option<EdgeInfo> {
         asn: v["asn"].as_u64().unwrap_or(0) as u32,
         isp: s("isp"),
         colo,
+        colo_city: s("colo_city"),
         tcp_rtt_ms: v["tcp_rtt_ms"].as_f64(),
     })
 }
@@ -109,11 +110,12 @@ mod tests {
     fn edge_answers_parse_and_junk_does_not() {
         let info = parse(
             r#"{"ip":"203.0.113.9","asn":8075,"isp":"Microsoft Corporation",
-                "colo":"IAD","city":"Washington","country":"US",
+                "colo":"IAD","colo_city":"Ashburn","city":"Washington","country":"US",
                 "tcp_rtt_ms":9,"http":"HTTP/2","tls":"TLSv1.3","ts":1756240000}"#,
         )
         .expect("parses");
         assert_eq!(info.colo, "IAD");
+        assert_eq!(info.colo_city, "Ashburn");
         assert_eq!(info.asn, 8075);
         assert_eq!(info.tcp_rtt_ms, Some(9.0));
 

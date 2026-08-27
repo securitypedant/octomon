@@ -2008,11 +2008,25 @@ pub struct EdgeInfo {
     pub isp: String,
     /// IATA code of the answering Cloudflare PoP ("IAD").
     pub colo: String,
+    /// That PoP's city ("Ashburn"), when the endpoint knows it — the code
+    /// alone reads as trivia unless you fly a lot.
+    pub colo_city: String,
     /// The edge's SYN/SYN-ACK measurement of this client, in ms — an RTT
     /// reading that needs no ICMP and isn't taken by this machine. The
     /// endpoint also reports city/protocol details; the client keeps only
     /// what its surfaces show.
     pub tcp_rtt_ms: Option<f64>,
+}
+
+impl EdgeInfo {
+    /// "MIA (Miami)", or the bare code when the city isn't known.
+    pub fn colo_label(&self) -> String {
+        if self.colo_city.is_empty() {
+            self.colo.clone()
+        } else {
+            format!("{} ({})", self.colo, self.colo_city)
+        }
+    }
 }
 
 /// Which table the [z] zoom overlay is showing at 80% of the screen.
