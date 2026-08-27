@@ -2310,6 +2310,9 @@ pub struct AppState {
     /// The Cloudflare edge's view of this connection, when the `/edge` check
     /// is enabled and has answered. `None` = disabled, or not fetched yet.
     pub edge: Option<EdgeInfo>,
+    /// A newer released octomon version, when the edge check reports one —
+    /// mentioned once on the timeline and in the help title, never acted on.
+    pub update_available: Option<String>,
     /// Active target sort: (column, descending). None = insertion order.
     pub q_sort: Option<(usize, bool)>,
     /// Traceroute result for the current target, when requested.
@@ -2530,6 +2533,7 @@ impl AppState {
             q_col: 0,
             quality_family: None,
             edge: None,
+            update_available: None,
             q_sort: None,
             traceroute: None,
             hop_monitor: None,

@@ -4003,7 +4003,13 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     let outer = Block::bordered()
         .padding(Padding::new(1, 1, 0, 0))
         .title(Span::styled(
-            format!(" octomon v{} · Shortcuts ", crate::util::VERSION),
+            match &s.update_available {
+                Some(v) => format!(
+                    " octomon v{} · v{v} available · Shortcuts ",
+                    crate::util::VERSION
+                ),
+                None => format!(" octomon v{} · Shortcuts ", crate::util::VERSION),
+            },
             Style::new().bold(),
         ))
         .title_bottom(Span::styled(

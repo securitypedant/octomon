@@ -42,8 +42,25 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config, changed: Arc<Notify>)
         // none, and the panel row shows measurements, not health. A
         // *network change* is different: the old answer describes the old
         // path, so it is cleared below before the re-fetch.
-        if let Some(info) = fetch(&client, &with_reason(&url, why)).await {
-            state.lock().unwrap().edge = Some(info);
+        if let Some((info, latest)) = fetch(&client, &with_reason(&url, why)).await {
+            let mut s = state.lock().unwrap();
+            s.edge = Some(info);
+            // A newer release exists: say so once per version, on the
+            // timeline where it keeps. Mentioning is the whole feature —
+            // octomon never updates itself.
+            if newer_than(&latest, env!("CARGO_PKG_VERSION"))
+                && s.update_available.as_deref() != Some(latest.as_str())
+            {
+                s.push_event(
+                    crate::verdict::Severity::Info,
+                    crate::app::EventCategory::Logging,
+                    format!(
+                        "octomon v{latest} is available (you run v{}) — github.com/securitypedant/octomon/releases",
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                );
+                s.update_available = Some(latest);
+            }
         }
         tokio::select! {
             _ = changed.notified() => {
@@ -64,11 +81,29 @@ fn with_reason(url: &str, why: &str) -> String {
     format!("{url}{sep}why={why}")
 }
 
-async fn fetch(client: &reqwest::Client, url: &str) -> Option<EdgeInfo> {
+async fn fetch(client: &reqwest::Client, url: &str) -> Option<(EdgeInfo, String)> {
     let text = crate::util::fetch_text_capped(client, url, 4096)
         .await
         .ok()?;
-    parse(&text)
+    let latest = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v["latest"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    parse(&text).map(|info| (info, latest))
+}
+
+/// Strictly newer, on x.y.z triples; malformed strings are never "newer",
+/// so a broken answer can't nag anyone.
+fn newer_than(latest: &str, current: &str) -> bool {
+    fn triple(v: &str) -> Option<(u64, u64, u64)> {
+        let mut it = v.trim().trim_start_matches('v').split('.');
+        Some((
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+        ))
+    }
+    matches!((triple(latest), triple(current)), (Some(l), Some(c)) if l > c)
 }
 
 /// The `/edge` JSON into [`EdgeInfo`]; `None` when it isn't the expected
@@ -104,6 +139,19 @@ mod tests {
             with_reason("https://example.com/edge?token=x", "refresh"),
             "https://example.com/edge?token=x&why=refresh"
         );
+    }
+
+    #[test]
+    fn newer_only_when_strictly_newer_and_well_formed() {
+        use super::newer_than;
+        assert!(newer_than("0.9.1", "0.9.0"));
+        assert!(newer_than("1.0.0", "0.9.9"));
+        assert!(newer_than("v0.10.0", "0.9.1"), "0.10 beats 0.9 numerically");
+        assert!(!newer_than("0.9.1", "0.9.1"));
+        assert!(!newer_than("0.9.0", "0.9.1"));
+        // Junk never nags.
+        assert!(!newer_than("", "0.9.1"));
+        assert!(!newer_than("latest", "0.9.1"));
     }
 
     #[test]
