@@ -783,11 +783,13 @@ fn move_cursor(s: &mut AppState, delta: isize) {
             s.speed_sel = (s.speed_sel as isize + delta).clamp(0, last.max(0)) as usize;
         }
         // The network history list, newest first: "up" is toward the newest.
-        // The detail expansion is sticky on purpose: browsing entry to entry
-        // with the full story showing is what it was expanded for.
+        // Moving the cursor collapses an expanded detail block: the expansion
+        // answers "tell me about *this* entry", and dragging it along to the
+        // next row kept eating the list's rows after the question was done.
         Panel::NetInfo if secondary => {
             let last = s.net_history.len().saturating_sub(1) as isize;
             s.net_history_sel = (s.net_history_sel as isize + delta).clamp(0, last.max(0)) as usize;
+            s.net_detail_expanded = false;
         }
         // ↑/↓ hop between the panel's *rows* (ipv4 → ipv6 → gateway → dns…),
         // landing on each row's first address; ←/→ walk the entries within a
