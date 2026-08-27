@@ -76,6 +76,8 @@
     letter-spacing: 0.023em;
   }
   nav.links { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px 22px; font-family: var(--octo-mono); font-size: 0.95rem; }
+  /* mobile hamburger: pure CSS (checkbox), desktop never sees it */
+  .menu-btn { display: none; }
 
   section { padding: 56px 0; }
   section + section { border-top: 1px solid var(--octo-line); }
@@ -122,9 +124,19 @@
 
   @media (max-width: 600px) {
     .wrap { padding: 0 16px; }
-    nav.links { flex-basis: 100%; margin-left: 0; justify-content: space-between; gap: 6px 8px; font-size: 0.85rem; }
-    .nav { padding-bottom: 24px; }
-    .nav .mark { margin: 0 auto; }
+    /* hamburger: the mark keeps the left edge; links drop into a column
+       only when the burger is checked */
+    .menu-btn {
+      display: block; margin-left: auto; cursor: pointer;
+      font-size: 1.5rem; line-height: 1; color: var(--octo-white);
+      padding: 4px 8px; border: 1px solid var(--octo-line);
+      border-radius: var(--octo-radius-chip);
+    }
+    nav.links { display: none; }
+    .menu-toggle:checked ~ nav.links {
+      display: flex; flex-basis: 100%; flex-direction: column;
+      gap: 12px; padding: 8px 2px 12px; font-size: 1rem;
+    }
     section { padding: 44px 0; }
     .pagehead { padding: 40px 0 32px; }
     .card { padding: 16px; }
@@ -159,11 +171,14 @@
       </svg>
       <span class="wordmark">octomon</span>
     </a>
+    <input type="checkbox" id="menu" class="menu-toggle" hidden>
+    <label for="menu" class="menu-btn" aria-label="menu">&#9776;</label>
     <nav class="links" aria-label="site">
       <a href="/#install">install</a>
       <a href="/#features">features</a>
       <a href="/#video">video</a>
       <a href="/understand">faq</a>
+      <a href="/understand#glossary">glossary</a>
       <a href="/privacy">privacy</a>
       <a href="https://github.com/securitypedant/octomon">github</a>
     </nav>
@@ -356,7 +371,7 @@
       .join(" ");
     out += `<polyline points="${pts}" fill="none" stroke="#F4F7FA" stroke-width="1.5" stroke-dasharray="4 3"><title>estimated octomons running (avg per day)</title></polyline>`;
     out += `<text x="${W - PAD}" y="16" fill="#F4F7FA" font-size="10" text-anchor="end" font-family="monospace">est. running, peak ≈${estPeak < 10 ? estPeak.toFixed(1) : Math.round(estPeak)}</text>`;
-    estNote = " · fleet line = refresh calls ÷ 96.";
+    estNote = "";
   } else {
     estNote = " · the fleet-estimate line appears once 0.8.2+ clients start reporting call reasons.";
   }

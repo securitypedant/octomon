@@ -114,12 +114,6 @@ pub mod thresholds {
     /// the baseline on it forever means the location can never establish —
     /// which is exactly what the learned loss normals exist to grade against.
     pub const WEATHER_SECS: u64 = 600;
-    /// Bufferbloat only votes in the performance grade while the speed test
-    /// that measured it is this fresh. The grade reads as *current*
-    /// performance; a +294 ms reading from a quarter of an hour ago pinning
-    /// "poor" under four green rungs is a contradiction, not information (the
-    /// speed-test line keeps showing older results with their age).
-    pub const PERF_BLOAT_FRESH_SECS: u64 = 300;
 }
 use thresholds as th;
 
@@ -1944,9 +1938,9 @@ pub fn evaluate(s: &AppState) -> Triage {
             cause: Cause::Machine,
             severity: Severity::Info,
             confidence: Confidence::Likely,
-            summary: format!("memory pressure high ({:.0}%)", v.mem_pressure_pct),
+            summary: format!("memory nearly full ({:.0}%)", v.mem_pressure_pct),
             evidence: vec![format!(
-                "pressure {:.0}%, swap {} MiB used",
+                "memory {:.0}% unavailable, swap {} MiB used",
                 v.mem_pressure_pct,
                 v.swap_used / 1_048_576
             )],
@@ -2175,28 +2169,11 @@ fn performance(s: &AppState, with_data: &[&TargetStat]) -> Option<Performance> {
         format!("loss {loss:.0}%"),
         grade(loss, th::PERF_LOSS_STEPS_PCT),
     ));
-    // Bufferbloat, when a *fresh* speed test has measured it. Graded on the
-    // same boundaries the speed-test panel uses, so one +108 ms never reads
-    // "poor" there and something milder here. A stale reading no longer
-    // votes: the grade is "performance now", and a bad bloat number from a
-    // quarter of an hour ago pinning "poor" beneath all-green rungs is a
-    // contradiction — the speed-test line still shows it, with its age.
-    let bloat_fresh = s
-        .speedtest
-        .last_run
-        .is_some_and(|t| t.elapsed().as_secs() <= th::PERF_BLOAT_FRESH_SECS);
-    if let (true, Some(idle), Some(loaded)) = (
-        bloat_fresh,
-        s.speedtest.idle_latency_ms,
-        s.speedtest.loaded_latency_ms,
-    ) {
-        let bloat = (loaded - idle).max(0.0);
-        let [excellent, good, moderate, _] = th::BLOAT_STEPS_MS;
-        parts.push((
-            format!("bloat +{bloat:.0}ms"),
-            grade(bloat, [excellent, good, moderate]),
-        ));
-    }
+    // Bufferbloat deliberately does NOT vote here: it is measured by a
+    // speed test's deliberate saturation, a snapshot of one loaded moment,
+    // and letting it pin "poor" under minutes of clean live readings
+    // contradicted everything else on screen. The speed-test line and the
+    // Bufferbloat finding still report it, with its age.
 
     let worst = parts.iter().map(|(_, g)| *g).max().expect("parts nonempty");
     let detail = parts
@@ -2262,7 +2239,7 @@ fn build_rungs(
             "no data yet".to_string()
         } else {
             format!(
-                "cpu {:.0}% · pressure {:.0}%{}",
+                "cpu {:.0}% · memory {:.0}%{}",
                 v.cpu_pct,
                 v.mem_pressure_pct,
                 if v.throttled { " · THROTTLED" } else { "" }
@@ -2784,20 +2761,15 @@ pub fn checks(s: &AppState) -> Vec<Check> {
     // The edge's view, when the /edge check has answered: an independent,
     // ICMP-free vantage — the far end measured *us*.
     if let Some(e) = &s.edge {
-        let place = match (e.city.is_empty(), e.country.is_empty()) {
-            (false, false) => format!("{} ({}, {})", e.colo, e.city, e.country),
-            (false, true) => format!("{} ({})", e.colo, e.city),
-            _ => e.colo.clone(),
-        };
-        let mut detail = format!("Cloudflare PoP {place}");
+        // One glance's worth: the PoP, the ISP, the far end's RTT. City,
+        // country and protocol details live in the Network panel's data,
+        // not here.
+        let mut detail = e.colo.clone();
         if !e.isp.is_empty() {
-            detail.push_str(&format!(" · via {} (AS{})", e.isp, e.asn));
+            detail.push_str(&format!(" · {} (AS{})", e.isp, e.asn));
         }
         if let Some(r) = e.tcp_rtt_ms {
-            detail.push_str(&format!(" · its tcp rtt to us {r:.0}ms"));
-        }
-        if !e.http.is_empty() {
-            detail.push_str(&format!(" · {} {}", e.http, e.tls));
+            detail.push_str(&format!(" · edge rtt {r:.0}ms"));
         }
         // A public IP that disagrees with the edge's is worth a word: two
         // egress paths (a proxy for HTTP, a different route for the probe).
@@ -2808,10 +2780,7 @@ pub fn checks(s: &AppState) -> Vec<Check> {
             .map(|t| t.addr.to_string());
         let mismatch = public_seen.is_some_and(|p| !e.ip.is_empty() && p != e.ip);
         if mismatch {
-            detail.push_str(&format!(
-                " · saw us as {} — differs from the discovered public IP",
-                e.ip
-            ));
+            detail.push_str(&format!(" · saw us as {} (≠ public IP)", e.ip));
         }
         push(
             "edge",
@@ -3721,23 +3690,23 @@ mod tests {
     /// it is fresh: a +294 ms reading from a quarter-hour ago pinning "poor"
     /// under four green rungs contradicted everything else on screen.
     #[test]
-    fn stale_bloat_readings_do_not_vote_in_the_performance_grade() {
+    fn bloat_never_votes_in_the_performance_grade() {
+        // A speed test's bloat is one deliberately-loaded moment; letting it
+        // pin "poor" under minutes of clean live readings contradicted the
+        // rest of the screen. Fresh or stale, it stays off the grade line —
+        // the speed-test panel and the Bufferbloat finding still report it.
         let mut s = healthy_state();
         s.speedtest.idle_latency_ms = Some(12.0);
         s.speedtest.loaded_latency_ms = Some(306.0);
-
-        // Fresh test: the bad bloat is current performance and votes.
-        s.speedtest.last_run = Some(Instant::now());
-        let p = evaluate(&s).performance.expect("has data");
-        assert_eq!(p.grade, PerfGrade::Poor, "got: {}", p.detail);
-        assert!(p.detail.contains("bloat +294ms"), "{}", p.detail);
-
-        // The same reading a quarter of an hour later: dropped from the line
-        // (the speed-test panel still shows it, with its age).
-        s.speedtest.last_run = Instant::now().checked_sub(Duration::from_secs(900));
-        let p = evaluate(&s).performance.expect("has data");
-        assert_eq!(p.grade, PerfGrade::Excellent, "got: {}", p.detail);
-        assert!(!p.detail.contains("bloat"), "{}", p.detail);
+        for fresh in [
+            Some(Instant::now()),
+            Instant::now().checked_sub(Duration::from_secs(900)),
+        ] {
+            s.speedtest.last_run = fresh;
+            let p = evaluate(&s).performance.expect("has data");
+            assert_eq!(p.grade, PerfGrade::Excellent, "got: {}", p.detail);
+            assert!(!p.detail.contains("bloat"), "{}", p.detail);
+        }
     }
 
     /// Like [`probe`], but every reply at the given RTT.

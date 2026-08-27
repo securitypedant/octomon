@@ -83,11 +83,7 @@ pub fn parse(text: &str) -> Option<EdgeInfo> {
         asn: v["asn"].as_u64().unwrap_or(0) as u32,
         isp: s("isp"),
         colo,
-        city: s("city"),
-        country: s("country"),
         tcp_rtt_ms: v["tcp_rtt_ms"].as_f64(),
-        http: s("http"),
-        tls: s("tls"),
     })
 }
 

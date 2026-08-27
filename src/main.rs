@@ -1146,17 +1146,22 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.routes = None;
                     side = Side::LoadRoutes;
                 }
+                // Every scroll clamps to the overlay's exact bottom (same
+                // geometry the draw uses), so holding ↓ never banks presses
+                // that ↑ then has to pay back.
                 KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Routes => {
                     s.routes_scroll = s.routes_scroll.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') if s.overlay == Overlay::Routes => {
-                    s.routes_scroll = s.routes_scroll.saturating_add(1);
+                    let (_, th) = crossterm::terminal::size().unwrap_or((80, 24));
+                    s.routes_scroll = (s.routes_scroll + 1).min(ui::routes_scroll_cap(&s, th));
                 }
                 KeyCode::PageUp if s.overlay == Overlay::Routes => {
                     s.routes_scroll = s.routes_scroll.saturating_sub(10);
                 }
                 KeyCode::PageDown if s.overlay == Overlay::Routes => {
-                    s.routes_scroll = s.routes_scroll.saturating_add(10);
+                    let (_, th) = crossterm::terminal::size().unwrap_or((80, 24));
+                    s.routes_scroll = (s.routes_scroll + 10).min(ui::routes_scroll_cap(&s, th));
                 }
                 // A marker can be dropped with an overlay up too — reading
                 // the events list is exactly when one realises it is needed.
@@ -1259,13 +1264,15 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.whois_scroll = s.whois_scroll.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') if s.overlay == Overlay::Whois => {
-                    s.whois_scroll += 1; // clamped at draw time to the content
+                    let (tw, th) = crossterm::terminal::size().unwrap_or((80, 24));
+                    s.whois_scroll = (s.whois_scroll + 1).min(ui::whois_scroll_cap(&s, tw, th));
                 }
                 KeyCode::PageUp if s.overlay == Overlay::Whois => {
                     s.whois_scroll = s.whois_scroll.saturating_sub(10);
                 }
                 KeyCode::PageDown if s.overlay == Overlay::Whois => {
-                    s.whois_scroll += 10; // clamped at draw time to the content
+                    let (tw, th) = crossterm::terminal::size().unwrap_or((80, 24));
+                    s.whois_scroll = (s.whois_scroll + 10).min(ui::whois_scroll_cap(&s, tw, th));
                 }
                 // Scroll the analysis: a network change can raise more
                 // findings than a terminal is tall.
@@ -1273,13 +1280,15 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.triage_scroll = s.triage_scroll.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') if s.overlay == Overlay::Triage => {
-                    s.triage_scroll += 1; // clamped at draw time to the content
+                    let (tw, th) = crossterm::terminal::size().unwrap_or((80, 24));
+                    s.triage_scroll = (s.triage_scroll + 1).min(ui::triage_scroll_cap(&s, tw, th));
                 }
                 KeyCode::PageUp if s.overlay == Overlay::Triage => {
                     s.triage_scroll = s.triage_scroll.saturating_sub(10);
                 }
                 KeyCode::PageDown if s.overlay == Overlay::Triage => {
-                    s.triage_scroll += 10; // clamped at draw time to the content
+                    let (tw, th) = crossterm::terminal::size().unwrap_or((80, 24));
+                    s.triage_scroll = (s.triage_scroll + 10).min(ui::triage_scroll_cap(&s, tw, th));
                 }
                 // Scroll the timeline; clamped so it can't run past the oldest.
                 KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Events => {

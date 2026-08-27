@@ -84,15 +84,6 @@ pub fn jitter() -> Color {
     }
 }
 
-/// Sub-warning loss (above zero, below the warn threshold).
-pub fn mild_loss() -> Color {
-    if is_light() {
-        Color::Indexed(100)
-    } else {
-        Color::Rgb(200, 200, 120)
-    }
-}
-
 /// Cursor-row background (the blue-grey wash).
 pub fn sel_bg() -> Color {
     if is_light() {

@@ -632,12 +632,9 @@ fn egress_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn whois_overlay(f: &mut Frame, s: &AppState, area: Rect) {
-    let Some(w) = s.whois.as_ref() else {
-        return;
-    };
-    let width = 84u16.min(area.width);
-
+/// The whois overlay's content at a given box width — shared by the draw and
+/// by the exact scroll clamp in the input handler.
+fn whois_lines(w: &crate::app::Whois, width: u16) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
     let key = |k: &str| Span::styled(format!("{k:<12}"), Style::new().fg(theme::accent()));
     lines.push(Line::from(vec![
@@ -689,6 +686,15 @@ fn whois_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             Style::new().fg(theme::dim()),
         )));
     }
+    lines
+}
+
+fn whois_overlay(f: &mut Frame, s: &AppState, area: Rect) {
+    let Some(w) = s.whois.as_ref() else {
+        return;
+    };
+    let width = 84u16.min(area.width);
+    let lines = whois_lines(w, width);
 
     let max_h = (area.height * 4 / 5).max(1);
     let h = ((lines.len() as u16) + 2)
@@ -719,6 +725,44 @@ fn whois_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
     f.render_widget(Paragraph::new(shown), inner);
+}
+
+/// Exact upper bounds for the scrollable overlays' offsets, computed with
+/// the same geometry the draws use, so ↓ can never run the counter past the
+/// real bottom (which used to demand as many ↑ presses to come back).
+pub fn routes_scroll_cap(s: &AppState, term_h: u16) -> usize {
+    let lines = s.routes.as_ref().map_or(1, |r| r.len().max(1));
+    let max_h = (term_h * 4 / 5).max(1);
+    let h = (lines as u16)
+        .saturating_add(2)
+        .clamp(5.min(max_h), max_h)
+        .min(term_h);
+    lines.saturating_sub(h.saturating_sub(2) as usize)
+}
+
+pub fn whois_scroll_cap(s: &AppState, term_w: u16, term_h: u16) -> usize {
+    let Some(w) = s.whois.as_ref() else { return 0 };
+    let lines = whois_lines(w, 84u16.min(term_w)).len();
+    let max_h = (term_h * 4 / 5).max(1);
+    let h = (lines as u16)
+        .saturating_add(2)
+        .clamp(5.min(max_h), max_h)
+        .min(term_h);
+    lines.saturating_sub(h.saturating_sub(2) as usize)
+}
+
+pub fn triage_scroll_cap(s: &AppState, term_w: u16, term_h: u16) -> usize {
+    let widest = triage_lines(s, usize::MAX / 2)
+        .iter()
+        .map(|l| l.width())
+        .max()
+        .unwrap_or(60) as u16;
+    let max_w = term_w.saturating_sub(2).max(1);
+    let w = (widest + 4).clamp(78.min(max_w), max_w);
+    let text_w = w.saturating_sub(4).max(1) as usize;
+    let lines = triage_lines(s, text_w).len();
+    let visible = (lines as u16 + 2).min(term_h).saturating_sub(2) as usize;
+    lines.saturating_sub(visible)
 }
 
 /// The OS routing table, verbatim ([T]): what the kernel actually does with a
@@ -772,6 +816,7 @@ fn routes_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     let visible = rect.height.saturating_sub(2) as usize;
     let first = s.routes_scroll.min(lines.len().saturating_sub(visible));
     let below = lines.len().saturating_sub(first + visible);
+    let total = lines.len();
     let shown: Vec<Line> = lines.into_iter().skip(first).collect();
 
     f.render_widget(Clear, rect);
@@ -789,7 +834,9 @@ fn routes_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         .border_style(Style::new().fg(theme::accent()));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
-    f.render_widget(Paragraph::new(shown), inner);
+    // The scrollbar earns its column only when there is somewhere to go.
+    let body = scroll_cue(f, inner, total, first, visible);
+    f.render_widget(Paragraph::new(shown), body);
 }
 
 /// Greedy word wrap to `width` columns. A word wider than a whole line — a
@@ -862,8 +909,8 @@ fn column_lines(
 /// means at each place this machine has been.
 fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     let h = (area.height * 4 / 5).max(8.min(area.height));
-    // Three lines per location (name, stats, history).
-    let visible = (h.saturating_sub(2) as usize) / 3;
+    // Four lines per location: name, stats, history, and a separating blank.
+    let visible = (h.saturating_sub(2) as usize) / 4;
 
     let mut lines: Vec<Line> = Vec::new();
     // The list is what is on disk when the overlay opened, plus the network
@@ -897,6 +944,15 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                 None if loss.is_some_and(|l| l >= 90.0) => "no ICMP".into(),
                 None => "—".into(),
             };
+            // The stats render in fixed-width slots (label dim, value plain)
+            // so the entries line up into scannable columns instead of each
+            // row being its own dot-separated ribbon.
+            let slot = |label: &str, val: String, w: usize| -> Vec<Span<'static>> {
+                vec![
+                    Span::styled(format!("{label} "), Style::new().fg(theme::dim())),
+                    Span::styled(format!("{val:<w$}"), Style::new().fg(theme::text())),
+                ]
+            };
             for (i, (key, b)) in all.iter().enumerate().skip(first).take(visible.max(1)) {
                 let current = s.baseline_key.as_deref() == Some(key.as_str());
                 let selected = i == sel;
@@ -927,8 +983,11 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                     String::new()
                 };
                 if !medium.is_empty() {
+                    // "Wi-Fi (wireless)" earns its parenthetical elsewhere;
+                    // here one word per entry keeps the name row quiet.
+                    let short = medium.split(" (").next().unwrap_or(&medium);
                     name_row.push(Span::styled(
-                        format!("  · {medium}"),
+                        format!("  · {short}"),
                         Style::new().fg(theme::text()),
                     ));
                 }
@@ -948,34 +1007,34 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                     ));
                 }
                 lines.push(Line::from(name_row));
-                let speed = match (b.down_mbps, b.up_mbps) {
-                    (Some(d), Some(u)) => format!(" · speed {d:.0}↓/{u:.0}↑"),
-                    _ => String::new(),
-                };
-                let rssi = b
-                    .rssi_dbm
-                    .map(|r| format!(" · rssi ~{r:.0}dBm"))
-                    .unwrap_or_default();
-                // The ICMP-free normals, when learned: on a network that
-                // blackholes ping these are the only latency the location
-                // knows, and they sit right beside the "no ICMP" that
-                // explains the gaps.
-                let http_normals = match (b.anchor_tcp_ms, b.web_ttfb_ms) {
-                    (Some(t), Some(w)) => format!(" · tcp ~{t:.0}ms · web ~{w:.0}ms"),
-                    (Some(t), None) => format!(" · tcp ~{t:.0}ms"),
-                    (None, Some(w)) => format!(" · web ~{w:.0}ms"),
-                    (None, None) => String::new(),
-                };
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "  gateway {} · internet {}{http_normals} · DNS {}{rssi}{speed} · {} healthy",
-                        ms(b.gateway_ms, b.gateway_loss_pct),
-                        ms(b.anchor_ms, b.anchor_loss_pct),
-                        ms(b.dns_ms, None),
-                        crate::util::fmt_minutes(b.samples as u64)
-                    ),
-                    Style::new().fg(theme::text()),
-                )));
+                // Every slot appears in every row ("—" when unlearned), so
+                // the numbers form columns the eye can walk vertically.
+                let mut stats: Vec<Span> = vec![Span::raw("  ")];
+                stats.extend(slot("gateway", ms(b.gateway_ms, b.gateway_loss_pct), 8));
+                stats.extend(slot("internet", ms(b.anchor_ms, b.anchor_loss_pct), 8));
+                stats.extend(slot("tcp", ms(b.anchor_tcp_ms, None), 7));
+                stats.extend(slot("web", ms(b.web_ttfb_ms, None), 7));
+                stats.extend(slot("DNS", ms(b.dns_ms, None), 7));
+                stats.extend(slot(
+                    "rssi",
+                    b.rssi_dbm
+                        .map(|r| format!("{r:.0}dBm"))
+                        .unwrap_or_else(|| "—".into()),
+                    7,
+                ));
+                stats.extend(slot(
+                    "speed",
+                    match (b.down_mbps, b.up_mbps) {
+                        (Some(d), Some(u)) => format!("{d:.0}↓/{u:.0}↑"),
+                        _ => "—".into(),
+                    },
+                    9,
+                ));
+                stats.push(Span::styled(
+                    format!("{} healthy", crate::util::fmt_minutes(b.samples as u64)),
+                    Style::new().fg(theme::dim()),
+                ));
+                lines.push(Line::from(stats));
                 // What has gone wrong here lately, if anything has.
                 let h = crate::history::summarise(&s.history, key, crate::history::WINDOW_DAYS);
                 lines.push(Line::from(Span::styled(
@@ -986,6 +1045,7 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                         theme::dim()
                     }),
                 )));
+                lines.push(Line::from(""));
             }
         }
     }
@@ -1740,192 +1800,195 @@ fn severity_color(sev: Severity) -> Color {
 /// The triage ladder: every subsystem's status with its data — healthy rungs
 /// included, so the verdict is auditable rather than oracular — then the active
 /// findings with their evidence.
+/// The analysis overlay's content at a given text width — shared by the
+/// draw and by the exact scroll clamp in the input handler, so the offset
+/// can never run past the real bottom.
+fn triage_lines(s: &AppState, text_w: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = Vec::new();
+
+    let status_glyph = |st: RungStatus| match st {
+        RungStatus::Ok => ("✓", Color::Green),
+        RungStatus::Warn => ("~", theme::warn()),
+        RungStatus::Bad => ("✗", Color::Red),
+        RungStatus::Unknown => ("?", theme::dim()),
+    };
+    for r in &s.verdict.triage.rungs {
+        let (glyph, color) = status_glyph(r.status);
+        lines.extend(column_lines(
+            vec![
+                Span::styled(format!(" {glyph} "), Style::new().fg(color).bold()),
+                Span::styled(
+                    format!("{:<15}", r.area.label()),
+                    Style::new().fg(theme::bright()),
+                ),
+            ],
+            &r.detail,
+            Style::new().fg(theme::text()),
+            18,
+            text_w,
+        ));
+    }
+
+    // The background checks: things that are not a rung but a person wants
+    // to see were done — clock, proxy, path MTU, NAT, DNS honesty.
+    if !s.verdict.triage.checks.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " checks",
+            Style::new().fg(theme::bright()).bold(),
+        )));
+        for c in &s.verdict.triage.checks {
+            let (glyph, color) = status_glyph(c.status);
+            lines.extend(column_lines(
+                vec![
+                    Span::styled(format!(" {glyph} "), Style::new().fg(color).bold()),
+                    Span::styled(format!("{:<15}", c.name), Style::new().fg(theme::bright())),
+                ],
+                &c.detail,
+                Style::new().fg(theme::text()),
+                18,
+                text_w,
+            ));
+        }
+    }
+
+    // The absolute read, so "all green" cannot be mistaken for "fast":
+    // the rungs grade against this location's normal, this line grades
+    // the same numbers on a universal scale.
+    if let Some(p) = &s.verdict.triage.performance {
+        use crate::verdict::PerfGrade;
+        let color = match p.grade {
+            PerfGrade::Excellent | PerfGrade::Good => Color::Green,
+            PerfGrade::Fair => theme::warn(),
+            PerfGrade::Poor => Color::Red,
+        };
+        lines.push(Line::from(""));
+        // Same column geometry as the rungs, so the readings line up.
+        lines.extend(column_lines(
+            vec![
+                Span::styled(
+                    format!("   {:<15}", "performance"),
+                    Style::new().fg(theme::bright()).bold(),
+                ),
+                Span::styled(
+                    format!("{} — ", p.grade.label()),
+                    Style::new().fg(color).bold(),
+                ),
+            ],
+            &p.detail,
+            Style::new().fg(theme::text()),
+            18,
+            text_w,
+        ));
+    }
+
+    lines.push(Line::from(""));
+    // The record: is it always like this on this network?
+    if let Some(h) = s.history_summary()
+        && h.episodes > 0
+    {
+        lines.extend(column_lines(
+            vec![Span::styled(
+                " history ",
+                Style::new().fg(theme::bright()).bold(),
+            )],
+            &h.line(),
+            Style::new().fg(theme::text()),
+            9,
+            text_w,
+        ));
+        lines.push(Line::from(""));
+    }
+    match &s.verdict.current {
+        Verdict::Insufficient(reason) => {
+            lines.push(Line::from(Span::styled(
+                format!(" {reason}"),
+                Style::new().fg(theme::dim()),
+            )));
+        }
+        Verdict::Healthy => {
+            // On an ICMP-blackholed network "healthy" rests on web + DNS
+            // evidence alone — say so, or the empty quality table and the
+            // green verdict read as contradicting each other.
+            let qualifier = if crate::verdict::icmp_blackholed(s) {
+                " (judged on web + DNS — this network blocks ICMP)"
+            } else {
+                ""
+            };
+            lines.push(Line::from(Span::styled(
+                format!(" no findings — connection looks healthy{qualifier}"),
+                Style::new().fg(Color::Green),
+            )));
+        }
+        Verdict::Problems(findings) => {
+            lines.push(Line::from(Span::styled(
+                " Findings",
+                Style::new().fg(theme::bright()).bold(),
+            )));
+            for finding in findings {
+                // Confidence stays internal (it drives the ranking); the
+                // evidence lines below make the case in words instead.
+                let mut head = column_lines(
+                    vec![Span::styled(
+                        " ▲ ",
+                        Style::new().fg(severity_color(finding.severity)).bold(),
+                    )],
+                    &finding.summary,
+                    Style::new().fg(severity_color(finding.severity)).bold(),
+                    3,
+                    text_w,
+                );
+                // Duration / symptom tags ride on the headline's last
+                // line when they fit, and take their own line when not.
+                let mut tags: Vec<Span> = Vec::new();
+                if let Some(d) = active_for(finding) {
+                    tags.push(Span::styled(
+                        format!("  · for {d}"),
+                        Style::new().fg(theme::text()),
+                    ));
+                }
+                if finding.symptom {
+                    tags.push(Span::styled(
+                        "  · symptom of the above",
+                        Style::new().fg(theme::dim()),
+                    ));
+                }
+                if !tags.is_empty() {
+                    let tags_w: usize = tags.iter().map(|t| t.width()).sum();
+                    let last = head.last_mut().expect("column_lines is never empty");
+                    if last.width() + tags_w <= text_w {
+                        for t in tags {
+                            last.push_span(t);
+                        }
+                    } else {
+                        let mut spans = vec![Span::raw("   ")];
+                        spans.extend(tags);
+                        head.push(Line::from(spans));
+                    }
+                }
+                lines.extend(head);
+                for e in &finding.evidence {
+                    lines.extend(column_lines(
+                        vec![Span::raw("     ")],
+                        e,
+                        Style::new().fg(theme::dim()),
+                        5,
+                        text_w,
+                    ));
+                }
+            }
+        }
+    }
+    lines
+}
+
 fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     // Built twice: once unwrapped to learn how wide the content wants to be,
     // then again wrapped to the width the box actually got — so every long
     // detail, headline and evidence line continues in its own column instead
     // of sliding under the glyph and label to its left.
-    let build = |text_w: usize| -> Vec<Line> {
-        let mut lines: Vec<Line> = Vec::new();
-
-        let status_glyph = |st: RungStatus| match st {
-            RungStatus::Ok => ("✓", Color::Green),
-            RungStatus::Warn => ("~", theme::warn()),
-            RungStatus::Bad => ("✗", Color::Red),
-            RungStatus::Unknown => ("?", theme::dim()),
-        };
-        for r in &s.verdict.triage.rungs {
-            let (glyph, color) = status_glyph(r.status);
-            lines.extend(column_lines(
-                vec![
-                    Span::styled(format!(" {glyph} "), Style::new().fg(color).bold()),
-                    Span::styled(
-                        format!("{:<15}", r.area.label()),
-                        Style::new().fg(theme::bright()),
-                    ),
-                ],
-                &r.detail,
-                Style::new().fg(theme::text()),
-                18,
-                text_w,
-            ));
-        }
-
-        // The background checks: things that are not a rung but a person wants
-        // to see were done — clock, proxy, path MTU, NAT, DNS honesty.
-        if !s.verdict.triage.checks.is_empty() {
-            lines.push(Line::from(Span::styled(
-                " checks",
-                Style::new().fg(theme::bright()).bold(),
-            )));
-            for c in &s.verdict.triage.checks {
-                let (glyph, color) = status_glyph(c.status);
-                lines.extend(column_lines(
-                    vec![
-                        Span::styled(format!(" {glyph} "), Style::new().fg(color).bold()),
-                        Span::styled(format!("{:<15}", c.name), Style::new().fg(theme::bright())),
-                    ],
-                    &c.detail,
-                    Style::new().fg(theme::text()),
-                    18,
-                    text_w,
-                ));
-            }
-        }
-
-        // The absolute read, so "all green" cannot be mistaken for "fast":
-        // the rungs grade against this location's normal, this line grades
-        // the same numbers on a universal scale.
-        if let Some(p) = &s.verdict.triage.performance {
-            use crate::verdict::PerfGrade;
-            let color = match p.grade {
-                PerfGrade::Excellent | PerfGrade::Good => Color::Green,
-                PerfGrade::Fair => theme::warn(),
-                PerfGrade::Poor => Color::Red,
-            };
-            lines.push(Line::from(""));
-            // Same column geometry as the rungs, so the readings line up.
-            lines.extend(column_lines(
-                vec![
-                    Span::styled(
-                        format!("   {:<15}", "performance"),
-                        Style::new().fg(theme::bright()).bold(),
-                    ),
-                    Span::styled(
-                        format!("{} — ", p.grade.label()),
-                        Style::new().fg(color).bold(),
-                    ),
-                ],
-                &p.detail,
-                Style::new().fg(theme::text()),
-                18,
-                text_w,
-            ));
-        }
-
-        lines.push(Line::from(""));
-        // The record: is it always like this on this network?
-        if let Some(h) = s.history_summary()
-            && h.episodes > 0
-        {
-            lines.extend(column_lines(
-                vec![Span::styled(
-                    " history ",
-                    Style::new().fg(theme::bright()).bold(),
-                )],
-                &h.line(),
-                Style::new().fg(theme::text()),
-                9,
-                text_w,
-            ));
-            lines.push(Line::from(""));
-        }
-        match &s.verdict.current {
-            Verdict::Insufficient(reason) => {
-                lines.push(Line::from(Span::styled(
-                    format!(" {reason}"),
-                    Style::new().fg(theme::dim()),
-                )));
-            }
-            Verdict::Healthy => {
-                // On an ICMP-blackholed network "healthy" rests on web + DNS
-                // evidence alone — say so, or the empty quality table and the
-                // green verdict read as contradicting each other.
-                let qualifier = if crate::verdict::icmp_blackholed(s) {
-                    " (judged on web + DNS — this network blocks ICMP)"
-                } else {
-                    ""
-                };
-                lines.push(Line::from(Span::styled(
-                    format!(" no findings — connection looks healthy{qualifier}"),
-                    Style::new().fg(Color::Green),
-                )));
-            }
-            Verdict::Problems(findings) => {
-                lines.push(Line::from(Span::styled(
-                    " Findings",
-                    Style::new().fg(theme::bright()).bold(),
-                )));
-                for finding in findings {
-                    // Confidence stays internal (it drives the ranking); the
-                    // evidence lines below make the case in words instead.
-                    let mut head = column_lines(
-                        vec![Span::styled(
-                            " ▲ ",
-                            Style::new().fg(severity_color(finding.severity)).bold(),
-                        )],
-                        &finding.summary,
-                        Style::new().fg(severity_color(finding.severity)).bold(),
-                        3,
-                        text_w,
-                    );
-                    // Duration / symptom tags ride on the headline's last
-                    // line when they fit, and take their own line when not.
-                    let mut tags: Vec<Span> = Vec::new();
-                    if let Some(d) = active_for(finding) {
-                        tags.push(Span::styled(
-                            format!("  · for {d}"),
-                            Style::new().fg(theme::text()),
-                        ));
-                    }
-                    if finding.symptom {
-                        tags.push(Span::styled(
-                            "  · symptom of the above",
-                            Style::new().fg(theme::dim()),
-                        ));
-                    }
-                    if !tags.is_empty() {
-                        let tags_w: usize = tags.iter().map(|t| t.width()).sum();
-                        let last = head.last_mut().expect("column_lines is never empty");
-                        if last.width() + tags_w <= text_w {
-                            for t in tags {
-                                last.push_span(t);
-                            }
-                        } else {
-                            let mut spans = vec![Span::raw("   ")];
-                            spans.extend(tags);
-                            head.push(Line::from(spans));
-                        }
-                    }
-                    lines.extend(head);
-                    for e in &finding.evidence {
-                        lines.extend(column_lines(
-                            vec![Span::raw("     ")],
-                            e,
-                            Style::new().fg(theme::dim()),
-                            5,
-                            text_w,
-                        ));
-                    }
-                }
-            }
-        }
-        lines
-    };
-
     // As wide as the content wants, up to nearly the terminal: a finding's
     // headline with its duration should not wrap when there is room.
-    let widest = build(usize::MAX / 2)
+    let widest = triage_lines(s, usize::MAX / 2)
         .iter()
         .map(|l| l.width())
         .max()
@@ -1936,7 +1999,7 @@ fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     let w = (widest + 4).clamp(78.min(max_w), max_w);
     // Border + 1-column padding each side.
     let text_w = w.saturating_sub(4).max(1) as usize;
-    let lines = build(text_w);
+    let lines = triage_lines(s, text_w);
     let h = (lines.len() as u16 + 2).min(area.height);
     // Sit below centre rather than on it: the graphs the analysis is read
     // against live in the top half of the screen, and a centred box covers
@@ -2192,7 +2255,7 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     // own labelled divider — the ICMP group keeps the sort; the tcp divider
     // carries a leading space so the groups don't run into each other.
     if dual {
-        header_cells.push(divider("│icmp"));
+        header_cells.push(divider("│ icmp"));
     }
     if dual || family == crate::app::ProbeFamily::Icmp {
         header_cells.extend([hcell(1, "last"), hcell(2, "avg"), hcell(3, "p95")]);
@@ -2208,7 +2271,7 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         header_cells.extend([plain("jit"), plain("loss")]);
     }
     if dual {
-        header_cells.push(divider(" │tcp"));
+        header_cells.push(divider("│ tcp"));
         header_cells.extend([plain("last"), plain("avg"), plain("p95")]);
         if tcp_max {
             header_cells.push(plain("max"));
@@ -2328,7 +2391,7 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         Constraint::Min(16),
     ];
     if dual {
-        widths.push(Constraint::Length(5)); // the │icmp divider
+        widths.push(Constraint::Length(6)); // the "│ icmp" divider
     }
     widths.extend([
         Constraint::Length(8),
@@ -2338,9 +2401,11 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     if icmp_max {
         widths.push(Constraint::Length(8));
     }
-    widths.extend([Constraint::Length(6), Constraint::Length(6)]);
+    // loss needs five cells at most ("100%↓"); six left a ragged gap
+    // between the icmp block and the tcp divider.
+    widths.extend([Constraint::Length(6), Constraint::Length(5)]);
     if dual {
-        widths.push(Constraint::Length(5)); // the ' │tcp' divider
+        widths.push(Constraint::Length(5)); // the "│ tcp" divider
         widths.extend([
             Constraint::Length(8),
             Constraint::Length(8),
@@ -2684,31 +2749,48 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                 return Row::new(cells).style(style);
             };
             let loss = stat.recent_loss_pct(n);
-            let st = stat.stats(n);
-            let mut style =
-                Style::new().fg(latency_color(stat.last_rtt_ms, loss, stat.floor_ms(), None));
+            // The same per-cell grading the target table uses, so the two
+            // tables read with one rulebook: each stat colours itself, and
+            // recovery greens from the left. A lossy *middle* hop is a
+            // router deprioritising ICMP, not a fault — it reads dim; the
+            // destination's loss is real and keeps its colour.
+            let mid_hop_policy = loss >= th::LOSS_DOWN_PCT && h.addr != Some(m.dest);
+            let nums = FamilyNums {
+                last: stat.last_rtt_ms,
+                jitter: stat.jitter_ms,
+                st: stat.stats(n),
+                loss,
+                now_loss: stat.recent_loss_pct(th::RECENT.min(n)),
+                stale: stat.stats_stale(n),
+                rtt_ref: stat.floor_ms(),
+                loss_ref: None,
+                excused: false,
+                probed: true,
+            };
+            let identity = if mid_hop_policy {
+                theme::dim()
+            } else {
+                latency_color(
+                    stat.last_rtt_ms,
+                    stat.recent_loss_pct(th::RECENT.min(n)),
+                    stat.floor_ms(),
+                    None,
+                )
+            };
+            let mut style = Style::new();
             if selected {
                 style = style.bg(theme::sel_bg()).add_modifier(Modifier::BOLD);
             }
             let mut cells = vec![
-                Cell::from(hop_ttl(h)),
-                Cell::from(
+                Cell::from(Span::styled(hop_ttl(h), Style::new().fg(identity))),
+                Cell::from(Span::styled(
                     h.addr
                         .map(|a| a.to_string())
                         .unwrap_or_else(|| "*".to_string()),
-                ),
-                Cell::from(fmt_ms(stat.last_rtt_ms)),
-                Cell::from(fmt_ms(st.mean)),
-                Cell::from(fmt_ms(st.p95)),
+                    Style::new().fg(identity),
+                )),
             ];
-            if show_max {
-                cells.push(Cell::from(fmt_ms(st.max)));
-            }
-            cells.push(Cell::from(format!("{:.1}", stat.jitter_ms)));
-            cells.push(Cell::from(Span::styled(
-                format!("{loss:.0}%"),
-                Style::new().fg(loss_color(loss)),
-            )));
+            cells.extend(family_cells(&nums, mid_hop_policy, show_max));
             Row::new(cells).style(style)
         }
     });
@@ -2891,17 +2973,6 @@ fn hop_chart(f: &mut Frame, m: &crate::app::HopMonitor, n: usize, area: Rect, ma
                 .labels([Line::from("0"), Line::from(format!("{ymax:.0}ms"))]),
         );
     f.render_widget(chart, inner);
-}
-
-/// Loss deserves its own scale: any sustained loss matters, unlike latency where
-/// tens of milliseconds are unremarkable.
-fn loss_color(pct: f64) -> Color {
-    match pct {
-        p if p >= th::LOSS_BAD_PCT => Color::Red,
-        p if p >= th::LOSS_WARN_PCT => theme::warn(),
-        p if p > 0.0 => theme::mild_loss(),
-        _ => Color::Green,
-    }
 }
 
 /// Live traceroute hop list for the current target.
@@ -4292,10 +4363,6 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         lines.push(Line::from(vec![
             Span::styled(format!("{:<9}", "public"), Style::new().fg(theme::dim())),
             hl(NetSlot::Public, t.addr.to_string()),
-            Span::styled(
-                "  · how the internet sees you",
-                Style::new().fg(theme::dim()),
-            ),
         ]));
     }
 
@@ -6676,8 +6743,8 @@ mod tests {
         s.focus = Panel::Quality;
         s.fullscreen = true;
         let out = draw(&s, 170, 45);
-        assert!(out.contains("│icmp"), "icmp group labelled in dual view");
-        assert!(out.contains("│tcp"));
+        assert!(out.contains("│ icmp"), "icmp group labelled in dual view");
+        assert!(out.contains("│ tcp"));
         assert!(out.contains("33.0ms"), "tcp numbers in the dual view");
 
         // The performance grade rides the TCP series while ICMP is blind.
