@@ -4424,7 +4424,7 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         }
         let mut spans = vec![
             Span::styled(format!("{:<9}", "edge"), Style::new().fg(theme::dim())),
-            Span::styled(e.colo.clone(), Style::new().fg(theme::text())),
+            Span::styled(e.colo_label(), Style::new().fg(theme::text())),
             Span::styled(" · nearest Cloudflare PoP", Style::new().fg(theme::dim())),
         ];
         if let Some(rtt) = e.tcp_rtt_ms {
@@ -6845,6 +6845,27 @@ mod tests {
             assert_eq!(dividers(y), header, "row {y} out of column");
         }
     }
+    /// The edge row names the PoP's city. Pinned by test because the label
+    /// helper once made it into the analysis but not the Network panel.
+    #[test]
+    fn edge_row_names_the_colo_city() {
+        let mut s = AppState::new(vec![]);
+        s.edge = Some(crate::app::EdgeInfo {
+            ip: "203.0.113.9".into(),
+            asn: 33363,
+            isp: "Charter Communications, Inc".into(),
+            colo: "MIA".into(),
+            colo_city: "Miami".into(),
+            tcp_rtt_ms: Some(13.0),
+        });
+        let out = draw(&s, 170, 45);
+        assert!(
+            out.contains("MIA (Miami)"),
+            "colo city in the Network panel"
+        );
+        assert!(out.contains("Charter Communications"), "isp row present");
+    }
+
     /// The quality table's second family: [i] flips the split view to the
     /// TCP connect series, an ICMP blackhole flips it automatically, and
     /// full screen shows both families behind the │tcp divider.
