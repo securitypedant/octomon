@@ -150,7 +150,21 @@ async fn probe(client: &reqwest::Client, p: &Provider) -> (FamilyProbe, Option<f
     let start = Instant::now();
     let resp = match client.get(p.url).send().await {
         Ok(r) => r,
-        Err(e) => return (FamilyProbe::Fail(short_reason(&e)), None),
+        Err(e) => {
+            // The panel shows the short reason; the log keeps the full chain,
+            // which is where "certificate signed by an unknown authority" and
+            // the rest of the useful detail lives.
+            crate::errlog::log(
+                "http-probe",
+                format!(
+                    "{} ({}): {}",
+                    p.name,
+                    p.url,
+                    crate::util::describe_error(&e)
+                ),
+            );
+            return (FamilyProbe::Fail(short_reason(&e)), None);
+        }
     };
     let rtt_ms = start.elapsed().as_secs_f64() * 1000.0;
     let status = resp.status().as_u16();

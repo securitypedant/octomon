@@ -1616,6 +1616,8 @@ fn context_line(s: &AppState) -> Line<'static> {
             let mut v = vec![
                 key("[r]"),
                 txt("efresh "),
+                key("[G]"),
+                txt("rescan "),
                 key("[N]"),
                 txt("ame "),
                 key("[L]"),
@@ -3982,11 +3984,13 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         row("s", "run speed test"),
         row("P", "pause / resume the display"),
         row("r", "re-probe network info"),
+        row("G", "rescan gateway/hops/IP"),
         row("w", "stats window 30s/1m/5m/15m"),
         row("l / D", "CSV recording / zip bundle"),
-        row("y", "connection analysis"),
         row("e / c / M", "events / ports / marker"),
-        row("T", "routing table"),
+        // Paired to keep the left column inside 24 rows, which is what the
+        // whole overlay is sized against.
+        row("y / T", "analysis / routing table"),
         row("?", "toggle this help"),
         row("q / Ctrl+C", "quit"),
         Line::from(""),
@@ -7459,6 +7463,7 @@ mod tests {
             "s",
             "p",
             "r",
+            "G",
             "w",
             "l",
             "?",
@@ -7504,7 +7509,8 @@ mod tests {
             "filter rows (Esc clears)",
             "events / ports / marker",
             "del. speed test / zoom",
-            "routing table",
+            "analysis / routing table",
+            "rescan gateway/hops/IP",
         ] {
             assert!(
                 out.contains(desc),

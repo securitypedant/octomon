@@ -89,14 +89,21 @@ async fn probe(client: &reqwest::Client, url: &str) -> (Outcome, f64) {
 }
 
 pub async fn run(state: Arc<Mutex<AppState>>) {
-    let Ok(client) = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .user_agent(crate::util::USER_AGENT)
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(4))
         .build()
-    else {
-        return;
+    {
+        Ok(c) => c,
+        Err(e) => {
+            crate::errlog::log(
+                "web-probe",
+                format!("could not build an HTTP client: {e} — no TCP :443 column this session"),
+            );
+            return;
+        }
     };
 
     // Per-target schedule, keyed by stable id; entries for deleted targets

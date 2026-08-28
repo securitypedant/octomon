@@ -181,7 +181,15 @@ export default {
         headers: { allow: "GET, HEAD" },
       });
     }
-    const key = decodeURIComponent(url.pathname.slice("/apt/".length));
+    // decodeURIComponent throws on a malformed escape ("/apt/%"), which would
+    // surface as a 500. apt asking for nonsense deserves a 400, not an error
+    // page that reads like the repository is broken.
+    let key;
+    try {
+      key = decodeURIComponent(url.pathname.slice("/apt/".length));
+    } catch {
+      return new Response("bad request\n", { status: 400 });
+    }
     if (!key) {
       return new Response("octomon apt repository\n", {
         headers: { "content-type": "text/plain; charset=utf-8" },

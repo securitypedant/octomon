@@ -28,11 +28,23 @@ impl Clients {
     pub fn open() -> (Self, Option<String>) {
         let v4 = Client::new(&surge_ping::Config::default());
         let v4_err = v4.as_ref().err().map(|e| e.to_string());
+        if let Some(e) = &v4_err {
+            crate::errlog::log(
+                "icmp",
+                format!("no IPv4 ICMP socket: {e} — every latency probe is dead this session"),
+            );
+        }
         let v6 = Client::new(
             &surge_ping::Config::builder()
                 .kind(surge_ping::ICMP::V6)
                 .build(),
         );
+        if let Err(e) = &v6 {
+            // Normal on plenty of machines and only matters where a v6 target
+            // exists, so it never reaches the UI — but it is the reason a v6
+            // hop silently never gets probed.
+            crate::errlog::log("icmp", format!("no IPv6 ICMP socket: {e}"));
+        }
         (
             Self {
                 v4: v4.ok().map(Arc::new),
@@ -70,6 +82,10 @@ pub fn spawn_for(
         // losses that read as a network fault.
         let mut s = state.lock().unwrap();
         let family = if addr.is_ipv6() { "IPv6" } else { "IPv4" };
+        crate::errlog::log(
+            "icmp",
+            format!("no {family} socket — {addr} will never be probed"),
+        );
         s.notice = Some(format!("no {family} ICMP socket — cannot probe {addr}"));
         return;
     };

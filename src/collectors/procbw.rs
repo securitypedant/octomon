@@ -190,7 +190,16 @@ async fn full_names() -> HashMap<u32, String> {
 pub async fn run(state: Arc<Mutex<AppState>>) {
     // Probe support once; mark unsupported (not just "empty") if unavailable.
     if platform::proc_net_sample().await.is_none() {
-        state.lock().unwrap().proc_status = if platform::proc_needs_privilege() {
+        let needs_privilege = platform::proc_needs_privilege();
+        crate::errlog::log(
+            "talkers",
+            if needs_privilege {
+                "per-process bandwidth needs elevated privileges — the talkers table stays empty"
+            } else {
+                "per-process bandwidth is unavailable on this platform — the talkers table stays empty"
+            },
+        );
+        state.lock().unwrap().proc_status = if needs_privilege {
             ProcStatus::NeedsPrivilege
         } else {
             ProcStatus::Unsupported
@@ -217,6 +226,13 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
     loop {
         ticker.tick().await;
         let Some(sample) = platform::proc_net_sample().await else {
+            // Supported at startup and failing now: the table quietly freezes
+            // on its last figures rather than going blank, so nothing on
+            // screen distinguishes this from an idle machine.
+            crate::errlog::log(
+                "talkers",
+                "a per-process sample failed — the tables are not advancing",
+            );
             continue;
         };
         // nettop truncates process names to ~15 chars; enrich with full names.

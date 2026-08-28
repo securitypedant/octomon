@@ -89,7 +89,18 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr) {
         };
         // The ASN rows ride along whichever way registration went; a failed
         // ASN lookup just leaves them out.
-        let asn_rows = asn.unwrap_or_default();
+        let asn_rows = match asn {
+            Ok(rows) => rows,
+            Err(e) => {
+                // Invisible in the overlay — the rows are simply absent — so
+                // the log is the only record that the lookup was tried.
+                crate::errlog::log("whois", format!("ASN lookup for {addr} failed: {e}"));
+                Vec::new()
+            }
+        };
+        if let Err(e) = &outcome {
+            crate::errlog::log("whois", format!("lookup for {addr} failed: {e}"));
+        }
 
         // Every completed lookup also lands in whois.log in the data folder:
         // a running reference of "who owned that address when I asked", and
@@ -158,6 +169,18 @@ fn format_log_entry(
     out
 }
 
+/// How large `whois.log` may grow before the oldest entries are dropped.
+/// Deliberately roomy: an entry is a couple of kilobytes, so this is tens of
+/// thousands of lookups — years of ordinary use, and the whole point of the
+/// file is being able to look back at what an address was months ago.
+const LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// What a trim keeps. Trimming to just under the cap would re-trim on almost
+/// every write; three quarters means the rewrite is rare.
+const LOG_KEEP_BYTES: usize = 6 * 1024 * 1024;
+/// How each entry begins — the boundary a trim cuts on, so the file never
+/// starts mid-record.
+const LOG_ENTRY_PREFIX: &str = "=== ";
+
 /// Append an entry to `<data dir>/whois.log`. Best-effort: a full disk or a
 /// missing home directory must not take the lookup overlay down with it.
 fn append_log(entry: &str) {
@@ -165,16 +188,56 @@ fn append_log(entry: &str) {
     let Some(dir) = crate::store::data_dir() else {
         return;
     };
-    if std::fs::create_dir_all(&dir).is_err() {
+    if crate::store::create_dir_private(&dir).is_err() {
         return;
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    let path = dir.join("whois.log");
+    trim_log(&path);
+    if let Ok(mut f) = crate::store::private_options()
         .create(true)
         .append(true)
-        .open(dir.join("whois.log"))
+        .open(&path)
     {
         let _ = f.write_all(entry.as_bytes());
     }
+}
+
+/// Drop the oldest entries once the file has outgrown [`LOG_MAX_BYTES`], the
+/// same shape as the network history's trim: one file, newest kept, no
+/// generations to rummage through. Nothing here is allowed to fail loudly —
+/// an untrimmed log is better than a lost lookup.
+fn trim_log(path: &std::path::Path) {
+    if !std::fs::metadata(path).is_ok_and(|m| m.len() > LOG_MAX_BYTES) {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Some(kept) = keep_tail(&text, LOG_KEEP_BYTES) else {
+        return;
+    };
+    let _ = crate::store::write_private(path, kept);
+}
+
+/// The last `want` bytes of `text`, rounded forward to the next entry header
+/// so the file still begins with a whole record. `None` when there is no
+/// boundary to cut on — leaving an oversized file beats writing a corrupt one.
+fn keep_tail(text: &str, want: usize) -> Option<&str> {
+    if text.len() <= want {
+        return None;
+    }
+    // Registry records are full of non-ASCII (holder names, addresses), so a
+    // byte offset counted back from the end regularly lands inside a character
+    // — and slicing there panics. Walk forward to the next boundary first.
+    let mut from = text.len() - want;
+    while from < text.len() && !text.is_char_boundary(from) {
+        from += 1;
+    }
+    // Entry headers only ever start a line, so anchor on the newline before
+    // one; a "=== " inside a registry remark cannot be mistaken for a header.
+    text[from..]
+        .find(&format!("\n{LOG_ENTRY_PREFIX}"))
+        .map(|i| &text[from + i + 1..])
 }
 
 /// The announcing ASN for `addr` from RIPEstat: `asn` and `prefix` rows, or
@@ -478,6 +541,48 @@ async fn system_whois(addr: IpAddr) -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A trim must cut on an entry boundary: a log that begins halfway through
+    /// a registry record is worse than one that is slightly too big.
+    #[test]
+    fn the_log_trim_keeps_whole_entries() {
+        let entry = |a: u8| format!("=== 10.0.0.{a} · 2026-01-01 00:00:00 ===\nnet: thing\n\n");
+        let text: String = (1..=100u8).map(entry).collect();
+
+        let entry_len = entry(1).len();
+        let kept = keep_tail(&text, 500).expect("a boundary exists");
+        assert!(kept.starts_with("=== 10.0.0."), "{:?}", &kept[..30]);
+        assert!(text.ends_with(kept), "the tail, not a middle slice");
+        // Cutting forward to the next header drops the partial entry at the
+        // front, so the result is a little under what was asked for — never
+        // more, and never by more than one entry.
+        assert!(kept.len() <= 500, "{} bytes", kept.len());
+        assert!(kept.len() > 500 - entry_len, "{} bytes", kept.len());
+        // The newest entry always survives; the oldest is what goes.
+        assert!(kept.contains("10.0.0.100"));
+        assert!(!kept.contains("=== 10.0.0.1 ·"));
+
+        // Nothing to do when the file is already small enough.
+        assert!(keep_tail(&text, text.len()).is_none());
+        // A file with no header at all is left alone rather than mangled.
+        assert!(keep_tail("no entries here, just bytes", 5).is_none());
+
+        // Registry records carry accented holder names, so counting bytes back
+        // from the end lands mid-character often enough to matter — slicing
+        // there would panic and take the lookup's task down with it.
+        let accented: String = (1..=60)
+            .map(|a| format!("=== 10.0.0.{a} · 2026 ===\nholder: Télécom Österreich\n\n"))
+            .collect();
+        for want in 1..accented.len() {
+            if let Some(kept) = keep_tail(&accented, want) {
+                assert!(
+                    kept.starts_with(LOG_ENTRY_PREFIX),
+                    "cut mid-entry at {want}"
+                );
+                assert!(accented.ends_with(kept));
+            }
+        }
+    }
 
     /// Shape of an ARIN answer, trimmed: cidr0 range, no country, abuse nested
     /// under the registrant.

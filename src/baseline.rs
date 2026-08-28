@@ -354,13 +354,29 @@ pub fn load() -> Store {
 }
 
 /// Best-effort whole-file rewrite — a handful of networks × ~200 bytes.
+/// A failure here means every learned normal is lost at exit, which shows up
+/// much later as "it forgot my networks", so it goes on the record.
 pub fn save(store: &Store) {
-    let Some(p) = path() else { return };
+    let Some(p) = path() else {
+        crate::errlog::log("baseline", "no data directory — learned networks not saved");
+        return;
+    };
     if let Some(dir) = p.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = crate::store::create_dir_private(dir);
     }
-    if let Ok(json) = serde_json::to_string_pretty(store) {
-        let _ = std::fs::write(p, json);
+    match serde_json::to_string_pretty(store) {
+        Ok(json) => {
+            if let Err(e) = crate::store::write_private(&p, json) {
+                crate::errlog::log(
+                    "baseline",
+                    format!(
+                        "could not write {}: {e} — learned networks not saved",
+                        p.display()
+                    ),
+                );
+            }
+        }
+        Err(e) => crate::errlog::log("baseline", format!("not serializable: {e}")),
     }
 }
 

@@ -399,7 +399,7 @@ impl Config {
     /// Linux. `~/Library/Application Support` would be more Apple-native, and
     /// would silently orphan every config already on disk, so it is
     /// deliberately not done. Windows has no such history and gets `%APPDATA%`.
-    fn dir() -> Option<PathBuf> {
+    pub fn dir() -> Option<PathBuf> {
         #[cfg(unix)]
         {
             let base = std::env::var_os("XDG_CONFIG_HOME")
@@ -428,6 +428,15 @@ impl Config {
                 Ok(cfg) => cfg,
                 Err(e) => {
                     tracing::warn!("failed to parse {}: {e}; using defaults", path.display());
+                    // Every setting silently reverting is a big, invisible
+                    // change; a typo in the file is the usual cause.
+                    crate::errlog::log(
+                        "config",
+                        format!(
+                            "{} did not parse: {e} — running on defaults",
+                            path.display()
+                        ),
+                    );
                     Config::default()
                 }
             },
@@ -436,6 +445,10 @@ impl Config {
                 let cfg = Config::default();
                 if let Err(e) = cfg.write_to(&path) {
                     tracing::warn!("could not write default config to {}: {e}", path.display());
+                    crate::errlog::log(
+                        "config",
+                        format!("could not write defaults to {}: {e}", path.display()),
+                    );
                 }
                 cfg
             }
@@ -495,24 +508,37 @@ impl Config {
     }
 
     /// Read-modify-write one field of the on-disk config, preserving the rest.
+    /// A write that fails looks, from the UI, exactly like one that worked —
+    /// until the setting is back to its old value after a restart.
     fn update_on_disk(mutate: impl FnOnce(&mut Config)) {
-        let Some(path) = Self::path() else { return };
+        let Some(path) = Self::path() else {
+            crate::errlog::log("config", "no config directory — setting not saved");
+            return;
+        };
         let mut cfg = std::fs::read_to_string(&path)
             .ok()
             .and_then(|t| toml::from_str::<Config>(&t).ok())
             .unwrap_or_default();
         mutate(&mut cfg);
-        let _ = cfg.write_to(&path);
+        if let Err(e) = cfg.write_to(&path) {
+            crate::errlog::log(
+                "config",
+                format!(
+                    "could not write {}: {e} — setting not saved",
+                    path.display()
+                ),
+            );
+        }
     }
 
-    fn write_to(&self, path: &PathBuf) -> std::io::Result<()> {
+    fn write_to(&self, path: &std::path::Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+            crate::store::create_dir_private(dir)?;
         }
         let body = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
         let header = "# octomon configuration — edit and restart octomon.\n\
                       # Deleting this file regenerates it with defaults.\n\n";
-        std::fs::write(path, format!("{header}{body}"))
+        crate::store::write_private(path, format!("{header}{body}"))
     }
 }
 

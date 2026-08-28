@@ -206,6 +206,15 @@ pub fn start(state: Arc<Mutex<AppState>>, checks: Vec<EgressCheck>) {
                 let state = state.clone();
                 tokio::spawn(async move {
                     let outcome = run_check(&c).await;
+                    // Blocked and Refused are findings the table exists to
+                    // report; Error means the check itself did not happen, so
+                    // the reason belongs somewhere it outlives the overlay.
+                    if let Outcome::Error(e) = &outcome {
+                        crate::errlog::log(
+                            "egress",
+                            format!("{} {}:{} check failed: {e}", c.proto, c.host, c.port),
+                        );
+                    }
                     let mut s = state.lock().unwrap();
                     // A newer scan may have replaced this one meanwhile.
                     if let Some(scan) = s.egress.as_mut()

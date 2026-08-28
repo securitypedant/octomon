@@ -23,13 +23,17 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config, changed: Arc<Notify>)
     if url.is_empty() {
         return;
     }
-    let Ok(client) = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .user_agent(crate::util::USER_AGENT)
         .timeout(Duration::from_secs(10))
         .no_proxy()
         .build()
-    else {
-        return;
+    {
+        Ok(c) => c,
+        Err(e) => {
+            crate::errlog::log("edge", format!("could not build an HTTP client: {e}"));
+            return;
+        }
     };
     // Each call names its reason with one of three constant labels — every
     // octomon in the world sends the identical strings, so the label links
@@ -82,14 +86,24 @@ fn with_reason(url: &str, why: &str) -> String {
 }
 
 async fn fetch(client: &reqwest::Client, url: &str) -> Option<(EdgeInfo, String)> {
-    let text = crate::util::fetch_text_capped(client, url, 4096)
-        .await
-        .ok()?;
+    // The panel keeps the previous answer on failure, so nothing on screen
+    // says the fetch stopped working — hence the log line.
+    let text = match crate::util::fetch_text_capped(client, url, 4096).await {
+        Ok(text) => text,
+        Err(e) => {
+            crate::errlog::log("edge", format!("{url}: {e}"));
+            return None;
+        }
+    };
     let latest = serde_json::from_str::<serde_json::Value>(&text)
         .ok()
         .and_then(|v| v["latest"].as_str().map(str::to_string))
         .unwrap_or_default();
-    parse(&text).map(|info| (info, latest))
+    let parsed = parse(&text).map(|info| (info, latest));
+    if parsed.is_none() {
+        crate::errlog::log("edge", format!("{url}: the answer did not parse"));
+    }
+    parsed
 }
 
 /// Strictly newer, on x.y.z triples; malformed strings are never "newer",

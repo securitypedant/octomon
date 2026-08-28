@@ -1,6 +1,17 @@
 //! Startup path discovery: traceroute a few hops toward the internet and add
 //! the gateway + next hops as auto-discovered targets, so the user immediately
 //! sees where local-network quality ends and the ISP path begins.
+//!
+//! Discovery runs at startup and whenever the network's *identity* changes.
+//! That is not the same moment as the network becoming usable, which is the
+//! whole difficulty: joining hotel Wi-Fi bumps the identity immediately, and
+//! for the next few minutes a captive portal answers the traceroute with
+//! silence and the public-IP endpoint with its own sign-in page. Signing in
+//! changes no identity, so the failed pass used to be the last word — the
+//! gateway, hops 2-4 and the public IP were all simply absent until octomon
+//! was restarted. So a short pass is retried on a backoff ([`RETRY_BACKOFF`]),
+//! [`rescan`] forces one by hand from [G], and every way a pass can come back
+//! empty writes a line to the error log.
 
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -14,22 +25,70 @@ use crate::platform::traceroute as tr;
 
 const MAX_HOPS: usize = 4; // gateway (1) + next three
 
-pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Config) {
+/// A stalled traceroute must not hold the walk open forever. The unix flags
+/// ask for one probe per hop at a one-second timeout and Windows' three at
+/// 800 ms, so four hops is a couple of seconds when the path is dead — this is
+/// the outer bound for a `traceroute` that hangs on something else entirely
+/// (a wedged raw socket, a captive portal swallowing the process).
+const WALK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Config) -> Outcome {
     // Configurable: the useful probe target depends on the network. Empty
     // disables discovery entirely, like `public_ip_url`.
     let probe = cfg.discovery_probe.trim().to_string();
     if probe.is_empty() {
-        return;
+        return Outcome::Disabled;
     }
-    let out = Command::new(tr::PROGRAM)
+    let walk = Command::new(tr::PROGRAM)
         .args(tr::args(MAX_HOPS, &probe))
         .stdin(std::process::Stdio::null())
-        .output()
-        .await;
-    let Ok(out) = out else {
-        return;
+        .output();
+    let out = match tokio::time::timeout(WALK_TIMEOUT, walk).await {
+        Ok(Ok(out)) => out,
+        // The two ways the walk yields nothing: no binary (or no permission
+        // to run it), and a binary that never came back. Both used to return
+        // in silence, which is why an empty Quality panel had no explanation
+        // anywhere — not in the timeline, not on disk.
+        Ok(Err(e)) => {
+            crate::errlog::log(
+                "discovery",
+                format!("could not run {}: {e} — no hops discovered", tr::PROGRAM),
+            );
+            return gateway_only(state, clients, cfg).await;
+        }
+        Err(_) => {
+            crate::errlog::log(
+                "discovery",
+                format!(
+                    "{} did not finish within {}s toward {probe} — no hops discovered",
+                    tr::PROGRAM,
+                    WALK_TIMEOUT.as_secs()
+                ),
+            );
+            return gateway_only(state, clients, cfg).await;
+        }
     };
+    if !out.status.success() {
+        // Non-fatal: tracert exits non-zero on an unreachable destination
+        // having still printed the hops that answered, so the output is
+        // parsed either way — but the reason is worth keeping.
+        let why = String::from_utf8_lossy(&out.stderr);
+        crate::errlog::log(
+            "discovery",
+            format!(
+                "{} exited {} toward {probe}{}",
+                tr::PROGRAM,
+                out.status.code().unwrap_or(-1),
+                if why.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", why.trim())
+                }
+            ),
+        );
+    }
 
+    let mut hops_found = 0usize;
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         // Only hops that answered can be pinged; a `*` hop has no address.
         let Some(hop) = tr::parse_hop(line) else {
@@ -60,6 +119,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Confi
             format!("hop {ttl}→{probe}")
         };
 
+        hops_found += 1;
         let (id, added) = {
             let mut s = state.lock().unwrap();
             // Skip if this address is already a target.
@@ -78,13 +138,52 @@ pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Confi
         }
     }
 
-    // A gateway that answers nothing at all — not even the TTL-exceeded
-    // replies the walk listens for (phone hotspots, hardened firewalls) —
-    // never appears above, but the routing table still names it. Probe it
-    // anyway: beside clean anchors, its 100% loss is exactly the evidence the
-    // drops-ICMP judgement turns into "fine, just silent", and without a
-    // probe the gateway rung would read "not discovered" forever. netinfo
-    // populates on its own 5 s cadence, so wait briefly for it.
+    if hops_found == 0 {
+        crate::errlog::log(
+            "discovery",
+            format!(
+                "{} toward {probe} answered no hops — the path is filtered, or a captive portal is in the way",
+                tr::PROGRAM
+            ),
+        );
+    }
+
+    let gw = gateway_only(state, clients, cfg).await;
+    // The walk covering only the gateway is the hotel case: hop 1 answered,
+    // nothing beyond it did. Worth a retry once the portal is cleared.
+    match (hops_found, gw) {
+        (0, Outcome::NothingFound) => Outcome::NothingFound,
+        (0..=1, _) => Outcome::GatewayOnly,
+        _ => Outcome::Complete,
+    }
+}
+
+/// What one pass of discovery managed to find. `refresh` retries on anything
+/// short of [`Outcome::Complete`], because "nothing answered" on a network
+/// that is about to work (a captive portal not yet cleared, a lease not yet
+/// settled) is indistinguishable at this moment from one that never will.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Outcome {
+    /// Hops beyond the gateway were found: the path is walkable.
+    Complete,
+    /// Only the gateway (or not even a full first hop) came back.
+    GatewayOnly,
+    /// No hops, and no gateway address to fall back to.
+    NothingFound,
+    /// `discovery_probe` is empty — the user turned discovery off.
+    Disabled,
+}
+
+/// Probe the routing table's gateway, whatever the walk did or didn't see.
+///
+/// A gateway that answers nothing at all — not even the TTL-exceeded replies
+/// the walk listens for (phone hotspots, hardened firewalls) — never appears
+/// in the walk, but the routing table still names it. Probe it anyway: beside
+/// clean anchors, its 100% loss is exactly the evidence the drops-ICMP
+/// judgement turns into "fine, just silent", and without a probe the gateway
+/// rung would read "not discovered" forever. netinfo populates on its own 5 s
+/// cadence, so wait briefly for it.
+async fn gateway_only(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Config) -> Outcome {
     for _ in 0..10 {
         let gw_ip = state.lock().unwrap().netinfo.gateway_ip.clone();
         if let Ok(addr) = gw_ip.parse::<IpAddr>() {
@@ -107,26 +206,129 @@ pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Confi
             if added {
                 ping::spawn_for(state.clone(), clients.clone(), cfg.clone(), id, addr);
             }
-            return;
+            return Outcome::GatewayOnly;
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
+    // Ten seconds of "-" from the routing table. On a network still handing
+    // out a lease this is temporary, which is exactly why the caller retries.
+    crate::errlog::log(
+        "discovery",
+        "no gateway address from the routing table after 10s — gateway not probed",
+    );
+    Outcome::NothingFound
 }
+
+/// How long to wait before each further attempt when a pass came back short.
+/// Roughly seven minutes of cover in total, which comfortably spans signing
+/// in to a hotel portal — after which the network identity has not changed, so
+/// nothing else would ever trigger a re-walk.
+const RETRY_BACKOFF: [u64; 5] = [15, 30, 60, 120, 240];
 
 /// Re-run discovery after the machine moved to a different network: the old
 /// gateway and hops belong to a network that is no longer reachable, so they are
 /// dropped before the path is walked again. Hand-added targets are left alone.
+///
+/// A pass that finds nothing is retried on a backoff rather than accepted.
+/// Joining a network and being able to use it are different moments: a captive
+/// portal answers the walk with silence and the public-IP endpoint with its own
+/// login page, DHCP may not have settled, and the gateway's ARP entry may not
+/// exist yet. All of those clear within a few minutes and none of them changes
+/// the network's identity, so without a retry the first failed pass was final
+/// and the only fix was restarting octomon.
 pub async fn refresh(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Config) {
+    forget_discovered(&state);
+    let seq = state.lock().unwrap().net_change_seq;
+    // Each half is retried only until it lands: the public IP usually comes
+    // back on the pass where the walk is still blocked, and re-fetching it
+    // five more times would be five needless requests to someone else's
+    // endpoint. Targets already added are skipped by address, so a repeated
+    // walk adds the hops it newly sees and nothing else.
+    let mut path_done = false;
+    let mut ip_done = false;
+
+    // The network moving again makes everything below about the wrong network.
+    // Checked after every await, not just after the sleeps: a traceroute or a
+    // public-IP fetch started before the change lands its result minutes later,
+    // and adding those hops to the *new* network's target list is how a stale
+    // gateway reappears after a VPN flap.
+    let superseded = || state.lock().unwrap().net_change_seq != seq;
+
+    for (attempt, wait) in std::iter::once(0).chain(RETRY_BACKOFF).enumerate() {
+        if wait > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+        }
+        if superseded() {
+            return;
+        }
+        if !path_done {
+            let outcome = run(state.clone(), clients.clone(), cfg.clone()).await;
+            if superseded() {
+                return;
+            }
+            path_done = matches!(outcome, Outcome::Complete | Outcome::Disabled);
+        }
+        if !ip_done {
+            ip_done = public_ip(state.clone(), clients.clone(), cfg.clone()).await;
+            if superseded() {
+                return;
+            }
+        }
+        if path_done && ip_done {
+            if attempt > 0 {
+                crate::errlog::log(
+                    "discovery",
+                    format!("path and public IP discovered on attempt {}", attempt + 1),
+                );
+            }
+            return;
+        }
+    }
+    let message = format!(
+        "could not map the path after {} attempts — {} still unknown. Press [G] to rescan.",
+        RETRY_BACKOFF.len() + 1,
+        match (path_done, ip_done) {
+            (false, false) => "hops beyond the gateway and the public IP are",
+            (false, true) => "hops beyond the gateway are",
+            _ => "the public IP is",
+        }
+    );
+    crate::errlog::log("discovery", &message);
+    state.lock().unwrap().push_event(
+        crate::verdict::Severity::Info,
+        crate::app::EventCategory::Network,
+        message,
+    );
+}
+
+/// Drop every auto-discovered target, pulling the dependent cursors back into
+/// range — they index into `targets`.
+fn forget_discovered(state: &Arc<Mutex<AppState>>) {
+    let mut s = state.lock().unwrap();
+    s.targets.retain(|t| !t.discovered);
+    let last = s.targets.len().saturating_sub(1);
+    s.selected = s.selected.min(last);
+    s.graph_target = s.graph_target.min(last);
+}
+
+/// The [G] rescan: throw away what discovery found and map the path again from
+/// scratch, without waiting for the network's identity to change.
+///
+/// The manual counterpart to the automatic retry — for the case where the
+/// network came good in a way octomon has no way to observe (a portal signed
+/// in to in a browser, an upstream link restored, a router rebooted) and the
+/// automatic attempts had already run out.
+pub async fn rescan(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Config) {
     {
         let mut s = state.lock().unwrap();
-        s.targets.retain(|t| !t.discovered);
-        // The cursors index into `targets`, so they have to be pulled back in.
-        let last = s.targets.len().saturating_sub(1);
-        s.selected = s.selected.min(last);
-        s.graph_target = s.graph_target.min(last);
+        s.public_ip_error = None;
+        s.notice_event(
+            crate::verdict::Severity::Info,
+            crate::app::EventCategory::Network,
+            "rescanning the path — gateway, hops and public IP".to_string(),
+        );
     }
-    run(state.clone(), clients.clone(), cfg.clone()).await;
-    public_ip(state, clients, cfg).await;
+    refresh(state, clients, cfg).await;
 }
 
 /// Watch for the network changing under us and rebuild everything derived from
@@ -138,6 +340,13 @@ pub async fn watch(
     changed: Arc<tokio::sync::Notify>,
 ) {
     let mut seen = state.lock().unwrap().net_change_seq;
+    // The refresh currently in flight. A walk runs its backoff for about seven
+    // minutes, so a network that flaps every few seconds — a VPN reconnecting
+    // in a loop, a laptop roaming between weak APs — would otherwise leave
+    // dozens of them alive at once, each spawning traceroute processes for a
+    // network that has already been replaced. Only the newest one can be
+    // right, so the previous is aborted rather than left to notice on its own.
+    let mut in_flight: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         // A slow fallback tick alongside the signal, so a change landing while
         // a rebuild is already in flight is still noticed.
@@ -157,9 +366,10 @@ pub async fn watch(
         }
         seen = seq;
 
-        refresh(state.clone(), clients.clone(), cfg.clone()).await;
-
         // A path monitored on the old network says nothing about the new one.
+        // Restarted before the walk rather than after it: `refresh` now spends
+        // minutes retrying a network that isn't answering yet, and the hop
+        // monitor must not sit on the old network's hops for all of it.
         if let Some((dest, label)) = monitoring {
             let label = label.split(" (").next().unwrap_or(&label).to_string();
             crate::collectors::hopmon::start(
@@ -170,23 +380,41 @@ pub async fn watch(
                 label,
             );
         }
+
+        // Spawned rather than awaited: the retry backoff runs for minutes, and
+        // a change landing during it has to be picked up by the next loop.
+        // Aborting the previous walk first bounds this to one live task; it
+        // stops at its next await, and `refresh` re-checks the sequence around
+        // each of those anyway, so an abort only saves the waiting.
+        if let Some(prev) = in_flight.replace(tokio::spawn(refresh(
+            state.clone(),
+            clients.clone(),
+            cfg.clone(),
+        ))) {
+            prev.abort();
+        }
     }
 }
 
 /// Discover the machine's public IP from `cfg.public_ip_url` (a plain-text IP
 /// endpoint) and add it as a target. No-op if the URL is empty or the response
-/// isn't a valid IP.
-pub async fn public_ip(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Config) {
+/// isn't a valid IP. Returns whether the address is now known — a caller
+/// retrying a half-finished discovery needs to know which half failed.
+pub async fn public_ip(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Config) -> bool {
     if cfg.public_ip_url.trim().is_empty() {
-        return;
+        return true; // switched off, not failed
     }
-    let Ok(http) = reqwest::Client::builder()
+    let http = match reqwest::Client::builder()
         .user_agent(crate::util::USER_AGENT)
         .timeout(std::time::Duration::from_secs(10))
         .no_proxy()
         .build()
-    else {
-        return;
+    {
+        Ok(http) => http,
+        Err(e) => {
+            crate::errlog::log("public-ip", format!("could not build an HTTP client: {e}"));
+            return false;
+        }
     };
     // The configured endpoint first, then Cloudflare's own trace endpoint —
     // reachable when the configured one is filtered, and the natural answer
@@ -210,6 +438,9 @@ pub async fn public_ip(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg:
         }
     }
     let Some(addr) = found else {
+        for e in &errors {
+            crate::errlog::log("public-ip", e);
+        }
         // The raw reqwest error chains (two of them, with full URLs) turned
         // the analysis row into a paragraph. The row gets one readable
         // sentence; the chains go to the events timeline — once per distinct
@@ -224,7 +455,7 @@ pub async fn public_ip(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg:
             );
         }
         s.public_ip_error = Some(short);
-        return;
+        return false;
     };
     state.lock().unwrap().public_ip_error = None;
 
@@ -243,6 +474,7 @@ pub async fn public_ip(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg:
     if added {
         ping::spawn_for(state, clients, cfg, id, addr);
     }
+    true
 }
 
 /// One readable sentence out of the per-URL fetch errors, for the analysis
@@ -360,5 +592,33 @@ mod tests {
         let cfg: Config = toml::from_str("ping_interval_ms = 500").unwrap();
         assert_eq!(cfg.discovery_probe, "1.1.1.1");
         assert_eq!(cfg.ping_interval_ms, 500);
+    }
+
+    /// The hotel case, as a decision table: only a walk that got *past* the
+    /// gateway counts as done. A gateway-only answer is what a captive portal
+    /// produces, and treating it as success is precisely the bug that left
+    /// hops 2-4 and the public IP missing until octomon was restarted.
+    #[test]
+    fn only_a_walk_past_the_gateway_ends_the_retries() {
+        let done = |o: Outcome| matches!(o, Outcome::Complete | Outcome::Disabled);
+        assert!(done(Outcome::Complete));
+        // Turned off in config: retrying cannot change the answer.
+        assert!(done(Outcome::Disabled));
+        assert!(!done(Outcome::GatewayOnly));
+        assert!(!done(Outcome::NothingFound));
+    }
+
+    /// The backoff has to outlast a portal sign-in — the whole point is to
+    /// still be trying when the network finally works.
+    #[test]
+    fn the_backoff_covers_several_minutes() {
+        let total: u64 = RETRY_BACKOFF.iter().sum();
+        assert!(total >= 300, "only {total}s of cover");
+        // Strictly increasing: a flat retry would hammer a network that is
+        // simply filtered, for as long as octomon runs.
+        assert!(RETRY_BACKOFF.windows(2).all(|w| w[1] > w[0]));
+        // And it ends. A network that genuinely filters traceroute must not
+        // be walked forever.
+        assert!(RETRY_BACKOFF.len() <= 8);
     }
 }

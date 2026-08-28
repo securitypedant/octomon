@@ -137,6 +137,10 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("speedtest client: {e}");
+            crate::errlog::log(
+                "speedtest",
+                format!("could not build an HTTP client: {e} — [s] will do nothing this session"),
+            );
             return;
         }
     };
@@ -223,6 +227,13 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>) {
                 );
             }
             Err(e) => {
+                crate::errlog::log(
+                    "speedtest",
+                    format!(
+                        "{} failed: {e}",
+                        selected.as_deref().unwrap_or("no provider")
+                    ),
+                );
                 s.speedtest.status = SpeedStatus::Failed(e.clone());
                 s.speedtest.phase = format!("failed: {e}");
                 s.push_event(

@@ -72,6 +72,87 @@ pub fn data_dir() -> Option<PathBuf> {
     }
 }
 
+/// Everything octomon writes about a network — SSIDs, MACs, gateway and public
+/// addresses, the processes talking and who they talk to — is private to the
+/// person running it, so every file it creates is owner-only and the
+/// directories holding them are owner-only too. On unix that is an explicit
+/// mode rather than whatever the umask happens to be, because the common
+/// default (022) leaves a shared machine's other accounts able to read all of
+/// it. Windows inherits the profile directory's ACL, which is already
+/// restricted to the user, so there is nothing to set.
+#[cfg(unix)]
+pub const FILE_MODE: u32 = 0o600;
+#[cfg(unix)]
+pub const DIR_MODE: u32 = 0o700;
+
+/// `create_dir_all`, then make the leaf owner-only.
+pub fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Best-effort: a directory we do not own (someone else's $XDG_DATA_HOME)
+        // is not ours to re-permission, and failing here would cost the write.
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(DIR_MODE));
+    }
+    Ok(())
+}
+
+/// `OpenOptions` that creates owner-only files. The mode applies only when the
+/// file is created, which is why [`tighten_permissions`] exists for the ones
+/// written before this was the rule.
+pub fn private_options() -> std::fs::OpenOptions {
+    let mut opts = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(FILE_MODE);
+    }
+    opts
+}
+
+/// `std::fs::write`, owner-only.
+pub fn write_private(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut f = private_options()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    f.write_all(contents.as_ref())
+}
+
+/// Re-permission everything octomon has already written. `OpenOptions::mode`
+/// only applies at creation, so an install that predates owner-only files would
+/// keep its world-readable history forever without a pass like this. Runs once
+/// at startup, best-effort, and never recurses — the data and config
+/// directories are flat.
+#[cfg(unix)]
+pub fn tighten_permissions() {
+    use std::os::unix::fs::PermissionsExt as _;
+    for dir in [data_dir(), crate::config::Config::dir()]
+        .into_iter()
+        .flatten()
+    {
+        if !dir.is_dir() {
+            continue;
+        }
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(DIR_MODE));
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(FILE_MODE));
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn tighten_permissions() {}
+
 /// Where a support bundle ([D]) lands: somewhere the person at the keyboard
 /// can actually find to attach to a message — the Desktop when the platform
 /// has one, else the home directory. Stamped so repeats never overwrite.
@@ -107,17 +188,28 @@ pub fn append_net_changes(changes: &[crate::app::NetChange]) {
         return;
     }
     let Some(path) = net_history_path() else {
+        crate::errlog::log(
+            "store",
+            "no data directory — network history is not persisting",
+        );
         return;
     };
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = create_dir_private(dir);
     }
-    let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    else {
-        return;
+    let mut f = match private_options().create(true).append(true).open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            crate::errlog::log(
+                "store",
+                format!(
+                    "could not open {}: {e} — {} network changes not persisted",
+                    path.display(),
+                    changes.len()
+                ),
+            );
+            return;
+        }
     };
     for c in changes {
         if let Ok(line) = serde_json::to_string(c) {
@@ -152,7 +244,7 @@ pub fn load_net_history() -> std::collections::VecDeque<crate::app::NetChange> {
                 out.push('\n');
             }
         }
-        let _ = std::fs::write(&path, out);
+        let _ = write_private(&path, out);
     }
     tail
 }
@@ -165,20 +257,34 @@ pub fn erase() {
     }
 }
 
-/// Append a record (best-effort; ignored on error).
+/// Append a record (best-effort; ignored on error, but logged — a speed test
+/// that ran and then vanished from the history is exactly the sort of thing
+/// nobody can reconstruct afterwards).
 pub fn append(rec: &SpeedRecord) {
-    let Some(path) = path() else { return };
+    let Some(path) = path() else {
+        crate::errlog::log("store", "no data directory — speed test not saved");
+        return;
+    };
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = create_dir_private(dir);
     }
-    if let (Ok(mut f), Ok(line)) = (
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path),
+    match (
+        private_options().create(true).append(true).open(&path),
         serde_json::to_string(rec),
     ) {
-        let _ = writeln!(f, "{line}");
+        (Ok(mut f), Ok(line)) => {
+            if let Err(e) = writeln!(f, "{line}") {
+                crate::errlog::log("store", format!("speed test not saved: {e}"));
+            }
+        }
+        (Err(e), _) => crate::errlog::log(
+            "store",
+            format!(
+                "could not open {}: {e} — speed test not saved",
+                path.display()
+            ),
+        ),
+        (_, Err(e)) => crate::errlog::log("store", format!("speed test not serializable: {e}")),
     }
 }
 
@@ -212,7 +318,7 @@ pub fn forget(rec: &SpeedRecord) {
         if !out.is_empty() {
             out.push('\n');
         }
-        let _ = std::fs::write(&path, out);
+        let _ = write_private(&path, out);
     }
 }
 

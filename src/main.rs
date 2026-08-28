@@ -9,6 +9,7 @@ mod baseline;
 mod collectors;
 mod config;
 mod demo;
+mod errlog;
 mod history;
 mod platform;
 mod store;
@@ -121,6 +122,15 @@ async fn main() -> Result<()> {
         .expect("install rustls crypto provider before any TLS use");
     use_utf8_console();
     let cli = Cli::parse();
+    // Everything octomon stores describes someone's network, so it is all
+    // owner-only. New files are created that way; this catches the ones an
+    // older version wrote under the umask. Before the first write, so the
+    // session banner below lands in an already-tightened directory.
+    store::tighten_permissions();
+    // Opens the run's stretch of errors.log. Everything that follows can fail
+    // quietly by design, so the file is the only place a later "why did I have
+    // to restart it?" can be answered from.
+    errlog::start_session();
 
     // Base config from file/defaults, then apply CLI overrides.
     let mut cfg = Config::load();
@@ -193,6 +203,12 @@ async fn main() -> Result<()> {
             .into_iter()
             .map(|t| (t.name, t.provides, t.package))
             .collect();
+        for (name, provides, package) in &s.missing_tools {
+            errlog::log(
+                "tools",
+                format!("{name} is not installed — {provides} unavailable (install: {package})"),
+            );
+        }
         s.privilege_notice = platform::tools::privilege_notice();
         s.notice = platform::tools::missing_notice();
         // The timeline's opening line: an exported events CSV or a support
@@ -250,13 +266,11 @@ async fn main() -> Result<()> {
     if ping_clients.available() {
         collectors::ping::spawn_all(state.clone(), ping_clients.clone(), cfg.clone());
         // Auto-discover the gateway + next hops, and the public IP, as targets.
+        // Through `refresh` rather than a bare `run` so a start on a network
+        // that isn't usable yet — launched on hotel Wi-Fi before the portal is
+        // signed in to — gets the same retries a start-then-join does.
         if !cli.check {
-            tokio::spawn(collectors::discovery::run(
-                state.clone(),
-                ping_clients.clone(),
-                cfg.clone(),
-            ));
-            tokio::spawn(collectors::discovery::public_ip(
+            tokio::spawn(collectors::discovery::refresh(
                 state.clone(),
                 ping_clients.clone(),
                 cfg.clone(),
@@ -589,6 +603,10 @@ enum Side {
     None,
     Speedtest,
     Refresh,
+    /// [G]: walk the path again from scratch — gateway, the next hops, and the
+    /// public IP. The manual escape from a discovery that ran while the
+    /// network was not yet usable (a captive portal, an unsettled lease).
+    Rediscover,
     AddTarget(String),
     Traceroute(IpAddr, String),
     HopMonitor(IpAddr, String),
@@ -1640,6 +1658,16 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.refresh_at = Some(std::time::Instant::now());
                     side = Side::Refresh;
                 }
+                // Shift+G walks the path again: gateway, the next hops, the
+                // public IP. Discovery otherwise runs only when the network's
+                // identity changes, and joining a network is not the same
+                // moment as being able to use it — a captive portal answers
+                // the walk with silence, and signing in changes no identity
+                // for octomon to notice.
+                KeyCode::Char('G') => {
+                    s.refresh_at = Some(std::time::Instant::now());
+                    side = Side::Rediscover;
+                }
                 KeyCode::Char('w') => s.cycle_window(),
                 // 'i' flips the quality table between its probe families
                 // (ICMP ↔ TCP connect). The split view shows one at a time —
@@ -1971,6 +1999,21 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
         Side::None => {}
         Side::Speedtest => ctx.speedtest_trigger.notify_one(),
         Side::Refresh => ctx.netinfo_refresh.notify_one(),
+        Side::Rediscover => {
+            // Re-probe the interface too: a rescan is what someone presses
+            // when the picture is stale, and the gateway the walk falls back
+            // on comes from netinfo.
+            ctx.netinfo_refresh.notify_one();
+            if ctx.ping_clients.available() {
+                tokio::spawn(collectors::discovery::rescan(
+                    ctx.state.clone(),
+                    ctx.ping_clients.clone(),
+                    ctx.cfg.clone(),
+                ));
+            } else {
+                ctx.state.lock().unwrap().notice = Some("ICMP unavailable".to_string());
+            }
+        }
         Side::AddTarget(input) => {
             if ctx.ping_clients.available() {
                 tokio::spawn(add_target(
@@ -2148,11 +2191,14 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         app::EventCategory::Logging,
                         format!("exported {n} events → {}", path.display()),
                     ),
-                    Err(e) => s.notice_event(
-                        verdict::Severity::Info,
-                        app::EventCategory::Logging,
-                        format!("could not export events: {e}"),
-                    ),
+                    Err(e) => {
+                        errlog::log("export", format!("events CSV not written: {e}"));
+                        s.notice_event(
+                            verdict::Severity::Info,
+                            app::EventCategory::Logging,
+                            format!("could not export events: {e}"),
+                        )
+                    }
                 }
             });
         }
@@ -2174,11 +2220,14 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                             path.display()
                         ),
                     ),
-                    Err(e) => s.notice_event(
-                        verdict::Severity::Info,
-                        app::EventCategory::Logging,
-                        format!("could not write support bundle: {e}"),
-                    ),
+                    Err(e) => {
+                        errlog::log("bundle", format!("support zip not written: {e}"));
+                        s.notice_event(
+                            verdict::Severity::Info,
+                            app::EventCategory::Logging,
+                            format!("could not write support bundle: {e}"),
+                        )
+                    }
                 }
             });
         }
@@ -2202,7 +2251,12 @@ fn write_bundle_to(path: &std::path::Path, s: &AppState) -> Result<(), String> {
     use std::io::Write as _;
     use zip::write::SimpleFileOptions;
 
-    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let file = store::private_options()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
     let mut bundle = zip::ZipWriter::new(file);
     let opt = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     let mut put = |name: &str, bytes: &[u8]| -> Result<(), String> {
@@ -2329,11 +2383,13 @@ async fn add_target(
             Ok(mut addrs) => match addrs.next() {
                 Some(sa) => (sa.ip(), Some(input.clone())),
                 None => {
+                    errlog::log("add-target", format!("{input} resolved to no addresses"));
                     state.lock().unwrap().notice = Some(format!("no address for {input}"));
                     return;
                 }
             },
-            Err(_) => {
+            Err(e) => {
+                errlog::log("add-target", format!("{input} did not resolve: {e}"));
                 state.lock().unwrap().notice = Some(format!("could not resolve {input}"));
                 return;
             }
@@ -2725,6 +2781,21 @@ fn doctor_report(s: &AppState, full: bool) -> (String, i32) {
         }
     }
 
+    // Failures octomon absorbed during this run. Separate from EVENTS on
+    // purpose: the timeline says what happened to the *network*, this says
+    // what did not work in the *tool* — a traceroute that would not run, a
+    // whois that timed out — which is otherwise invisible in a report.
+    let errors = errlog::tail_this_session(15);
+    if !errors.is_empty() {
+        let _ = writeln!(out, "\n== OCTOMON ERRORS (last {}) ==", errors.len());
+        for line in &errors {
+            let _ = writeln!(out, "  {line}");
+        }
+        if let Some(p) = errlog::path() {
+            let _ = writeln!(out, "  full log: {}", p.display());
+        }
+    }
+
     let code = verdict::exit_code(&triage, insufficient.is_some());
     let out = if full { out } else { redact_report(out, s) };
     (strip_control(out), code)
@@ -2900,6 +2971,15 @@ fn redact_report(text: String, s: &AppState) -> String {
         && !w.ssid.contains("redacted")
     {
         push(&w.ssid, "<ssid>");
+    }
+    // Paths reach the report in two ways: the error log's "full log:" line, and
+    // event messages naming an export or a bundle. A home directory is usually
+    // the account name, which nobody means to post in a forum thread.
+    if let Some(home) = directories::BaseDirs::new()
+        .map(|b| b.home_dir().display().to_string())
+        .filter(|h| h.len() > 1)
+    {
+        push(&home, "~");
     }
     for t in s.targets.iter().filter(|t| t.discovered) {
         if t.label.contains("public") {
@@ -3181,8 +3261,22 @@ mod tests {
         });
         // A LAN resolver (Pi-hole) is private; Cloudflare's resolver is not.
         s.netinfo.dns = vec!["192.168.1.4".into(), "1.1.1.1".into()];
+        // An event naming a written file drags the home directory — and so the
+        // account name — into a report meant to be pasted into a forum.
+        let home = directories::BaseDirs::new().map(|b| b.home_dir().display().to_string());
+        if let Some(home) = &home {
+            s.push_event(
+                verdict::Severity::Info,
+                app::EventCategory::Logging,
+                format!("exported 12 events → {home}/.config/octomon/events-x.csv"),
+            );
+        }
 
         let (out, _code) = doctor_report(&s, false);
+        if let Some(home) = &home {
+            assert!(!out.contains(home.as_str()), "leaked the home directory");
+            assert!(out.contains("~/.config/octomon"), "masked, not deleted");
+        }
         for secret in [
             "MySecretWifi",
             "192.168.1.100",

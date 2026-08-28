@@ -47,8 +47,18 @@ pub async fn run(
         };
 
         for (id, host, current) in named {
-            let Ok(mut addrs) = tokio::net::lookup_host((host.as_str(), 0)).await else {
-                continue; // resolution failing is the DNS story, told elsewhere
+            let mut addrs = match tokio::net::lookup_host((host.as_str(), 0)).await {
+                Ok(addrs) => addrs,
+                Err(e) => {
+                    // The DNS story proper is told by the resolver panel; what
+                    // belongs here is that this named target is now pinned to
+                    // whatever address it last resolved to.
+                    crate::errlog::log(
+                        "resolve",
+                        format!("{host} did not resolve: {e} — target stays on {current}"),
+                    );
+                    continue;
+                }
             };
             // Prefer an answer in the same family as the current address, so a
             // dual-stack answer doesn't flap the target between families.

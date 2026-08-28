@@ -16,106 +16,59 @@ whether it's the network, the Wi-Fi, the ISP, or your own machine that's the pro
 ## What it shows
 
 Four live panels plus **an actual answer**: a one-line analysis at the bottom
-of the screen ("`▲ gateway unresponsive`" or "`● connection healthy`"), and
-**`y`** for the **triage ladder** behind it — every subsystem from your machine
-outward (link → gateway → DNS → ISP path → internet → web → destinations) with
-its status and the data behind it, healthy rungs included. Simultaneous causes
-are all reported; a symptom (DNS timing out because the gateway is dead) is
-ranked below its cause rather than shouting over it, and a busy CPU or a VPN is
-a caveat, never a way to hide a fault. Every finding shows how long it has been
-going on.
-
-Things it checks:
-
-- **Not connected at all** — no default route, a self-assigned 169.254 address
-  (no DHCP lease), an address with no gateway: named as such, not blamed on
-  whatever failed first downstream.
-- **Captive portals**, **web blocked while ping works**, **IPv6 broken while
-  IPv4 works** (and where along the way it breaks), the mirror case, and a
-  **system web proxy** — detected, and the web check repeated through it, so
-  "browsers work but direct doesn't" reads as the network it is.
-- **DNS honesty, not just speed** — a public reference resolver probed
-  alongside yours (yours failing while it works means "switch DNS"; it failing
-  while yours work means this network forces its own), and a once-a-minute
-  check that non-existent names come back NXDOMAIN rather than an ad page.
-- **System clock skew** via NTP (HTTPS breaks while every network measurement
-  is fine), **CGNAT / double NAT** read off the first hops, **path-MTU black
-  holes** where the OS lets it be measured, and **outbound port filtering**
-  (`c`): SSH, mail, DNS-over-TLS, NTP, QUIC, each against a host that answers.
-- **Per-network memory** — a learned *normal* for each network you use (name
-  it with `N`, list them with `L`), and a persistent **incident history**, so
-  the report can say "worse than usual here" and "3 outages this week,
-  clustering 20–23h".
-- **Event timeline** (`e`, export with `x`) and a **network history** of every
-  join, roam, address, route and VPN change (full-screen Network panel, `n`).
-- **Doctor mode** — `octomon --doctor` observes headless for ~20 s and prints
-  the analysis, this network's normal, its history, the measurements and recent
-  events; `--json` for machines. Redacted by default (SSID, IPs, MACs) so it is
-  safe to paste into a forum or ISP ticket; `--full` prints everything. Exit
-  codes: `0` healthy, `1` problems found, `3` couldn't measure.
+of the screen ("`▲ gateway unresponsive`", "`● connection healthy`") and **`y`**
+for the **triage ladder** behind it — every subsystem from your machine outward
+(link → gateway → DNS → ISP path → internet → web → destinations) with its
+status and its evidence, healthy rungs included. Simultaneous causes are all
+reported, a symptom is ranked below its cause rather than shouting over it, a
+busy CPU or a VPN is a caveat rather than a way to hide a fault, and every
+finding shows how long it has been going on.
 
 The panels:
 
 - **Connection Quality** — ICMP latency to configurable targets (last / avg /
-  p95 / max), jitter, loss, and a bufferbloat grade — plus the same columns
-  measured over TCP connects to port 443 (`i` toggles; full screen shows both),
-  which keep working on networks that blackhole ping. Auto-discovers the gateway
-  and next hops, traceroutes any target (`t`), and monitors every hop on a path
-  MTR-style (`m`) with per-hop loss and latency; `W` asks who owns any address.
-- **Bandwidth** — live throughput, an on-demand speed test (`s`) with a choice
-  of provider (Cloudflare / M-Lab / LibreSpeed / your own iPerf3 servers), and
-  per-process talkers or the
-  same traffic by remote address (`n`). Speed-test history is kept.
+  p95 / max), jitter, loss and a bufferbloat grade, plus the same columns over
+  TCP connects to port 443 (`i`), which keep working where ping is blackholed.
+  Auto-discovers the gateway and next hops, traceroutes (`t`), monitors every
+  hop MTR-style (`m`), and asks who owns an address (`W`).
+- **Bandwidth** — live throughput, an on-demand speed test (`s`), and
+  per-process talkers or the same traffic by remote address.
 - **Network** — interface, connection type (Wi-Fi / Ethernet / cellular / VPN
-  tunnel), addresses, gateway (v4 and v6), DNS with each resolver timed, Wi-Fi
-  SSID/channel/signal graph and airspace congestion, and — only when notable —
-  the proxy, clock, path MTU and NAT rows above.
+  tunnel), addresses, gateway (v4 and v6), each DNS resolver timed, Wi-Fi
+  SSID/channel/signal and airspace congestion, and — only when notable — proxy,
+  clock, path-MTU and NAT rows.
 - **Machine** — "is my box the bottleneck?": CPU with the busiest core, memory
   pressure, load, interface errors, thermal throttling.
 
-Any session can be **recorded to CSV** with `l`.
+What it looks for beyond the graphs:
 
-## Platform support
+- **Not connected at all** — no default route, a self-assigned 169.254 address,
+  an address with no gateway: named as such, not blamed on whatever failed
+  first downstream.
+- **Captive portals**, **web blocked while ping works**, **IPv6 broken while
+  IPv4 works** (and where it breaks), the mirror case, and a **system web
+  proxy** — detected, with the web check repeated through it.
+- **DNS honesty, not just speed** — a public reference resolver probed
+  alongside yours (yours failing while it works means "switch DNS"; the
+  reverse means this network forces its own), and a once-a-minute check that
+  non-existent names come back NXDOMAIN rather than an ad page.
+- **System clock skew** via NTP, **CGNAT / double NAT** read off the first
+  hops, **path-MTU black holes** where the OS lets them be measured, and
+  **outbound port filtering** (`c`): SSH, mail, DNS-over-TLS, NTP, QUIC.
+- **Per-network memory** — a learned *normal* for each network you use and a
+  persistent **incident history**, so the report can say "worse than usual
+  here" and "3 outages this week, clustering 20–23h".
+- **Event timeline** (`e`) and a **network history** of every join, roam,
+  address, route and VPN change.
 
-- **macOS** — everything works unprivileged. Path MTU cannot be measured
-  (the OS fragments regardless of the Don't-Fragment flag on unprivileged
-  sockets); octomon says so rather than guessing.
-- **Linux** — supported. Wi-Fi details use `iw` / `nmcli`, per-process
-  bandwidth uses `ss` (TCP only, and only your own processes unless root).
-  Latency often needs a one-line sysctl; see [PRIVILEGES.md](PRIVILEGES.md).
-- **Windows** — supported. Wi-Fi via the Native Wifi API, path discovery via
-  `tracert`, per-process bandwidth via ETW (needs a one-time group membership;
-  see [PRIVILEGES.md](PRIVILEGES.md)). Path MTU is not measured yet.
+**Doctor mode** — `octomon --doctor` observes headless for ~20 s and prints the
+analysis, this network's normal, its history, the measurements and recent
+events; `--json` for machines. Redacted by default (SSID, IPs, MACs) so it is
+safe to paste into a forum or ISP ticket; `--full` prints everything. Exit
+codes: `0` healthy, `1` problems found, `3` couldn't measure.
 
-### Linux: external tools
-
-octomon probes for these at startup and tells you what's missing and which
-package provides it (see `[?]` help):
-
-| Tool | Package | Needed for | Ships by default? |
-|---|---|---|---|
-| `traceroute` | `traceroute` | path discovery, `[t]`, `[m]` path monitor | Debian yes; Ubuntu and Fedora no |
-| `ss` | `iproute2` / `iproute` | per-process bandwidth (TCP only) | Yes |
-| `nmcli` | `network-manager` / `NetworkManager` | Wi-Fi details, airspace congestion | Desktop yes, server no |
-| `iw` | `iw` | Wi-Fi details (fallback for `nmcli`) | Varies |
-
-```sh
-sudo apt install traceroute iw     # Debian / Ubuntu
-sudo dnf install traceroute iw     # Fedora / RHEL
-```
-
-## Privileges
-
-octomon runs unprivileged by design and never asks for a password; it tells you
-at startup what that costs on your machine.
-
-| Platform | Unprivileged | To get everything |
-|---|---|---|
-| macOS | everything | nothing to do |
-| Linux | latency often needs a one-line sysctl; per-process bandwidth sees only your own processes | open the ping-socket range once, and `sudo octomon` for the full process view |
-| Windows | everything except per-process bandwidth | join Performance Log Users once |
-
-Detail, commands and reasoning: **[PRIVILEGES.md](PRIVILEGES.md)**.
+Any session can be **recorded to CSV** with `l`, and `D` writes a **support
+bundle** (report, routes, events, config and data files) to your Desktop.
 
 ## Install
 
@@ -127,9 +80,7 @@ brew trust securitypedant/octomon   # one-time: acknowledge this third-party tap
 brew install octomon
 ```
 
-### Linux
-
-#### apt (Debian & Ubuntu)
+### apt (Debian & Ubuntu)
 
 Signed repository at [octomon.dev](https://octomon.dev), amd64 and arm64:
 
@@ -139,42 +90,22 @@ echo "deb [signed-by=/usr/share/keyrings/octomon.gpg] https://octomon.dev/apt st
 sudo apt update && sudo apt install octomon
 ```
 
-#### Installer script (any distribution)
+### Other Linux
 
-Static musl binaries run on any distribution. The installer picks the right
-architecture and drops the binary in `~/.cargo/bin`:
+Static musl binaries run on any distribution; the installer picks the right
+architecture and drops it in `~/.cargo/bin`:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/securitypedant/octomon/releases/latest/download/octomon-installer.sh | sh
 ```
 
-Or take the tarball directly:
-
-```sh
-# x86_64 shown; use aarch64- for ARM machines
-curl -LO https://github.com/securitypedant/octomon/releases/latest/download/octomon-x86_64-unknown-linux-musl.tar.xz
-tar xf octomon-x86_64-unknown-linux-musl.tar.xz
-sudo install -m755 octomon /usr/local/bin/octomon
-```
-
-Install `traceroute` if your distribution omits it, and read
-[privileges: Linux](PRIVILEGES.md#linux).
-
 ### Windows
 
-Binaries for x64 and ARM64. The PowerShell installer puts the right one in
-`~\.cargo\bin`:
+x64 and ARM64; the PowerShell installer picks the right one:
 
 ```powershell
 irm https://github.com/securitypedant/octomon/releases/latest/download/octomon-installer.ps1 | iex
-```
-
-Or take the zip directly (`octomon-aarch64-pc-windows-msvc.zip` on ARM64):
-
-```powershell
-curl.exe -LO https://github.com/securitypedant/octomon/releases/latest/download/octomon-x86_64-pc-windows-msvc.zip
-Expand-Archive octomon-x86_64-pc-windows-msvc.zip -DestinationPath .
 ```
 
 The binary is unsigned, so SmartScreen warns on first run. Windows Terminal is
@@ -188,6 +119,9 @@ cargo install octomon            # needs Rust 1.88+
 git clone https://github.com/securitypedant/octomon && cd octomon && cargo build --release
 ```
 
+Plain tarballs and zips for every platform are on the
+[releases page](https://github.com/securitypedant/octomon/releases/latest).
+
 ## Usage
 
 ```sh
@@ -195,70 +129,50 @@ octomon                      # launch the dashboard
 octomon -t Home=192.168.1.1  # add extra ICMP targets (repeatable)
 octomon --no-speedtest       # disable the speed test
 octomon --ping-interval 500  # override the ping interval (ms)
+octomon --theme light        # force a colour scheme (auto|dark|light)
 octomon --log                # start recording to CSV immediately (headless recorder)
 octomon --check              # print a one-shot text snapshot and exit (no TUI)
 octomon --demo               # real measurements, fake MACs/addresses/SSIDs — safe to screen-record
+octomon --demo-mac           # like --demo, but disguises only this machine's MAC
 octomon --doctor [--json] [--full] [--speedtest] [--observe SECS]
 octomon --help
 ```
 
 ### Keyboard shortcuts
 
+Press **`?`** in the app for the complete, always-current list. The essentials:
+
 | Key | Action |
 |-----|--------|
-| `Tab` / `Shift+Tab` | Cycle panel focus |
-| `f` | Full-screen the focused panel |
-| `n` | Move between sub-panes of the focused panel |
-| `s` | Run a speed test |
-| `p` | Pause the display (collection continues) |
-| `r` | Re-probe network info |
-| `w` | Cycle the stats window (1 / 5 / 15 min) |
-| `l` | Start / stop recording the session to CSV |
+| `Tab` / `⇧Tab` · `f` · `n` | Cycle panels · full-screen · next sub-pane |
 | `y` | Connection analysis: the triage ladder and findings |
-| `e` | Event timeline; `x` inside it exports the events to a CSV in the config folder |
-| `M` | Drop a marker into the event timeline ("moved rooms", "call just dropped") |
-| `c` | Scan outbound ports (which protocols this network lets out); `r` inside it rescans |
-| `T` | The OS routing table, verbatim (split tunnels, VPN `0.0.0.0/1` overrides, a missing default); `r` inside it re-reads |
-| `?` | Help |
-| `Esc` | Back out of a view / leave full-screen |
-| `q` / `Ctrl+C` | Quit |
-| **Navigation** | |
-| `↑` `↓` (or `j` `k`) · `PgUp` / `PgDn` | Move the cursor · by ten |
-| `←` `→` · `Enter` · `Space` | Move sort column · sort · toggle direction |
-| `Shift+R` | Reset everything this panel has accumulated |
-| `Ctrl+R` | Total reset: erase **all** octomon config and stored data (baselines, history, speed tests) — asks you to type `ERASE` to confirm |
+| `s` · `w` | Speed test · stats window (30s/1m/5m/15m) |
+| `r` · `G` | Re-probe network info · rescan gateway, hops and public IP |
+| `G` | Rescan the path: gateway, next hops and public IP |
+| `e` · `c` · `T` · `M` | Events · outbound port scan · routing table · marker |
+| `l` · `D` | Record session to CSV · write a support-bundle zip |
+| `P` · `?` · `Esc` · `q` | Pause the display · help · back · quit |
+| `↑`/`↓` (or `j`/`k`) · `PgUp`/`PgDn` | Move the cursor · by ten |
+| `←` `→` · `Enter` | Move sort column · sort / flip direction |
+| `⇧R` · `Ctrl+R` | Reset this panel · erase **all** config and stored data |
 | **Connection Quality** | |
-| `a` / `d` | Add / delete a target (add accepts an IP or DNS name) |
-| `i` | Toggle the stats between ICMP and TCP connect (`:443`) — full screen shows both side by side |
-| `g` | Graph the selected target's latency |
-| `t` | Traceroute the selected target once |
-| `m` | Continuously monitor every hop to the target (MTR-style) |
-| `W` | Who owns the selected address (target or hop) — RDAP/whois |
+| `a` / `d` · `i` | Add / delete a target · stats ICMP ↔ TCP `:443` |
+| `g` · `t` · `m` · `W` | Graph · traceroute once · monitor every hop · whois |
 | **Bandwidth** | |
-| `v` | Cycle the speed-test provider (saved to config) |
-| `n` | Processes → remote addresses → speed-test history (full-screen) |
-| `W` / `a` | Whois the selected remote address / add it as a target |
-| `d` | Delete the selected speed test from the history (full-screen history pane) |
-| `/` | Filter the talkers tables to rows matching typed text (process name or pid, remote address, port) — `Enter` keeps it, `Esc` clears it |
-| `I` | Add an iPerf3 server (`Name=host[:port]`) — saved to config, cycled with `v` |
-| `z` | Zoom the active table to 80% of the screen: every column, full names/addresses, per-process pid + path + command line, per-test server + network |
+| `n` · `z` · `/` | Processes → remotes → history · zoom · filter rows |
+| `v` / `I` / `V` | Cycle · add · remove a speed-test provider |
+| `W` / `a` · `p` / `u` · `o` | Whois / add remote · pin / unpin · follow row |
 | **Network** | |
-| `N` | Name this network ("Home", "Office") |
-| `L` | Saved network locations, their normals and incident history |
-| `f` then `n` | Full-screen: DNS graphs, and the network history pane |
+| `N` · `L` | Name this network · saved locations and their history |
 
 ## Speed-test providers
 
-`v` cycles between **Cloudflare** (`speed.cloudflare.com`), **M-Lab** (NDT7,
-nearest server via M-Lab's locate service), **LibreSpeed** (a public server
-from the community list, or your own via `librespeed_server`), and any
-**iPerf3** servers you add: press `I` in the Bandwidth panel and enter
-`Name=host[:port]` (port defaults to 5201) — saved to the config, selected,
-and on the `v` wheel from then on. Running one shells out to the `iperf3`
-binary (`brew install iperf3` / `apt install iperf3`) for 8 seconds each
-direction against a server *you* control — no third party at all. Each run
-measures download and upload (HTTP providers also measure loaded-latency
-bufferbloat), and is saved to the history.
+`v` cycles between **Cloudflare** (`speed.cloudflare.com`), **M-Lab** (NDT7),
+**LibreSpeed** (a public server, or your own via `librespeed_server`), and any
+**iPerf3** servers you add with `I` as `Name=host[:port]`. iPerf3 shells out to
+the `iperf3` binary (`brew install iperf3` / `apt install iperf3`) for 8 seconds
+each direction against a server *you* control — no third party at all. Every run
+is saved to the history.
 
 ## Configuration
 
@@ -266,14 +180,54 @@ On first run octomon writes a config file you can edit:
 
 - **Config:** `~/.config/octomon/config.toml` (honours `$XDG_CONFIG_HOME`;
   `%APPDATA%\octomon\` on Windows). Targets, timings, endpoints, the reference
-  resolver, the NTP server, the egress-scan list.
-- **Light terminals:** octomon asks the terminal its background colour at
-  startup and adapts. If yours guesses wrong, set `theme = "light"` (or
-  `"dark"`) in the config, or pass `--theme light` for one run.
-- **Data** (`~/.local/share/octomon/`, honours `$XDG_DATA_HOME`):
-  `speedtests.jsonl` (speed-test history), `baselines.json` (each network's
-  learned normal), `history.jsonl` (finished incidents per network, kept 90
-  days), and `octomon-<timestamp>.csv` recordings while recording is on.
+  resolver, the NTP server, the egress-scan list, `theme = "light"` if the
+  terminal-background probe guesses wrong.
+- **Data** (`~/.local/share/octomon/`, honours `$XDG_DATA_HOME`;
+  `%LOCALAPPDATA%\octomon\` on Windows): `speedtests.jsonl` (speed-test
+  history), `baselines.json` (each network's learned normal), `history.jsonl`
+  (finished incidents per network, kept 90 days), `net_history.jsonl` (link,
+  address, route and VPN changes), `whois.log` (every `W` lookup, trimmed to
+  the most recent 8 MB), `errors.log`, and `octomon-<timestamp>.csv` recordings
+  while recording is on.
+
+All of it describes your network, so octomon writes it owner-only — mode `0600`
+in `0700` directories, and files from older versions are tightened at startup.
+
+### errors.log
+
+Most of what octomon does is best-effort: a traceroute that won't run, a whois
+that times out, an `iperf3` binary that isn't installed, a public-IP endpoint
+answering with a hotel's sign-in page. None of those stop the dashboard, and
+most never reach the screen at all — so each one also appends a line to
+`errors.log` in the data folder, with a banner marking every restart:
+
+```
+=== octomon 0.9.5 started · macos · pid 41207 · 2026-08-27T09:14:02.118+01:00 ===
+2026-08-27T09:14:04.702+01:00  discovery   traceroute toward 1.1.1.1 answered no hops — the path is filtered, or a captive portal is in the way
+2026-08-27T09:14:14.881+01:00  public-ip   https://api.ipify.org: no address in the answer
+```
+
+Repeats of the same message fold into a count so one broken thing can't bury
+the rest, and the file rolls to `errors.log.1` at a megabyte. The last few
+lines of the current run also appear in `octomon --doctor` and in the `D`
+support bundle.
+
+## Platforms & privileges
+
+octomon runs unprivileged by design and never asks for a password; it tells you
+at startup what that costs on your machine.
+
+| Platform | Unprivileged | To get everything |
+|---|---|---|
+| macOS | everything (path MTU can't be measured — the OS fragments regardless of the DF flag, and octomon says so rather than guessing) | nothing to do |
+| Linux | latency often needs a one-line sysctl; per-process bandwidth sees only your own processes | open the ping-socket range once, and `sudo octomon` for the full process view |
+| Windows | everything except per-process bandwidth; path MTU not measured yet | join Performance Log Users once |
+
+Linux also leans on a few external tools (`traceroute`, `ss`, `nmcli`, `iw`)
+that not every distribution ships. octomon probes for them at startup and names
+the missing package; `sudo apt install traceroute iw` covers the common gap.
+
+Detail, commands and reasoning: **[PRIVILEGES.md](PRIVILEGES.md)**.
 
 ## Network & privacy
 
@@ -315,8 +269,12 @@ Notes:
 - Turn any of it off or point it elsewhere in `config.toml`: `public_ip_url`,
   `discovery_probe`, `dns_reference_resolver`, `ntp_server` (`""` disables),
   `http_probe_provider`, `egress_checks`, `edge_check_url`.
-- The CSV recordings, baselines and history include your SSID, gateway and
-  addresses; treat them as you would any other file about your network.
+- Everything octomon writes about your network stays on your machine, readable
+  only by you. The files listed under [Configuration](#configuration) —
+  recordings, baselines, incident and network history, `whois.log`,
+  `errors.log` — include your SSID, gateway and addresses. The `D` support
+  bundle gathers all of them, unredacted and by design, so it is worth a look
+  before sending one on; `--doctor` is the redacted thing to paste.
 
 ## Contributing
 

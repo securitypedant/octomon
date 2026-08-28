@@ -237,7 +237,13 @@ pub fn routing_table() -> Vec<String> {
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     let table: Option<Vec<String>> = None;
 
-    table.unwrap_or_else(|| vec!["could not read the routing table on this platform".to_string()])
+    table.unwrap_or_else(|| {
+        crate::errlog::log(
+            "routes",
+            "the platform's routing-table tool could not be run — [T] and the support bundle have no table",
+        );
+        vec!["could not read the routing table on this platform".to_string()]
+    })
 }
 
 /// `search` / `domain` directives out of resolv.conf text.

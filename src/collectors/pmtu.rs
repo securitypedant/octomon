@@ -103,6 +103,7 @@ pub async fn run(
                 }
                 Err(e) => {
                     tracing::debug!("pmtu probe: {e}");
+                    crate::errlog::log("pmtu", format!("probe toward {target} failed: {e}"));
                     s.pmtu = None;
                     s.pmtu_error = Some(e);
                 }

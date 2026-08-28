@@ -196,6 +196,17 @@ impl Disguise {
     }
 }
 
+/// Drop every process command line. Both demo modes exist so a screen can be
+/// recorded, and argv is the one thing on screen that routinely carries a
+/// secret outright — a `--token=…`, a `-p` password, a signed URL. There is no
+/// disguise for it that keeps it useful, so the zoom detail simply loses the
+/// `cmd` row (the executable path above it still answers "what is this?").
+fn drop_command_lines(v: &mut AppState) {
+    for d in v.proc_details.values_mut() {
+        d.cmd.clear();
+    }
+}
+
 /// A copy of `s` with everything identifying rewritten. `d` accumulates the
 /// mapping across frames so the fakes stay stable for the whole session.
 pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
@@ -363,6 +374,7 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
             f.evidence = f.evidence.iter().map(|l| d.text(l)).collect();
         }
     }
+    drop_command_lines(&mut v);
     v
 }
 
@@ -409,6 +421,7 @@ pub fn disguise_machine(s: &AppState, d: &mut Disguise) -> AppState {
     if let Some(n) = v.notice.as_mut() {
         *n = d.text(n);
     }
+    drop_command_lines(&mut v);
     v
 }
 
@@ -531,6 +544,35 @@ mod tests {
         assert_eq!(v.netinfo.dns[0], "8.8.8.8");
         assert_eq!(v.netinfo.wifi.unwrap().ssid, "Hotel Guest");
         assert_eq!(v.netinfo.ipv6[1], s.netinfo.ipv6[1], "privacy v6 kept");
+    }
+
+    /// argv is the one thing in the zoom detail that can carry a secret
+    /// outright, and both demo modes exist so the screen can be recorded.
+    /// The path stays: it answers "what is this?" and names no secret.
+    #[test]
+    fn neither_demo_mode_shows_a_command_line() {
+        let mut s = AppState::new(vec![]);
+        s.proc_details.insert(
+            4242,
+            crate::app::ProcDetail {
+                exe: "/usr/local/bin/sync".into(),
+                cmd: "/usr/local/bin/sync --token=hunter2 --host=db.internal".into(),
+                user: "simon".into(),
+                parent: "login (1)".into(),
+                started: "08-27 10:00".into(),
+            },
+        );
+        for view in [
+            disguise(&s, &mut Disguise::new()),
+            disguise_machine(&s, &mut Disguise::new()),
+        ] {
+            let d = &view.proc_details[&4242];
+            assert!(d.cmd.is_empty(), "command line survived: {}", d.cmd);
+            assert_eq!(
+                d.exe, "/usr/local/bin/sync",
+                "the path still answers 'what'"
+            );
+        }
     }
 
     #[test]

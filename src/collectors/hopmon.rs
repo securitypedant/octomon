@@ -105,24 +105,31 @@ async fn discover(
         .stderr(Stdio::null())
         .spawn();
 
-    let Ok(mut child) = child else {
-        let mut s = state.lock().unwrap();
-        if let Some(m) = s
-            .hop_monitor
-            .as_mut()
-            .filter(|m| m.generation == generation)
-        {
-            m.discovering = false;
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            crate::errlog::log(
+                "hopmon",
+                format!("could not run {} toward {dest}: {e}", tr::PROGRAM),
+            );
+            let mut s = state.lock().unwrap();
+            if let Some(m) = s
+                .hop_monitor
+                .as_mut()
+                .filter(|m| m.generation == generation)
+            {
+                m.discovering = false;
+            }
+            s.notice_event(
+                crate::verdict::Severity::Info,
+                crate::app::EventCategory::Path,
+                format!(
+                    "{} could not be run — cannot discover the hops toward the target",
+                    tr::PROGRAM
+                ),
+            );
+            return;
         }
-        s.notice_event(
-            crate::verdict::Severity::Info,
-            crate::app::EventCategory::Path,
-            format!(
-                "{} could not be run — cannot discover the hops toward the target",
-                tr::PROGRAM
-            ),
-        );
-        return;
     };
 
     if let Some(stdout) = child.stdout.take() {

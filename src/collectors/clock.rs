@@ -54,6 +54,7 @@ pub async fn run(
                     s.clock.checked = true;
                 }
                 Err(e) => {
+                    crate::errlog::log("ntp", format!("{server}: {e}"));
                     s.clock.ntp_offset_ms = None;
                     s.clock.ntp_error = Some(e);
                     s.clock.checked = true;

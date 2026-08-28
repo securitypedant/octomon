@@ -86,20 +86,33 @@ fn path() -> Option<PathBuf> {
     crate::store::data_dir().map(|d| d.join("history.jsonl"))
 }
 
-/// Append one finished episode (best-effort; ignored on error).
+/// Append one finished episode (best-effort; ignored on error, logged so a
+/// gap in the incident history has an explanation).
 pub fn append(ep: &Episode) {
-    let Some(p) = path() else { return };
+    let Some(p) = path() else {
+        crate::errlog::log("history", "no data directory — incident not saved");
+        return;
+    };
     if let Some(dir) = p.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = crate::store::create_dir_private(dir);
     }
-    if let (Ok(mut f), Ok(line)) = (
-        std::fs::OpenOptions::new()
+    match (
+        crate::store::private_options()
             .create(true)
             .append(true)
             .open(&p),
         serde_json::to_string(ep),
     ) {
-        let _ = writeln!(f, "{line}");
+        (Ok(mut f), Ok(line)) => {
+            if let Err(e) = writeln!(f, "{line}") {
+                crate::errlog::log("history", format!("incident not saved: {e}"));
+            }
+        }
+        (Err(e), _) => crate::errlog::log(
+            "history",
+            format!("could not open {}: {e} — incident not saved", p.display()),
+        ),
+        (_, Err(e)) => crate::errlog::log("history", format!("incident not serializable: {e}")),
     }
 }
 
@@ -125,7 +138,7 @@ pub fn load() -> Vec<Episode> {
             .filter_map(|e| serde_json::to_string(e).ok())
             .map(|l| l + "\n")
             .collect();
-        let _ = std::fs::write(&p, body);
+        let _ = crate::store::write_private(&p, body);
     }
     kept
 }

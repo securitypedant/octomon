@@ -101,6 +101,24 @@ ETW provider does report UDP — see
 So: fix the sysctl and run as yourself if you mainly care about latency and the
 path monitor; use `sudo` if you want the full picture.
 
+### External tools
+
+Several probes shell out to a system tool, and which of those ship by default
+varies sharply by distribution. octomon probes for them at startup and tells you
+what is missing and which package provides it (also listed under `?`):
+
+| Tool | Package | Needed for | Ships by default? |
+|---|---|---|---|
+| `traceroute` | `traceroute` | path discovery, `[t]`, `[m]` path monitor | Debian yes; Ubuntu and Fedora no |
+| `ss` | `iproute2` / `iproute` | per-process bandwidth (TCP only) | Yes |
+| `nmcli` | `network-manager` / `NetworkManager` | Wi-Fi details, airspace congestion | Desktop yes, server no |
+| `iw` | `iw` | Wi-Fi details (fallback for `nmcli`) | Varies |
+
+```sh
+sudo apt install traceroute iw     # Debian / Ubuntu
+sudo dnf install traceroute iw     # Fedora / RHEL
+```
+
 ## Windows
 
 Everything except per-process bandwidth works unprivileged. That one panel

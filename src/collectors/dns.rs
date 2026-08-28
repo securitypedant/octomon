@@ -119,6 +119,11 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
                     };
                 }
                 Err(reason) => {
+                    // The panel shows this live and forgets it; a resolver
+                    // that failed for ten minutes at lunchtime is exactly the
+                    // sort of thing the log is for. Repeats fold, so a dead
+                    // resolver costs one line a minute, not one a second.
+                    crate::errlog::log("dns", format!("{server} query for {name}: {reason}"));
                     probe.record(None);
                     probe.status = reason;
                 }

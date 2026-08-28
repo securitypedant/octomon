@@ -36,6 +36,10 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr, label: String) {
         let mut child = match child {
             Ok(c) => c,
             Err(e) => {
+                crate::errlog::log(
+                    "traceroute",
+                    format!("could not run {} toward {addr}: {e}", tr::PROGRAM),
+                );
                 finish(&state, Some(format!("{} unavailable: {e}", tr::PROGRAM)));
                 return;
             }

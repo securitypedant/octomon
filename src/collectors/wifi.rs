@@ -34,7 +34,17 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>) {
             continue;
         }
 
-        if let Some(w) = crate::platform::wifi_details().await {
+        let Some(w) = crate::platform::wifi_details().await else {
+            // A Wi-Fi link whose radio details never arrive: the SSID, signal
+            // and channel columns simply stay blank, which reads as "not
+            // measured yet" indefinitely.
+            crate::errlog::log(
+                "wifi",
+                "the radio details probe returned nothing on a Wi-Fi link — signal and SSID stay blank",
+            );
+            continue;
+        };
+        {
             let mut s = state.lock().unwrap();
             let known = !w.ssid.is_empty() && !w.ssid.contains("redacted");
             if known {
