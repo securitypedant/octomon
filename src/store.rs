@@ -102,6 +102,10 @@ pub fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
 /// file is created, which is why [`tighten_permissions`] exists for the ones
 /// written before this was the rule.
 pub fn private_options() -> std::fs::OpenOptions {
+    // Windows compiles the mode block out and never mutates this, so the
+    // binding is only `mut` on unix — and `-D warnings` fails the build there
+    // without saying so.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut opts = std::fs::OpenOptions::new();
     #[cfg(unix)]
     {
