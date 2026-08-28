@@ -47,73 +47,86 @@ struct Ctx {
 
 /// Terminal dashboard for network performance.
 ///
-/// With no options at all, octomon opens the dashboard. Everything below either
-/// picks a different one-shot mode or overrides a setting from the config file
-/// for this run only.
+/// Run with no options to open the dashboard. Everything below either picks a
+/// one-shot mode instead, or overrides a config setting for this run only.
 #[derive(Parser, Debug)]
 #[command(
     name = "octomon",
     version = util::VERSION,
     about,
-    after_help = "Every override here has a permanent equivalent in the config file.\n\
-                  `octomon --paths` prints where that file and the data folder live."
+    // Long help stays readable on a wide terminal: past this the eye loses the
+    // line it was on. Narrow terminals still wrap to their own width.
+    max_term_width = 96,
+    after_help = "Every override has a permanent equivalent in the config file.\n\
+                  Run `octomon --paths` to find it.\n\
+                  \n\
+                  Press ? inside the dashboard for the keyboard shortcuts."
 )]
 struct Cli {
     // ---- Modes -----------------------------------------------------------
-    /// One-shot diagnosis: observe for ~20s, print the verdict with its
-    /// evidence and a paste-able report, then exit. Exit codes: 0 healthy,
-    /// 1 problems found, 3 could not measure.
+    /// Diagnose once, print the analysis, and exit
+    ///
+    /// Observes for ~20s, then prints the verdict with its evidence and a
+    /// paste-able report. Exit codes: 0 healthy, 1 problems found,
+    /// 3 could not measure.
     #[arg(long, help_heading = "Modes")]
     doctor: bool,
 
-    /// Observe, then write a support bundle (the same zip the [D] key writes:
-    /// the full report, the routing table, the event timeline, the config and
-    /// every data file) and exit, printing where it landed. Takes an optional
-    /// path; without one it lands on the Desktop.
+    /// Write a support-bundle zip and print its path
+    ///
+    /// The same zip the [D] key writes: the full report, the routing table,
+    /// the event timeline, the config and every data file. Observes first, so
+    /// a scripted run captures real measurements. Lands on the Desktop unless
+    /// you name a path.
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "", help_heading = "Modes")]
     bundle: Option<String>,
 
-    /// Run collectors briefly, print a text snapshot, then exit (no TUI).
+    /// Print a one-shot text snapshot and exit (no TUI)
     #[arg(long, help_heading = "Modes")]
     check: bool,
 
-    /// Start recording the session to CSV immediately (same as pressing 'l'),
-    /// so octomon can be run headless as a recorder.
+    /// Record the session to CSV from the start (headless recorder)
     #[arg(long, help_heading = "Modes")]
     log: bool,
 
-    /// Print where the config file, the data folder and support bundles live,
-    /// then exit.
+    /// Print where the config, data and bundles live, then exit
     #[arg(long, help_heading = "Modes")]
     paths: bool,
 
     // ---- Report options --------------------------------------------------
-    /// With --doctor / --bundle: how many seconds to observe before reporting
-    /// (default 20, or 45 with --speedtest). Longer = better loss statistics.
+    /// Seconds to observe before reporting [default: 20, or 45 with --speedtest]
+    ///
+    /// Longer windows give better loss statistics. Applies to --doctor and
+    /// --bundle.
     #[arg(long, value_name = "SECS", help_heading = "Report options")]
     observe: Option<u64>,
 
-    /// With --doctor / --bundle: also run a speed test (observation takes ~45s).
+    /// Also run a speed test (observation takes ~45s)
     #[arg(long, help_heading = "Report options")]
     speedtest: bool,
 
-    /// With --doctor: print real SSIDs / IPs / MACs instead of redacting them.
-    /// The default output is safe to paste into a forum or ISP ticket.
-    /// (A bundle is always unredacted — it is meant for someone helping you.)
+    /// Print real SSIDs, IPs and MACs instead of redacting them
+    ///
+    /// The default --doctor output is safe to paste into a forum or an ISP
+    /// ticket. A bundle is always unredacted: it is meant for someone helping
+    /// you.
     #[arg(long, help_heading = "Report options")]
     full: bool,
 
-    /// With --doctor: emit the report as JSON instead of text.
+    /// Emit the --doctor report as JSON instead of text
     #[arg(long, help_heading = "Report options")]
     json: bool,
 
     // ---- Overrides -------------------------------------------------------
-    /// Read this config file instead of the default one. Useful for a second
-    /// profile, or for a scripted run that must not touch your own settings.
+    /// Use this config file instead of the default
+    ///
+    /// For a second profile, or a scripted run that must not touch your own
+    /// settings. A missing file is created; one that will not parse is an
+    /// error rather than a silent fall back to defaults.
     #[arg(long, value_name = "PATH", help_heading = "Overrides")]
     config: Option<std::path::PathBuf>,
 
-    /// Add an ICMP target: `LABEL=IP` or bare `IP`. Repeatable.
+    /// Add an ICMP target: LABEL=IP, or a bare IP [repeatable]
     #[arg(
         short = 't',
         long = "target",
@@ -122,22 +135,25 @@ struct Cli {
     )]
     targets: Vec<String>,
 
-    /// Override the ICMP ping interval, in milliseconds.
+    /// ICMP ping interval, in milliseconds
     #[arg(long, value_name = "MS", help_heading = "Overrides")]
     ping_interval: Option<u64>,
 
-    /// Override the per-probe ICMP timeout, in milliseconds.
+    /// Per-probe ICMP timeout, in milliseconds
     #[arg(long, value_name = "MS", help_heading = "Overrides")]
     ping_timeout: Option<u64>,
 
-    /// Which speed-test provider `s` runs: cloudflare, mlab, librespeed, or the
-    /// name of one of your iPerf3 servers.
+    /// Which provider a speed test uses
+    ///
+    /// One of cloudflare, mlab, librespeed, or the name of one of your iPerf3
+    /// servers.
     #[arg(long, value_name = "NAME", help_heading = "Overrides")]
     speedtest_provider: Option<String>,
 
-    /// Add an iPerf3 server for this run: `NAME=host[:port]` (port defaults to
-    /// 5201). Repeatable. Unlike the [I] key this is not saved to the config;
-    /// pair it with --speedtest-provider NAME to select it.
+    /// Add an iPerf3 server for this run: NAME=host[:port] [repeatable]
+    ///
+    /// Port defaults to 5201. Unlike the [I] key this is not saved to the
+    /// config; select it with --speedtest-provider NAME.
     #[arg(
         long = "iperf3",
         value_name = "NAME=HOST[:PORT]",
@@ -145,41 +161,50 @@ struct Cli {
     )]
     iperf3: Vec<String>,
 
-    /// How live traffic rates read: bytes (KB/s, MB/s) or bits (Kb/s, Mb/s).
-    #[arg(long, value_name = "bytes|bits", help_heading = "Overrides")]
+    /// How live traffic rates read
+    #[arg(
+        long,
+        value_name = "UNITS",
+        value_parser = ["bytes", "bits"],
+        help_heading = "Overrides"
+    )]
     bandwidth_units: Option<String>,
 
-    /// Colour scheme: auto (ask the terminal its background), dark, or light.
-    /// Overrides the config's `theme` for this run.
-    #[arg(long, value_name = "auto|dark|light", help_heading = "Overrides")]
+    /// Colour scheme; auto asks the terminal its background
+    #[arg(
+        long,
+        value_name = "THEME",
+        value_parser = ["auto", "dark", "light"],
+        help_heading = "Overrides"
+    )]
     theme: Option<String>,
 
     // ---- Turn things off -------------------------------------------------
-    /// Disable the on-demand speed test.
+    /// Disable the on-demand speed test
     #[arg(long, help_heading = "Turn things off")]
     no_speedtest: bool,
 
-    /// Skip the startup traceroute that finds the gateway and first hops.
-    /// Same as an empty `discovery_probe`.
+    /// Skip the startup traceroute for the gateway and first hops
     #[arg(long, help_heading = "Turn things off")]
     no_discovery: bool,
 
-    /// Never call octomon.dev/edge, the one octomon-operated endpoint.
-    /// Same as an empty `edge_check_url`.
+    /// Never call octomon.dev/edge, the one octomon-operated endpoint
     #[arg(long, help_heading = "Turn things off")]
     no_edge: bool,
 
     // ---- Screen recording ------------------------------------------------
-    /// Demo mode: everything measures for real, but the screen shows fake
-    /// MAC addresses, addresses, SSIDs and other identifying details, kept
-    /// consistent for the session — safe to screen-record.
+    /// Real measurements, fake MACs, addresses and SSIDs
+    ///
+    /// Safe to screen-record: the disguise is consistent for the session, and
+    /// process command lines are hidden.
     #[arg(long, help_heading = "Screen recording")]
     demo: bool,
 
-    /// Like --demo, but hides only what identifies *this machine* — its MAC
-    /// address (and any IPv6 address embedding it). The network's own details
-    /// stay real: for screenshots on a network that isn't private (a hotel,
-    /// an airport) taken from a machine that is.
+    /// Like --demo, but disguise only this machine
+    ///
+    /// Hides the MAC address (and any IPv6 address embedding it) while the
+    /// network's own details stay real: for screenshots on a network that is
+    /// not private, taken from a machine that is.
     #[arg(long, conflicts_with = "demo", help_heading = "Screen recording")]
     demo_mac: bool,
 }

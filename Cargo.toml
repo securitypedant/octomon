@@ -32,7 +32,10 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 [dependencies]
 anyhow = "1.0.104"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
-clap = { version = "4.6.6", features = ["derive"] }
+# `wrap_help` is what makes --help readable: without it clap emits each
+# description as one unbroken line and leaves the terminal to hard-wrap it,
+# which breaks words mid-syllable and starts continuations at column 0.
+clap = { version = "4.6.6", features = ["derive", "wrap_help"] }
 crossterm = "0.29.0"
 directories = "6.0.0"
 futures-util = "0.3.33"
