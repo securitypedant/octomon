@@ -12,8 +12,9 @@ categories = ["command-line-utilities", "network-programming"]
 rust-version = "1.88"
 # An allowlist rather than `exclude`: anything added to the repo later stays out
 # of the crate unless it is deliberately let in. Cargo.toml and Cargo.lock are
-# always included. Keeps CI config, release tooling and the 429K screenshot —
-# which crates.io cannot render anyway — out of what users download.
+# always included. Keeps CI config, release tooling and the multi-megabyte
+# screenshot — which crates.io cannot render anyway — out of what users
+# download.
 include = [
     "src/**/*.rs",
     "build.rs",

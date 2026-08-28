@@ -399,6 +399,35 @@
         </details>
 
         <details>
+          <summary>Why does octomon look up a domain name that cannot exist?</summary>
+          <div class="a">
+            <p>Because a resolver can be quick, answer every query, and still
+            be lying, and no amount of timing will tell you. Once a minute
+            octomon asks each resolver for a made-up name under the probe
+            domain (<code>octomon-nx-3f0a91b2c4.example.com</code>, stamped
+            with the clock so nobody can have it cached). That name provably
+            has no address, so the only honest reply is NXDOMAIN, "no such
+            domain". An address back means the resolver invented one, and is
+            redirecting your misses to a search or ad page.</p>
+            <p>It matters because plenty of software depends on a name
+            <em>failing</em> to resolve. Typing a single word in a browser bar
+            reaches your search engine only because the lookup fails first;
+            failover logic that tries a name, expects nothing, and moves on
+            will instead connect to whatever was invented, and hang. What the
+            user reports is never "DNS is broken", it's "the internet is weird
+            sometimes".</p>
+            <p>It matters to the analysis too: without this probe a hijacking
+            resolver looks perfect. Fast answers, no loss, a green rung, while
+            DNS quietly lies. The comparison also names who is doing it. If
+            only your own resolvers redirect, that's your ISP monetising your
+            typos. If the public reference resolver comes back redirected as
+            well, nothing is reaching the resolver you asked for at all: this
+            network is intercepting port 53, which is a captive portal or a
+            transparent redirect, and a much bigger deal.</p>
+          </div>
+        </details>
+
+        <details>
           <summary>Does octomon send my data anywhere?</summary>
           <div class="a">
             <p>No. Baselines, incident history and speed-test results live in

@@ -46,71 +46,142 @@ struct Ctx {
 }
 
 /// Terminal dashboard for network performance.
+///
+/// With no options at all, octomon opens the dashboard. Everything below either
+/// picks a different one-shot mode or overrides a setting from the config file
+/// for this run only.
 #[derive(Parser, Debug)]
-#[command(name = "octomon", version = util::VERSION, about)]
+#[command(
+    name = "octomon",
+    version = util::VERSION,
+    about,
+    after_help = "Every override here has a permanent equivalent in the config file.\n\
+                  `octomon --paths` prints where that file and the data folder live."
+)]
 struct Cli {
-    /// Run collectors briefly, print a text snapshot, then exit (no TUI).
-    #[arg(long)]
-    check: bool,
-
+    // ---- Modes -----------------------------------------------------------
     /// One-shot diagnosis: observe for ~20s, print the verdict with its
     /// evidence and a paste-able report, then exit. Exit codes: 0 healthy,
     /// 1 problems found, 3 could not measure.
-    #[arg(long)]
+    #[arg(long, help_heading = "Modes")]
     doctor: bool,
 
-    /// With --doctor: also run a speed test (observation takes ~45s).
-    #[arg(long)]
+    /// Observe, then write a support bundle (the same zip the [D] key writes:
+    /// the full report, the routing table, the event timeline, the config and
+    /// every data file) and exit, printing where it landed. Takes an optional
+    /// path; without one it lands on the Desktop.
+    #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "", help_heading = "Modes")]
+    bundle: Option<String>,
+
+    /// Run collectors briefly, print a text snapshot, then exit (no TUI).
+    #[arg(long, help_heading = "Modes")]
+    check: bool,
+
+    /// Start recording the session to CSV immediately (same as pressing 'l'),
+    /// so octomon can be run headless as a recorder.
+    #[arg(long, help_heading = "Modes")]
+    log: bool,
+
+    /// Print where the config file, the data folder and support bundles live,
+    /// then exit.
+    #[arg(long, help_heading = "Modes")]
+    paths: bool,
+
+    // ---- Report options --------------------------------------------------
+    /// With --doctor / --bundle: how many seconds to observe before reporting
+    /// (default 20, or 45 with --speedtest). Longer = better loss statistics.
+    #[arg(long, value_name = "SECS", help_heading = "Report options")]
+    observe: Option<u64>,
+
+    /// With --doctor / --bundle: also run a speed test (observation takes ~45s).
+    #[arg(long, help_heading = "Report options")]
     speedtest: bool,
 
     /// With --doctor: print real SSIDs / IPs / MACs instead of redacting them.
     /// The default output is safe to paste into a forum or ISP ticket.
-    #[arg(long)]
+    /// (A bundle is always unredacted — it is meant for someone helping you.)
+    #[arg(long, help_heading = "Report options")]
     full: bool,
 
-    /// With --doctor: how many seconds to observe before reporting
-    /// (default 20, or 45 with --speedtest). Longer = better loss statistics.
-    #[arg(long, value_name = "SECS")]
-    observe: Option<u64>,
-
     /// With --doctor: emit the report as JSON instead of text.
-    #[arg(long)]
+    #[arg(long, help_heading = "Report options")]
     json: bool,
 
+    // ---- Overrides -------------------------------------------------------
+    /// Read this config file instead of the default one. Useful for a second
+    /// profile, or for a scripted run that must not touch your own settings.
+    #[arg(long, value_name = "PATH", help_heading = "Overrides")]
+    config: Option<std::path::PathBuf>,
+
+    /// Add an ICMP target: `LABEL=IP` or bare `IP`. Repeatable.
+    #[arg(
+        short = 't',
+        long = "target",
+        value_name = "[LABEL=]IP",
+        help_heading = "Overrides"
+    )]
+    targets: Vec<String>,
+
+    /// Override the ICMP ping interval, in milliseconds.
+    #[arg(long, value_name = "MS", help_heading = "Overrides")]
+    ping_interval: Option<u64>,
+
+    /// Override the per-probe ICMP timeout, in milliseconds.
+    #[arg(long, value_name = "MS", help_heading = "Overrides")]
+    ping_timeout: Option<u64>,
+
+    /// Which speed-test provider `s` runs: cloudflare, mlab, librespeed, or the
+    /// name of one of your iPerf3 servers.
+    #[arg(long, value_name = "NAME", help_heading = "Overrides")]
+    speedtest_provider: Option<String>,
+
+    /// Add an iPerf3 server for this run: `NAME=host[:port]` (port defaults to
+    /// 5201). Repeatable. Unlike the [I] key this is not saved to the config;
+    /// pair it with --speedtest-provider NAME to select it.
+    #[arg(
+        long = "iperf3",
+        value_name = "NAME=HOST[:PORT]",
+        help_heading = "Overrides"
+    )]
+    iperf3: Vec<String>,
+
+    /// How live traffic rates read: bytes (KB/s, MB/s) or bits (Kb/s, Mb/s).
+    #[arg(long, value_name = "bytes|bits", help_heading = "Overrides")]
+    bandwidth_units: Option<String>,
+
+    /// Colour scheme: auto (ask the terminal its background), dark, or light.
+    /// Overrides the config's `theme` for this run.
+    #[arg(long, value_name = "auto|dark|light", help_heading = "Overrides")]
+    theme: Option<String>,
+
+    // ---- Turn things off -------------------------------------------------
     /// Disable the on-demand speed test.
-    #[arg(long)]
+    #[arg(long, help_heading = "Turn things off")]
     no_speedtest: bool,
 
+    /// Skip the startup traceroute that finds the gateway and first hops.
+    /// Same as an empty `discovery_probe`.
+    #[arg(long, help_heading = "Turn things off")]
+    no_discovery: bool,
+
+    /// Never call octomon.dev/edge, the one octomon-operated endpoint.
+    /// Same as an empty `edge_check_url`.
+    #[arg(long, help_heading = "Turn things off")]
+    no_edge: bool,
+
+    // ---- Screen recording ------------------------------------------------
     /// Demo mode: everything measures for real, but the screen shows fake
     /// MAC addresses, addresses, SSIDs and other identifying details, kept
     /// consistent for the session — safe to screen-record.
-    #[arg(long)]
+    #[arg(long, help_heading = "Screen recording")]
     demo: bool,
 
     /// Like --demo, but hides only what identifies *this machine* — its MAC
     /// address (and any IPv6 address embedding it). The network's own details
     /// stay real: for screenshots on a network that isn't private (a hotel,
     /// an airport) taken from a machine that is.
-    #[arg(long, conflicts_with = "demo")]
+    #[arg(long, conflicts_with = "demo", help_heading = "Screen recording")]
     demo_mac: bool,
-
-    /// Add an ICMP target: `LABEL=IP` or bare `IP`. Repeatable.
-    #[arg(short = 't', long = "target", value_name = "[LABEL=]IP")]
-    targets: Vec<String>,
-
-    /// Override the ICMP ping interval, in milliseconds.
-    #[arg(long, value_name = "MS")]
-    ping_interval: Option<u64>,
-
-    /// Start recording the session to CSV immediately (same as pressing 'l'),
-    /// so octomon can be run headless as a recorder.
-    #[arg(long)]
-    log: bool,
-
-    /// Colour scheme: auto (ask the terminal its background), dark, or light.
-    /// Overrides the config's `theme` for this run.
-    #[arg(long, value_name = "auto|dark|light")]
-    theme: Option<String>,
 }
 
 #[tokio::main]
@@ -132,10 +203,59 @@ async fn main() -> Result<()> {
     // to restart it?" can be answered from.
     errlog::start_session();
 
-    // Base config from file/defaults, then apply CLI overrides.
-    let mut cfg = Config::load();
+    // Answers "where does it keep things?" without starting anything. Honours
+    // --config, so asking about a profile reports that profile's file.
+    if cli.paths {
+        print_paths(cli.config.as_deref());
+        return Ok(());
+    }
+
+    // Base config from file/defaults, then apply CLI overrides. A config named
+    // on the command line that will not parse is fatal: carrying on with
+    // defaults would look exactly like it had been honoured.
+    let mut cfg = match &cli.config {
+        Some(path) => match Config::load_named(path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("octomon: {e}");
+                std::process::exit(2);
+            }
+        },
+        None => Config::load(),
+    };
     if let Some(ms) = cli.ping_interval {
         cfg.ping_interval_ms = ms;
+    }
+    if let Some(ms) = cli.ping_timeout {
+        cfg.ping_timeout_ms = ms;
+    }
+    // Before the provider override, so --speedtest-provider can name a server
+    // that only exists because of a --iperf3 on the same command line.
+    for spec in &cli.iperf3 {
+        match config::parse_iperf3(spec) {
+            Ok(server) => {
+                cfg.iperf3_servers.retain(|s| s.name != server.name);
+                cfg.iperf3_servers.push(server);
+            }
+            Err(e) => {
+                eprintln!("octomon: --iperf3 {spec}: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+    if let Some(p) = &cli.speedtest_provider {
+        cfg.speedtest_provider = p.clone();
+    }
+    if let Some(u) = &cli.bandwidth_units {
+        cfg.bandwidth_units = u.clone();
+    }
+    // The "off" switches are the same thing an empty setting does, so they go
+    // through the same field rather than a second code path.
+    if cli.no_discovery {
+        cfg.discovery_probe.clear();
+    }
+    if cli.no_edge {
+        cfg.edge_check_url.clear();
     }
     for t in &cli.targets {
         match config::parse_target(t) {
@@ -366,10 +486,11 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // One-shot doctor: observe with everything running — including discovery
-    // and a hop monitor, which --check deliberately skips — judge once, print
-    // a paste-able report, and exit with a code scripts can branch on.
-    if cli.doctor {
+    // One-shot doctor, and --bundle: observe with everything running —
+    // including discovery and a hop monitor, which --check deliberately skips —
+    // then either judge once and print a paste-able report, or zip the lot.
+    // Both want the same window, so they share it.
+    if cli.doctor || cli.bundle.is_some() {
         // Let discovery find the gateway first, then watch the path to the
         // first anchor so an ISP-segment fault can be localised headless.
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -396,6 +517,41 @@ async fn main() -> Result<()> {
         } else {
             tokio::time::sleep(Duration::from_secs(observe)).await;
         }
+
+        // --bundle wins when both are given: it contains the doctor report
+        // anyway, so printing it as well would be the same text twice.
+        if let Some(dest) = &cli.bundle {
+            let snapshot = state.lock().unwrap().clone();
+            let path = match dest.trim() {
+                "" => match store::bundle_path() {
+                    Some(p) => p,
+                    None => {
+                        eprintln!("octomon: no home directory to write a bundle into");
+                        std::process::exit(3);
+                    }
+                },
+                p => std::path::PathBuf::from(p),
+            };
+            return match tokio::task::spawn_blocking(move || {
+                write_bundle_to(&path, &snapshot).map(|()| path)
+            })
+            .await
+            {
+                Ok(Ok(path)) => {
+                    println!("{}", path.display());
+                    Ok(())
+                }
+                Ok(Err(e)) => {
+                    eprintln!("octomon: could not write support bundle: {e}");
+                    std::process::exit(3);
+                }
+                Err(e) => {
+                    eprintln!("octomon: could not write support bundle: {e}");
+                    std::process::exit(3);
+                }
+            };
+        }
+
         let (report, code) = {
             let s = state.lock().unwrap();
             if cli.json {
@@ -2414,6 +2570,37 @@ async fn add_target(
         Config::persist_target_added(&input, addr, hostname.as_deref());
     });
     collectors::ping::spawn_for(state, clients, cfg, id, addr);
+}
+
+/// `--paths`: where octomon keeps things. The question behind every "edit the
+/// config" instruction and every "send me errors.log", and the answer differs
+/// by platform and by whether the XDG variables are set — so it is worth
+/// asking the binary rather than guessing from the README.
+fn print_paths(config_override: Option<&std::path::Path>) {
+    let show = |label: &str, path: Option<std::path::PathBuf>| match path {
+        Some(p) => {
+            let exists = if p.exists() {
+                ""
+            } else {
+                "   (not yet created)"
+            };
+            println!("{label:<10} {}{exists}", p.display());
+        }
+        None => println!("{label:<10} —   (no home directory)"),
+    };
+    show(
+        "config",
+        config_override
+            .map(std::path::Path::to_path_buf)
+            .or_else(config::Config::path),
+    );
+    show("data", store::data_dir());
+    show("errors", errlog::path());
+    // Not a fixed file: [D] and --bundle stamp each one, so name the folder.
+    show(
+        "bundles",
+        store::bundle_path().and_then(|p| p.parent().map(std::path::Path::to_path_buf)),
+    );
 }
 
 /// Text dump of the current state for `--check` / debugging.

@@ -1,9 +1,11 @@
 # octomon
 
 **A `btop`-style terminal dashboard for your network.** I got sick of having
-to use multiple tools to diagnose network issues, so I built this. Think `btop`,
+to use multiple tools to diagnose network issues, so I built this. Think `ping`, `traceroute`, `ifconfig`, `btop`,
 `trippy`, and `bandwhich` in a single view, so you can tell at a glance 
 whether it's the network, the Wi-Fi, the ISP, or your own machine that's the problem.
+
+**[Main website](https://octomon.dev)**
 
 [![CI](https://github.com/securitypedant/octomon/actions/workflows/ci.yml/badge.svg)](https://github.com/securitypedant/octomon/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/octomon.svg)](https://crates.io/crates/octomon)
@@ -15,11 +17,11 @@ whether it's the network, the Wi-Fi, the ISP, or your own machine that's the pro
 
 ## What it shows
 
-Four live panels plus **an actual answer**: a one-line analysis at the bottom
+Four live panels plus **a judgement on the your connectivity**: a one-line analysis at the bottom
 of the screen ("`▲ gateway unresponsive`", "`● connection healthy`") and **`y`**
-for the **triage ladder** behind it — every subsystem from your machine outward
+for the **triage ladder** behind it. Every network related subsystem from your machine outward
 (link → gateway → DNS → ISP path → internet → web → destinations) with its
-status and its evidence, healthy rungs included. Simultaneous causes are all
+status and evidence, healthy rungs included. Simultaneous causes are all
 reported, a symptom is ranked below its cause rather than shouting over it, a
 busy CPU or a VPN is a caveat rather than a way to hide a fault, and every
 finding shows how long it has been going on.
@@ -28,14 +30,14 @@ The panels:
 
 - **Connection Quality** — ICMP latency to configurable targets (last / avg /
   p95 / max), jitter, loss and a bufferbloat grade, plus the same columns over
-  TCP connects to port 443 (`i`), which keep working where ping is blackholed.
+  TCP connects to port 443 (`i`), which keep working when ping is blackholed.
   Auto-discovers the gateway and next hops, traceroutes (`t`), monitors every
-  hop MTR-style (`m`), and asks who owns an address (`W`).
+  hop MTR-style (`m`), and find out who owns an address (`W`).
 - **Bandwidth** — live throughput, an on-demand speed test (`s`), and
   per-process talkers or the same traffic by remote address.
 - **Network** — interface, connection type (Wi-Fi / Ethernet / cellular / VPN
   tunnel), addresses, gateway (v4 and v6), each DNS resolver timed, Wi-Fi
-  SSID/channel/signal and airspace congestion, and — only when notable — proxy,
+  SSID/channel/signal and airspace congestion, and when notable, proxy,
   clock, path-MTU and NAT rows.
 - **Machine** — "is my box the bottleneck?": CPU with the busiest core, memory
   pressure, load, interface errors, thermal throttling.
@@ -47,7 +49,7 @@ What it looks for beyond the graphs:
   first downstream.
 - **Captive portals**, **web blocked while ping works**, **IPv6 broken while
   IPv4 works** (and where it breaks), the mirror case, and a **system web
-  proxy** — detected, with the web check repeated through it.
+  proxy** — detected, with the web check through it.
 - **DNS honesty, not just speed** — a public reference resolver probed
   alongside yours (yours failing while it works means "switch DNS"; the
   reverse means this network forces its own), and a once-a-minute check that
@@ -61,7 +63,7 @@ What it looks for beyond the graphs:
 - **Event timeline** (`e`) and a **network history** of every join, roam,
   address, route and VPN change.
 
-**Doctor mode** — `octomon --doctor` observes headless for ~20 s and prints the
+**Doctor mode** — `octomon --doctor` observes headless for ~20s (longer with `--observe`) and prints the
 analysis, this network's normal, its history, the measurements and recent
 events; `--json` for machines. Redacted by default (SSID, IPs, MACs) so it is
 safe to paste into a forum or ISP ticket; `--full` prints everything. Exit
@@ -124,18 +126,42 @@ Plain tarballs and zips for every platform are on the
 
 ## Usage
 
+`octomon` with no arguments opens the dashboard. Everything else either picks a
+one-shot mode or overrides a config setting for that run; `--help` is the
+complete list.
+
+**Modes** — each observes, prints, and exits:
+
 ```sh
-octomon                      # launch the dashboard
-octomon -t Home=192.168.1.1  # add extra ICMP targets (repeatable)
-octomon --no-speedtest       # disable the speed test
-octomon --ping-interval 500  # override the ping interval (ms)
-octomon --theme light        # force a colour scheme (auto|dark|light)
-octomon --log                # start recording to CSV immediately (headless recorder)
-octomon --check              # print a one-shot text snapshot and exit (no TUI)
-octomon --demo               # real measurements, fake MACs/addresses/SSIDs — safe to screen-record
-octomon --demo-mac           # like --demo, but disguises only this machine's MAC
 octomon --doctor [--json] [--full] [--speedtest] [--observe SECS]
-octomon --help
+octomon --bundle [PATH]      # write the [D] support zip and print where it landed
+octomon --check              # a one-shot text snapshot (no TUI)
+octomon --log                # record to CSV immediately (headless recorder)
+octomon --paths              # where the config, data and bundles live
+```
+
+**Overrides** — config settings, for this run only:
+
+```sh
+octomon -t Home=192.168.1.1          # extra ICMP target (repeatable)
+octomon --config ~/work.toml         # a different config file (second profile)
+octomon --ping-interval 500          # ping interval (ms); --ping-timeout too
+octomon --iperf3 lab=10.0.0.5 --speedtest-provider lab
+octomon --bandwidth-units bits       # KB/s → Kb/s
+octomon --theme light                # auto | dark | light
+```
+
+**Turn things off:** `--no-speedtest`, `--no-discovery` (skip the startup
+traceroute), `--no-edge` (never call octomon.dev/edge).
+
+**Screen recording:** `--demo` measures for real but shows fake
+MACs/addresses/SSIDs; `--demo-mac` disguises only this machine's MAC. Neither
+shows process command lines.
+
+Scripting a bundle, since it prints its path and nothing else:
+
+```sh
+zip=$(octomon --bundle --observe 60) && echo "collected $zip"
 ```
 
 ### Keyboard shortcuts
@@ -148,7 +174,6 @@ Press **`?`** in the app for the complete, always-current list. The essentials:
 | `y` | Connection analysis: the triage ladder and findings |
 | `s` · `w` | Speed test · stats window (30s/1m/5m/15m) |
 | `r` · `G` | Re-probe network info · rescan gateway, hops and public IP |
-| `G` | Rescan the path: gateway, next hops and public IP |
 | `e` · `c` · `T` · `M` | Events · outbound port scan · routing table · marker |
 | `l` · `D` | Record session to CSV · write a support-bundle zip |
 | `P` · `?` · `Esc` · `q` | Pause the display · help · back · quit |

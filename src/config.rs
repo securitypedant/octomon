@@ -423,7 +423,31 @@ impl Config {
         let Some(path) = Self::path() else {
             return Config::default();
         };
-        match std::fs::read_to_string(&path) {
+        Self::load_from(&path)
+    }
+
+    /// Load from an explicit path (`--config`). A file named on the command
+    /// line is a deliberate choice, so unlike the default path a broken one is
+    /// worth refusing over: silently running on defaults would look like the
+    /// file was honoured. A *missing* one is still written with defaults, which
+    /// is how you start a second profile.
+    pub fn load_named(path: &std::path::Path) -> Result<Self, String> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                toml::from_str::<Config>(&text).map_err(|e| format!("{}: {e}", path.display()))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let cfg = Config::default();
+                cfg.write_to(path)
+                    .map_err(|e| format!("could not create {}: {e}", path.display()))?;
+                Ok(cfg)
+            }
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
+    }
+
+    fn load_from(path: &std::path::Path) -> Self {
+        match std::fs::read_to_string(path) {
             Ok(text) => match toml::from_str::<Config>(&text) {
                 Ok(cfg) => cfg,
                 Err(e) => {
@@ -443,7 +467,7 @@ impl Config {
             Err(_) => {
                 // No file yet — write the defaults so the user has a starting point.
                 let cfg = Config::default();
-                if let Err(e) = cfg.write_to(&path) {
+                if let Err(e) = cfg.write_to(path) {
                     tracing::warn!("could not write default config to {}: {e}", path.display());
                     crate::errlog::log(
                         "config",
@@ -539,6 +563,37 @@ impl Config {
         let header = "# octomon configuration — edit and restart octomon.\n\
                       # Deleting this file regenerates it with defaults.\n\n";
         crate::store::write_private(path, format!("{header}{body}"))
+    }
+}
+
+#[cfg(test)]
+mod named_config_tests {
+    use super::*;
+
+    /// `--config` names a file on purpose, so the failure modes differ from the
+    /// default path's: a missing one is created, a broken one is an error the
+    /// caller must see rather than a silent fall back to defaults.
+    #[test]
+    fn a_named_config_is_created_when_absent_and_refused_when_broken() {
+        let dir = std::env::temp_dir().join(format!("octomon-cfg-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let fresh = dir.join("fresh.toml");
+        let _ = std::fs::remove_file(&fresh);
+        let cfg = Config::load_named(&fresh).expect("absent file is written with defaults");
+        assert!(fresh.exists(), "the file was created");
+        assert_eq!(cfg.ping_interval_ms, Config::default().ping_interval_ms);
+
+        // And reading it back gives the same settings, not a second default.
+        let again = Config::load_named(&fresh).expect("round trips");
+        assert_eq!(again.dns_probe_name, cfg.dns_probe_name);
+
+        let broken = dir.join("broken.toml");
+        std::fs::write(&broken, "this is not = = toml\n").unwrap();
+        let err = Config::load_named(&broken).expect_err("a broken named config is fatal");
+        assert!(err.contains("broken.toml"), "names the file: {err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
