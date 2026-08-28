@@ -7,6 +7,8 @@
 
 # Wrangler local state (octomon.dev site deploys)
 /.wrangler
+# Blog renderer's only dependency (`npm run blog`); the rendered HTML is committed.
+/node_modules
 # Local deploy helper: the Cloudflare account id for octomon.dev, so wrangler
 # can pick the right account non-interactively. Deliberately not committed.
 /.env

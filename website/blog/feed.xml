@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+<channel>
+  <title>octomon blog</title>
+  <link>https://octomon.dev/blog/</link>
+  <atom:link href="https://octomon.dev/blog/feed.xml" rel="self" type="application/rss+xml"/>
+  <description>Notes on building octomon.</description>
+  <language>en</language>
+  <item>
+    <title>Plane Wi-Fi is not broken</title>
+    <link>https://octomon.dev/blog/plane-wifi-is-not-broken/</link>
+    <guid isPermaLink="true">https://octomon.dev/blog/plane-wifi-is-not-broken/</guid>
+    <pubDate>Fri, 28 Aug 2026 00:00:00 GMT</pubDate>
+    <description>200 ms is a red flag at your desk and a good day at 38,000 feet. A connectivity monitor that cannot tell the difference is one you learn to ignore, including on the day it is right.</description>
+  </item>
+  <item>
+    <title>Four terminals, several tools, and no easy answer</title>
+    <link>https://octomon.dev/blog/why-i-built-octomon/</link>
+    <guid isPermaLink="true">https://octomon.dev/blog/why-i-built-octomon/</guid>
+    <pubDate>Fri, 28 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Every time my Internet connection wavered, ping, traceroute and btop each gave me a glimpse of the problem and never the answer. So I built octomon.</description>
+  </item>
+</channel>
+</rss>

@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>octomon: Four terminals, several tools, and no easy answer</title>
+<meta name="description" content="Every time my Internet connection wavered, ping, traceroute and btop each gave me a glimpse of the problem and never the answer. So I built octomon.">
+<meta name="author" content="Simon Thorpe">
+<link rel="canonical" href="https://octomon.dev/blog/why-i-built-octomon/">
+<link rel="alternate" type="application/rss+xml" title="octomon blog" href="/blog/feed.xml">
+<link rel="icon" type="image/png" sizes="32x32" href="/images/octomon-logo-32.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/images/octomon-icon-tile.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/images/octomon-icon-tile.png">
+<meta property="og:site_name" content="octomon">
+<meta property="og:locale" content="en_GB">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://octomon.dev/blog/why-i-built-octomon/">
+<meta property="og:title" content="Four terminals, several tools, and no easy answer">
+<meta property="og:description" content="Every time my Internet connection wavered, ping, traceroute and btop each gave me a glimpse of the problem and never the answer. So I built octomon.">
+<meta property="og:image" content="https://octomon.dev/blog/why-i-built-octomon/card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Four terminals, several tools, and no easy answer">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Four terminals, several tools, and no easy answer">
+<meta name="twitter:description" content="Every time my Internet connection wavered, ping, traceroute and btop each gave me a glimpse of the problem and never the answer. So I built octomon.">
+<meta name="twitter:image" content="https://octomon.dev/blog/why-i-built-octomon/card.png">
+<meta property="article:published_time" content="2026-08-28">
+<meta property="article:author" content="Simon Thorpe">
+<link rel="stylesheet" href="/tokens.css">
+<style>
+  /* Every colour on this page is a token from tokens.css, no hex here. */
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+  }
+  body {
+    margin: 0;
+    background: var(--octo-ink);
+    color: var(--octo-white);
+    font-family: var(--octo-body);
+    font-size: 17px;
+    line-height: 1.6;
+    /* wide content must scroll inside its own container, never the page */
+    overflow-x: clip;
+  }
+  a { color: var(--octo-green); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  :focus-visible {
+    outline: 2px solid var(--octo-green);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  h1, h2 {
+    font-family: var(--octo-display);
+    text-transform: uppercase;
+    letter-spacing: -0.01em;
+    font-weight: 400;
+    line-height: 1.05;
+    margin: 0 0 0.4em;
+  }
+  kbd {
+    font-family: var(--octo-mono);
+    font-size: 0.85em;
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    padding: 0.1em 0.45em;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  header {
+    border-bottom: 1px solid var(--octo-line);
+    background: var(--octo-ink);
+  }
+  .nav {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+    padding: 14px 0;
+  }
+  .mark { display: flex; align-items: center; gap: 12px; color: var(--octo-white); }
+  .mark:hover { text-decoration: none; }
+  .mark svg { width: 34px; height: 34px; display: block; }
+  .wordmark {
+    font-family: var(--octo-mono);
+    font-weight: 800;
+    font-size: 1.35rem;
+    letter-spacing: 0.023em;
+  }
+  nav.links { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px 22px; font-family: var(--octo-mono); font-size: 0.95rem; }
+  /* mobile hamburger: pure CSS (checkbox), desktop never sees it */
+  .menu-btn { display: none; }
+
+  section { padding: 64px 0; }
+  section + section { border-top: 1px solid var(--octo-line); }
+  /* the body follows the page head directly, so it needs far less air above
+     it than a section that follows another section does */
+  main > section { padding-top: 36px; }
+  h1 { font-size: clamp(2rem, 4.5vw, 3.4rem); }
+  h2 { font-size: clamp(1.6rem, 3vw, 2.4rem); }
+  .lede { color: var(--octo-muted); max-width: 56em; margin-top: 0; }
+
+  /* the page head: no hero art, just the title over a magenta rule */
+  .pagehead { padding: 44px 0 26px; border-bottom: 2px solid var(--octo-magenta); }
+  /* the head's lede runs the full wrap: a one-line description should stay
+     on one line rather than wrap early into a narrow column */
+  .pagehead .lede { max-width: none; }
+  /* byline under a post title: date and reading time, never a name */
+  .postmeta {
+    font-family: var(--octo-mono);
+    font-size: 0.85rem;
+    color: var(--octo-muted);
+    margin: 0 0 0.9em;
+  }
+
+  /* the index: one card per post, newest first, same card as /privacy */
+  .postlist { margin-top: 0; }
+  .postlist .card:first-child { margin-top: 0; }
+  .card {
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+    padding: 22px 24px;
+    margin-top: 24px;
+  }
+  .card h2 {
+    margin: 0 0 10px;
+    font-family: var(--octo-mono); font-weight: 700; font-size: 1.15rem;
+    text-transform: none; letter-spacing: 0; line-height: 1.35;
+  }
+  .card h2 a { color: var(--octo-green); }
+  .card p { margin: 0 0 0.7em; color: var(--octo-muted); }
+  .card p:last-child { margin-bottom: 0; }
+  .card .more { font-family: var(--octo-mono); font-size: 0.85rem; }
+
+  /* the post body: one column at a readable measure, not the full 1120 */
+  .post { max-width: 36em; }
+  .post p, .post li { color: var(--octo-white); }
+  .post > p:first-child { margin-top: 0; }
+  .post h2 {
+    /* smaller than a section head: a subhead should not shout */
+    font-size: clamp(1.3rem, 2.2vw, 1.7rem);
+    margin: 1.9em 0 0.5em;
+  }
+  .post h3 {
+    margin: 1.6em 0 0.4em;
+    font-family: var(--octo-mono); font-weight: 700; font-size: 1.05rem;
+    color: var(--octo-green);
+  }
+  .post ul, .post ol { padding-left: 1.3em; margin: 1em 0; }
+  .post li { margin: 0.5em 0; }
+  .post li::marker { color: var(--octo-magenta); }
+  .post code {
+    font-family: var(--octo-mono); font-size: 0.9em;
+    color: var(--octo-green);
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-radius: 5px;
+    padding: 0.08em 0.35em;
+    /* a run that wraps gets its padding and border on both halves */
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
+  .post pre {
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-chip);
+    padding: 16px 18px;
+    /* the block scrolls, the page never does */
+    overflow-x: auto;
+  }
+  .post pre code {
+    background: none; border: 0; padding: 0;
+    color: var(--octo-white); font-size: 0.88rem; line-height: 1.5;
+  }
+  .post blockquote {
+    margin: 1.4em 0;
+    padding: 2px 0 2px 18px;
+    border-left: 3px solid var(--octo-magenta);
+    color: var(--octo-muted);
+  }
+  .post blockquote p:last-child { margin-bottom: 0; }
+  .post img {
+    max-width: 100%; height: auto; display: block;
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+    cursor: zoom-in;
+  }
+
+  /* lightbox: any click (or Esc) closes. Same as the homepage's. */
+  .lightbox {
+    position: fixed; inset: 0; z-index: 50;
+    display: flex; align-items: center; justify-content: center;
+    padding: 3vmin;
+    background: color-mix(in srgb, var(--octo-deep) 94%, transparent);
+    cursor: zoom-out;
+  }
+  .lightbox[hidden] { display: none; }
+  .lightbox img {
+    max-width: 100%; max-height: 100%; width: auto; height: auto;
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+  }
+  .post figure { margin: 1.8em 0; }
+  .post figcaption {
+    font-family: var(--octo-mono); font-size: 0.82rem;
+    color: var(--octo-muted); margin-top: 10px;
+  }
+  .post hr { border: 0; border-top: 1px solid var(--octo-line); margin: 2.4em 0; }
+  .post strong { color: var(--octo-white); }
+  .post table { width: 100%; border-collapse: collapse; margin: 1.4em 0; font-size: 0.94rem; }
+  .post th, .post td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--octo-line); }
+  .post th { font-family: var(--octo-mono); font-weight: 700; color: var(--octo-green); }
+
+  .backlink { font-family: var(--octo-mono); font-size: 0.9rem; margin-top: 48px; }
+
+  footer {
+    border-top: 2px solid var(--octo-magenta); /* decorative rule */
+    padding: 28px 0 40px;
+    color: var(--octo-muted);
+    font-size: 0.9rem;
+  }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; }
+
+  /* phones */
+  @media (max-width: 600px) {
+    .wrap { padding: 0 16px; }
+    /* hamburger: the mark keeps the left edge; links drop into a column
+       only when the burger is checked */
+    .menu-btn {
+      display: block; margin-left: auto; cursor: pointer;
+      font-size: 1.5rem; line-height: 1; color: var(--octo-white);
+      padding: 4px 8px; border: 1px solid var(--octo-line);
+      border-radius: var(--octo-radius-chip);
+    }
+    nav.links { display: none; }
+    /* air between the mark/burger row and the rule beneath it */
+    .nav { padding-bottom: 24px; }
+    .menu-toggle:checked ~ nav.links {
+      display: flex; flex-basis: 100%; flex-direction: column;
+      gap: 12px; padding: 8px 2px 12px; font-size: 1rem;
+    }
+    section { padding: 44px 0; }
+    .pagehead { padding: 32px 0 22px; }
+    main > section { padding-top: 28px; }
+    .card { padding: 16px; }
+    .post pre { padding: 12px 14px; }
+    footer .wrap { flex-direction: column; align-items: flex-start; gap: 6px; }
+  }
+  @media (max-width: 480px) {
+    .wordmark { font-size: 1.15rem; }
+  }
+</style>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "@id": "https://octomon.dev/blog/why-i-built-octomon/",
+  "mainEntityOfPage": {
+    "@type": "WebPage",
+    "@id": "https://octomon.dev/blog/why-i-built-octomon/"
+  },
+  "url": "https://octomon.dev/blog/why-i-built-octomon/",
+  "headline": "Four terminals, several tools, and no easy answer",
+  "description": "Every time my Internet connection wavered, ping, traceroute and btop each gave me a glimpse of the problem and never the answer. So I built octomon.",
+  "datePublished": "2026-08-28",
+  "dateModified": "2026-08-28",
+  "author": {
+    "@type": "Person",
+    "name": "Simon Thorpe",
+    "url": "https://github.com/securitypedant"
+  },
+  "publisher": {
+    "@type": "Organization",
+    "name": "octomon",
+    "url": "https://octomon.dev/",
+    "logo": {
+      "@type": "ImageObject",
+      "url": "https://octomon.dev/images/octomon-icon-tile.png"
+    }
+  },
+  "image": "https://octomon.dev/blog/why-i-built-octomon/card.png",
+  "wordCount": 1610,
+  "inLanguage": "en-GB",
+  "isPartOf": {
+    "@type": "Blog",
+    "@id": "https://octomon.dev/blog/",
+    "name": "octomon blog"
+  }
+}
+</script>
+<!-- Cloudflare Web Analytics -->
+<script type='module' src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "0ebdfd53d18b49d39f76f9d08b3499c9"}'></script>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <a class="mark" href="/" aria-label="octomon home">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-hidden="true">
+        <g fill="var(--octo-green)">
+          <g transform="rotate(-14 22 64)"><rect x="18" y="60" width="8" height="44" rx="4"/></g>
+          <g transform="rotate(-7 34 64)"><rect x="30" y="60" width="8" height="58" rx="4"/></g>
+          <rect x="42" y="60" width="8" height="40" rx="4"/>
+          <rect x="54" y="60" width="8" height="54" rx="4"/>
+          <rect x="66" y="60" width="8" height="42" rx="4"/>
+          <rect x="78" y="60" width="8" height="58" rx="4" fill="var(--octo-amber)"/>
+          <g transform="rotate(7 94 64)"><rect x="90" y="60" width="8" height="46" rx="4"/></g>
+          <g transform="rotate(14 106 64)"><rect x="102" y="60" width="8" height="60" rx="4"/></g>
+        </g>
+        <path d="M22 70 C22 42 38 18 64 18 C90 18 106 42 106 70 Z" fill="var(--octo-green)"/>
+        <rect x="44" y="38" width="11" height="18" rx="1.5" fill="var(--octo-red)"/>
+        <rect x="73" y="38" width="11" height="18" rx="1.5" fill="var(--octo-red)"/>
+      </svg>
+      <span class="wordmark">octomon</span>
+    </a>
+    <input type="checkbox" id="menu" class="menu-toggle" hidden>
+    <label for="menu" class="menu-btn" aria-label="menu">&#9776;</label>
+    <nav class="links" aria-label="site">
+      <a href="/#install">install</a>
+      <a href="/#features">features</a>
+      <a href="/#video">video</a>
+      <a href="/blog/">blog</a>
+      <a href="/understand">faq</a>
+      <a href="/understand#glossary">glossary</a>
+      <a href="/privacy">privacy</a>
+      <a href="https://github.com/securitypedant/octomon">github</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="pagehead">
+    <div class="wrap">
+      <h1>Four terminals, several tools, and no easy answer</h1>
+      <p class="postmeta"><time datetime="2026-08-28">28 August 2026</time> · 7 min read</p>
+      <p class="lede">Every time my Internet connection wavered, ping, traceroute and btop each gave me a glimpse of the problem and never the answer. So I built octomon.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <article class="post">
+        <p>I run my own DNS at home as part of an Active Directory deployment. I don&#39;t know
+        if I even need it anymore, or if I could do something better, but it helps my 
+        family authenticate to the local NAS, I can apply some simple group policy and
+        a few other AD benefits. The domain controller runs in Proxmox, and sometimes
+        the server just hangs. I&#39;ve not had time to really diagnose why, but when it does,
+        Internet connectivity is impacted (It&#39;s always DNS, am I right?). Then last month mice decided to chew through
+        the fiber cables for my Sonic fiber Internet connection and from my backyard office to the house.</p>
+        <figure>
+          <img src="mice-eating-fiber.png" alt="The corner of a painted interior wall with the plaster gnawed away along the base, rubble and chewed debris heaped on the floor, and a pale green fiber cable bitten clean through, its severed end hanging loose beside the intact white cables">
+          <figcaption>Mice ate my fiber connection</figcaption>
+        </figure>
+
+        <p>Within a minute I had four terminals open: ping to the
+        gateway, ping to 1.1.1.1, a traceroute crawling out somewhere past my ISP, a few dig lookups and
+        btop, because it is always worth ruling out my own laptop before blaming
+        anything else. Between them they gave me about nine numbers. None of them
+        answered the question I actually had, which was whether to keep waiting or give
+        up and tether to my phone.</p>
+        <p>I have been doing that for thirty years. So has everybody else.</p>
+        <p>So I created octomon: a btop-style terminal dashboard that puts
+        your whole Internet connection on one screen and names the layer at fault,
+        whether that is your Wi-Fi, your ISP or the Internet.</p>
+        <h2>The gap is not measurement</h2>
+        <p>Every one of those tools is excellent, and every one of them is clear about a
+        narrow thing. <code>ping</code> tells you the round-trip time to one address. <code>traceroute</code>
+        gives you the path as it looked thirty seconds ago, with a wall of asterisks
+        where routers were told not to answer. <code>btop</code> reveals if your CPU is the problem.
+        <code>bandwhich</code> tells you which process is using the bandwidth. All true, all correct,
+        and all relied on me to connect the dots about what was going on with my Internet 
+        connectivity.</p>
+        <p>Over the years I&#39;ve put together little Bash or Powershell scripts to combine 
+        these tools into some sort of analysis. The scripts were pretty good, 
+        but they were brittle and OS dependant. Then I turned to Python and started 
+        my own <a href="https://github.com/securitypedant/ispmonitor">homegrown ISP monitor</a>.
+        I wanted something to send to my ISP when things went wrong. But it wasn&#39;t 
+        really what I wanted and I had to deploy a whole webstack and expose access 
+        to it... it never went anywhere.</p>
+        <p>Recently I wanted to learn Rust. I started a few little projects with Claude Code
+        helping me learn as I built. Then the Internet went down again (Damn Proxmox server!) 
+        and I decided to combine my learning of Rust with the desire to build a decent CLI
+        based Internet connectivity tool.</p>
+        <h2>Introducing octomon</h2>
+        <p>I love <code>btop</code>. One glance and I can see what&#39;s going on with my machine. I wanted
+        to recreate something similar, but to show everything related to my Internet connection.
+        A quick search of github, brew, Google, the usual places I go to find software, 
+        and I couldn&#39;t find an existing tool. So I started to create one. (Oh and also use AI to help me build it and learn Rust at the same time.)</p>
+        <p>I wanted to focus on two goals.</p>
+        <ul>
+        <li>Quickly display a summary of my Internet connectivity</li>
+        <li>Triage the data collected into a simple summary, and maybe even a single opinion</li>
+        </ul>
+        <h2>One screen instead of four</h2>
+        <p>What replaced the four terminals is not all that clever. Connection quality, bandwidth,
+        network and machine performance, all on screen at once, each panel probing and grading its
+        own layer, with the analysis sitting on top and composing them into one answer. In
+        my 30 years of working in the technology industry, I&#39;ve been a passionate UX designer (My first real job was designing game interfaces, anyone ever play <a href="https://en.wikipedia.org/wiki/Championship_Manager">Championship Manager</a>?).
+        So I wanted the dashboard to look good and be easy to read. Note, when I say &quot;easy
+        to read&quot; I mean by a network or IT admin. octomon is built for people who already
+        know what a gateway, a resolver and a p95 are, and it does not slow down to
+        explain them.</p>
+        <figure>
+          <img src="united-wifi.png" alt="The octomon dashboard on United WiFi, four panels at once. Connection quality shows every anchor sitting around 650ms with 0 to 13% loss and the gateway at 100%; the path table has more unresponsive hops than answering ones; the network panel names the ISP as ViaSat and the nearest Cloudflare PoP as Newark; bandwidth and machine graphs run down the right. The status line reads connection healthy, performance poor">
+          <figcaption>United Airlines WiFi connection summary as I write this article.</figcaption>
+        </figure>
+
+        <p>The graphs deliver the raw data and are redrawn every second. The analysis is
+        deliberately slower than they are, because one dropped ping is not an outage,
+        and a verdict that repainted itself every second would be noise rather than
+        judgement.</p>
+        <h2>Making sense of the data</h2>
+        <p>Your gateway might be dropping pings while every hop past it is clean: that&#39;s a
+        router with a policy, not an outage, and airport, hotel and office networks do
+        it constantly. Your resolver is slow but a public reference resolver answers
+        instantly from the same machine: that&#39;s a DNS problem, not a connectivity one,
+        and the fix is switching resolvers rather than phoning your ISP. Your CPU is
+        pinned and your throughput is down: the machine is a caveat printed next to the
+        network finding, not a reason to hide it. You are downloading an ISO: the
+        saturation is yours. Blaming the network for your own ISO download helps nobody.</p>
+        <p>I wanted something akin to the triage nurse in the ER (or A&amp;E for my family back home). 
+        So I built some simple logic to try and rank the impact of the data points. 
+        No, this isn&#39;t some AI powered summary, it&#39;s just me hacking together some 
+        basic opinions. It&#39;s not perfect, but it&#39;s getting better and it&#39;s a lot better 
+        than my collection of scripts.</p>
+        <figure>
+          <img src="analysis.png" alt="The octomon analysis overlay: a ticked list covering machine, link, gateway, DNS, ISP path, internet, web and destinations, then checks for discovery, edge, public IP, NAT, clock, proxy, path MTU and DNS honesty. Gateway loss of 100% and internet loss of 11% are both annotated as normal here. Performance reads poor, latency 672ms, jitter 55ms, loss 15%, and the one finding says Cloudflare is degraded at 25% loss while your connection is fine">
+          <figcaption>Still amazed how good Internet on a plane can be.</figcaption>
+        </figure>
+
+        <p>I designed octomon to rank a symptom below its cause rather than letting it shout over
+        the top, it reports simultaneous causes rather than picking a favourite, and treats
+        a busy machine or an active VPN as a caveat instead of an excuse. Every finding
+        carries how long it has been going on, because &quot;for six seconds&quot; and &quot;for forty
+        minutes&quot; are different problems with different answers.</p>
+        <p>I&#39;m on a plane right now and the analysis says
+        <span style="color: var(--octo-green)">● connection healthy</span> ·
+        <span style="color: var(--octo-red)">performance poor</span>.
+        That&#39;s pretty much my experience.</p>
+        <h2>The thing four terminals cannot know</h2>
+        <p>I then realized another problem I didn&#39;t envisage. None of those tools knows where you are
+        sitting. <code>ping</code> does not know that 200 ms is a disaster on office fiber and a
+        good day on a plane, so it prints the number and leaves the arithmetic to you.
+        Get that math wrong and you spend an hour blaming an ISP that is fine.</p>
+        <p>octomon learns a normal for every network it joins and grades against that, with
+        absolute floors so that &quot;relative to normal&quot; cannot quietly excuse a network
+        that has been bad since you arrived. I actually think that argument needs its own 
+        post, so I wrote <a href="/blog/plane-wifi-is-not-broken/">one</a>.</p>
+        <h2>Why it lives in a terminal</h2>
+        <p>Timing. Because I designed this primarily for people like me who understand networking.
+        I typically reach for a tool like this when something is already wrong, and that
+        is usually the worst possible moment to be asking for anything: somebody else&#39;s
+        network, a work laptop where you do not have admin, an SSH session into a box
+        you would rather not escalate on. A tool that demands root right then is a tool
+        you do not run. octomon runs unprivileged by design, never asks for a password,
+        and <a href="/understand">tells you at startup</a> what that costs on your machine. I&#39;ve been able to get
+        the vast majority of the functionality into running unprivileged, Linux and Windows
+        have a few quirks and I suspect most people might run these with sudo anyway.
+        But I wanted to try and avoid admin rights where I could.</p>
+        <p>The same reasoning covers what it refuses to be and the reason my Python Flask based
+        ISP monitor never really went anywhere. It is not an observability
+        platform and it does not want weeks of your network data. It answers one
+        question: how is this connection right now, and is that normal for where I am
+        sitting. What it keeps on disk exists to answer that question better tomorrow,
+        it stays on your disk, and <a href="/privacy">the whole list is written down</a>.</p>
+        <p>I did not want more numbers. There were already plenty of numbers. I wanted
+        something that would read them.</p>
+        <hr>
+        <p>If you find octomon useful, a
+        <a href="https://github.com/securitypedant/octomon">GitHub star</a> is much appreciated.</p>
+      </article>
+      <p class="backlink"><a href="/blog/">← all posts</a></p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2025–2026 Simon Thorpe · MIT or Apache-2.0</span>
+    <a href="/blog/">blog</a>
+    <a href="/privacy">privacy</a>
+    <a href="https://github.com/securitypedant/octomon">github.com/securitypedant/octomon</a>
+    <a href="https://crates.io/crates/octomon">crates.io/crates/octomon</a>
+    <a href="https://www.youtube.com/watch?v=sHPd2LeYvaw">intro video</a>
+  </div>
+</footer>
+
+<div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="image, full size, click anywhere to close" hidden>
+  <img alt="">
+</div>
+
+<script>
+  // Lightbox: any image in the post opens full-screen; any click (or Esc)
+  // closes. currentSrc reuses whichever rendition the browser already fetched.
+  const lb = document.getElementById("lightbox");
+  const lbImg = lb.querySelector("img");
+  const openLb = (img) => {
+    lbImg.src = img.currentSrc || img.src;
+    lbImg.alt = img.alt;
+    lb.hidden = false;
+    document.body.style.overflow = "hidden";
+  };
+  const closeLb = () => {
+    lb.hidden = true;
+    lbImg.removeAttribute("src");
+    document.body.style.overflow = "";
+  };
+  for (const img of document.querySelectorAll(".post img")) {
+    img.tabIndex = 0;
+    img.setAttribute("role", "button");
+    img.addEventListener("click", () => openLb(img));
+    img.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openLb(img); }
+    });
+  }
+  lb.addEventListener("click", closeLb);
+  addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !lb.hidden) closeLb();
+  });
+</script>
+
+</body>
+</html>

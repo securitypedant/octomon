@@ -1,0 +1,11 @@
+# Nothing here is uploaded to the site. The blog's Markdown sources live beside
+# their rendered pages so a post is one self-contained folder, but the .md is
+# the input to `npm run blog`, not a page: publishing it would also expose any
+# post still marked `draft: true` at a guessable URL.
+*.md
+
+# Whole folders for posts still marked `draft: true`, so their screenshots are
+# not fetchable either. Managed by `npm run blog`, do not edit by hand.
+# drafts:start
+blog/eleven-releases/
+# drafts:end

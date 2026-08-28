@@ -12,4 +12,18 @@
     <loc>https://octomon.dev/privacy</loc>
     <lastmod>2026-08-26</lastmod>
   </url>
+  <!-- blog:start -->
+  <url>
+    <loc>https://octomon.dev/blog/</loc>
+    <lastmod>2026-08-28</lastmod>
+  </url>
+  <url>
+    <loc>https://octomon.dev/blog/plane-wifi-is-not-broken/</loc>
+    <lastmod>2026-08-28</lastmod>
+  </url>
+  <url>
+    <loc>https://octomon.dev/blog/why-i-built-octomon/</loc>
+    <lastmod>2026-08-28</lastmod>
+  </url>
+  <!-- blog:end -->
 </urlset>

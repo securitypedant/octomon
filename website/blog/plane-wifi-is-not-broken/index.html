@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>octomon: Plane Wi-Fi is not broken</title>
+<meta name="description" content="200 ms is a red flag at your desk and a good day at 38,000 feet. A connectivity monitor that cannot tell the difference is one you learn to ignore, including on the day it is right.">
+<meta name="author" content="Simon Thorpe">
+<link rel="canonical" href="https://octomon.dev/blog/plane-wifi-is-not-broken/">
+<link rel="alternate" type="application/rss+xml" title="octomon blog" href="/blog/feed.xml">
+<link rel="icon" type="image/png" sizes="32x32" href="/images/octomon-logo-32.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/images/octomon-icon-tile.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/images/octomon-icon-tile.png">
+<meta property="og:site_name" content="octomon">
+<meta property="og:locale" content="en_GB">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://octomon.dev/blog/plane-wifi-is-not-broken/">
+<meta property="og:title" content="Plane Wi-Fi is not broken">
+<meta property="og:description" content="200 ms is a red flag at your desk and a good day at 38,000 feet. A connectivity monitor that cannot tell the difference is one you learn to ignore, including on the day it is right.">
+<meta property="og:image" content="https://octomon.dev/blog/plane-wifi-is-not-broken/card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Plane Wi-Fi is not broken">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Plane Wi-Fi is not broken">
+<meta name="twitter:description" content="200 ms is a red flag at your desk and a good day at 38,000 feet. A connectivity monitor that cannot tell the difference is one you learn to ignore, including on the day it is right.">
+<meta name="twitter:image" content="https://octomon.dev/blog/plane-wifi-is-not-broken/card.png">
+<meta property="article:published_time" content="2026-08-28">
+<meta property="article:author" content="Simon Thorpe">
+<link rel="stylesheet" href="/tokens.css">
+<style>
+  /* Every colour on this page is a token from tokens.css, no hex here. */
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+  }
+  body {
+    margin: 0;
+    background: var(--octo-ink);
+    color: var(--octo-white);
+    font-family: var(--octo-body);
+    font-size: 17px;
+    line-height: 1.6;
+    /* wide content must scroll inside its own container, never the page */
+    overflow-x: clip;
+  }
+  a { color: var(--octo-green); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  :focus-visible {
+    outline: 2px solid var(--octo-green);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  h1, h2 {
+    font-family: var(--octo-display);
+    text-transform: uppercase;
+    letter-spacing: -0.01em;
+    font-weight: 400;
+    line-height: 1.05;
+    margin: 0 0 0.4em;
+  }
+  kbd {
+    font-family: var(--octo-mono);
+    font-size: 0.85em;
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    padding: 0.1em 0.45em;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  header {
+    border-bottom: 1px solid var(--octo-line);
+    background: var(--octo-ink);
+  }
+  .nav {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+    padding: 14px 0;
+  }
+  .mark { display: flex; align-items: center; gap: 12px; color: var(--octo-white); }
+  .mark:hover { text-decoration: none; }
+  .mark svg { width: 34px; height: 34px; display: block; }
+  .wordmark {
+    font-family: var(--octo-mono);
+    font-weight: 800;
+    font-size: 1.35rem;
+    letter-spacing: 0.023em;
+  }
+  nav.links { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px 22px; font-family: var(--octo-mono); font-size: 0.95rem; }
+  /* mobile hamburger: pure CSS (checkbox), desktop never sees it */
+  .menu-btn { display: none; }
+
+  section { padding: 64px 0; }
+  section + section { border-top: 1px solid var(--octo-line); }
+  /* the body follows the page head directly, so it needs far less air above
+     it than a section that follows another section does */
+  main > section { padding-top: 36px; }
+  h1 { font-size: clamp(2rem, 4.5vw, 3.4rem); }
+  h2 { font-size: clamp(1.6rem, 3vw, 2.4rem); }
+  .lede { color: var(--octo-muted); max-width: 56em; margin-top: 0; }
+
+  /* the page head: no hero art, just the title over a magenta rule */
+  .pagehead { padding: 44px 0 26px; border-bottom: 2px solid var(--octo-magenta); }
+  /* the head's lede runs the full wrap: a one-line description should stay
+     on one line rather than wrap early into a narrow column */
+  .pagehead .lede { max-width: none; }
+  /* byline under a post title: date and reading time, never a name */
+  .postmeta {
+    font-family: var(--octo-mono);
+    font-size: 0.85rem;
+    color: var(--octo-muted);
+    margin: 0 0 0.9em;
+  }
+
+  /* the index: one card per post, newest first, same card as /privacy */
+  .postlist { margin-top: 0; }
+  .postlist .card:first-child { margin-top: 0; }
+  .card {
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+    padding: 22px 24px;
+    margin-top: 24px;
+  }
+  .card h2 {
+    margin: 0 0 10px;
+    font-family: var(--octo-mono); font-weight: 700; font-size: 1.15rem;
+    text-transform: none; letter-spacing: 0; line-height: 1.35;
+  }
+  .card h2 a { color: var(--octo-green); }
+  .card p { margin: 0 0 0.7em; color: var(--octo-muted); }
+  .card p:last-child { margin-bottom: 0; }
+  .card .more { font-family: var(--octo-mono); font-size: 0.85rem; }
+
+  /* the post body: one column at a readable measure, not the full 1120 */
+  .post { max-width: 36em; }
+  .post p, .post li { color: var(--octo-white); }
+  .post > p:first-child { margin-top: 0; }
+  .post h2 {
+    /* smaller than a section head: a subhead should not shout */
+    font-size: clamp(1.3rem, 2.2vw, 1.7rem);
+    margin: 1.9em 0 0.5em;
+  }
+  .post h3 {
+    margin: 1.6em 0 0.4em;
+    font-family: var(--octo-mono); font-weight: 700; font-size: 1.05rem;
+    color: var(--octo-green);
+  }
+  .post ul, .post ol { padding-left: 1.3em; margin: 1em 0; }
+  .post li { margin: 0.5em 0; }
+  .post li::marker { color: var(--octo-magenta); }
+  .post code {
+    font-family: var(--octo-mono); font-size: 0.9em;
+    color: var(--octo-green);
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-radius: 5px;
+    padding: 0.08em 0.35em;
+    /* a run that wraps gets its padding and border on both halves */
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
+  .post pre {
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-chip);
+    padding: 16px 18px;
+    /* the block scrolls, the page never does */
+    overflow-x: auto;
+  }
+  .post pre code {
+    background: none; border: 0; padding: 0;
+    color: var(--octo-white); font-size: 0.88rem; line-height: 1.5;
+  }
+  .post blockquote {
+    margin: 1.4em 0;
+    padding: 2px 0 2px 18px;
+    border-left: 3px solid var(--octo-magenta);
+    color: var(--octo-muted);
+  }
+  .post blockquote p:last-child { margin-bottom: 0; }
+  .post img {
+    max-width: 100%; height: auto; display: block;
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+    cursor: zoom-in;
+  }
+
+  /* lightbox: any click (or Esc) closes. Same as the homepage's. */
+  .lightbox {
+    position: fixed; inset: 0; z-index: 50;
+    display: flex; align-items: center; justify-content: center;
+    padding: 3vmin;
+    background: color-mix(in srgb, var(--octo-deep) 94%, transparent);
+    cursor: zoom-out;
+  }
+  .lightbox[hidden] { display: none; }
+  .lightbox img {
+    max-width: 100%; max-height: 100%; width: auto; height: auto;
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+  }
+  .post figure { margin: 1.8em 0; }
+  .post figcaption {
+    font-family: var(--octo-mono); font-size: 0.82rem;
+    color: var(--octo-muted); margin-top: 10px;
+  }
+  .post hr { border: 0; border-top: 1px solid var(--octo-line); margin: 2.4em 0; }
+  .post strong { color: var(--octo-white); }
+  .post table { width: 100%; border-collapse: collapse; margin: 1.4em 0; font-size: 0.94rem; }
+  .post th, .post td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--octo-line); }
+  .post th { font-family: var(--octo-mono); font-weight: 700; color: var(--octo-green); }
+
+  .backlink { font-family: var(--octo-mono); font-size: 0.9rem; margin-top: 48px; }
+
+  footer {
+    border-top: 2px solid var(--octo-magenta); /* decorative rule */
+    padding: 28px 0 40px;
+    color: var(--octo-muted);
+    font-size: 0.9rem;
+  }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; }
+
+  /* phones */
+  @media (max-width: 600px) {
+    .wrap { padding: 0 16px; }
+    /* hamburger: the mark keeps the left edge; links drop into a column
+       only when the burger is checked */
+    .menu-btn {
+      display: block; margin-left: auto; cursor: pointer;
+      font-size: 1.5rem; line-height: 1; color: var(--octo-white);
+      padding: 4px 8px; border: 1px solid var(--octo-line);
+      border-radius: var(--octo-radius-chip);
+    }
+    nav.links { display: none; }
+    /* air between the mark/burger row and the rule beneath it */
+    .nav { padding-bottom: 24px; }
+    .menu-toggle:checked ~ nav.links {
+      display: flex; flex-basis: 100%; flex-direction: column;
+      gap: 12px; padding: 8px 2px 12px; font-size: 1rem;
+    }
+    section { padding: 44px 0; }
+    .pagehead { padding: 32px 0 22px; }
+    main > section { padding-top: 28px; }
+    .card { padding: 16px; }
+    .post pre { padding: 12px 14px; }
+    footer .wrap { flex-direction: column; align-items: flex-start; gap: 6px; }
+  }
+  @media (max-width: 480px) {
+    .wordmark { font-size: 1.15rem; }
+  }
+</style>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "@id": "https://octomon.dev/blog/plane-wifi-is-not-broken/",
+  "mainEntityOfPage": {
+    "@type": "WebPage",
+    "@id": "https://octomon.dev/blog/plane-wifi-is-not-broken/"
+  },
+  "url": "https://octomon.dev/blog/plane-wifi-is-not-broken/",
+  "headline": "Plane Wi-Fi is not broken",
+  "description": "200 ms is a red flag at your desk and a good day at 38,000 feet. A connectivity monitor that cannot tell the difference is one you learn to ignore, including on the day it is right.",
+  "datePublished": "2026-08-28",
+  "dateModified": "2026-08-28",
+  "author": {
+    "@type": "Person",
+    "name": "Simon Thorpe",
+    "url": "https://github.com/securitypedant"
+  },
+  "publisher": {
+    "@type": "Organization",
+    "name": "octomon",
+    "url": "https://octomon.dev/",
+    "logo": {
+      "@type": "ImageObject",
+      "url": "https://octomon.dev/images/octomon-icon-tile.png"
+    }
+  },
+  "image": "https://octomon.dev/blog/plane-wifi-is-not-broken/card.png",
+  "wordCount": 1607,
+  "inLanguage": "en-GB",
+  "isPartOf": {
+    "@type": "Blog",
+    "@id": "https://octomon.dev/blog/",
+    "name": "octomon blog"
+  }
+}
+</script>
+<!-- Cloudflare Web Analytics -->
+<script type='module' src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "0ebdfd53d18b49d39f76f9d08b3499c9"}'></script>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <a class="mark" href="/" aria-label="octomon home">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-hidden="true">
+        <g fill="var(--octo-green)">
+          <g transform="rotate(-14 22 64)"><rect x="18" y="60" width="8" height="44" rx="4"/></g>
+          <g transform="rotate(-7 34 64)"><rect x="30" y="60" width="8" height="58" rx="4"/></g>
+          <rect x="42" y="60" width="8" height="40" rx="4"/>
+          <rect x="54" y="60" width="8" height="54" rx="4"/>
+          <rect x="66" y="60" width="8" height="42" rx="4"/>
+          <rect x="78" y="60" width="8" height="58" rx="4" fill="var(--octo-amber)"/>
+          <g transform="rotate(7 94 64)"><rect x="90" y="60" width="8" height="46" rx="4"/></g>
+          <g transform="rotate(14 106 64)"><rect x="102" y="60" width="8" height="60" rx="4"/></g>
+        </g>
+        <path d="M22 70 C22 42 38 18 64 18 C90 18 106 42 106 70 Z" fill="var(--octo-green)"/>
+        <rect x="44" y="38" width="11" height="18" rx="1.5" fill="var(--octo-red)"/>
+        <rect x="73" y="38" width="11" height="18" rx="1.5" fill="var(--octo-red)"/>
+      </svg>
+      <span class="wordmark">octomon</span>
+    </a>
+    <input type="checkbox" id="menu" class="menu-toggle" hidden>
+    <label for="menu" class="menu-btn" aria-label="menu">&#9776;</label>
+    <nav class="links" aria-label="site">
+      <a href="/#install">install</a>
+      <a href="/#features">features</a>
+      <a href="/#video">video</a>
+      <a href="/blog/">blog</a>
+      <a href="/understand">faq</a>
+      <a href="/understand#glossary">glossary</a>
+      <a href="/privacy">privacy</a>
+      <a href="https://github.com/securitypedant/octomon">github</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="pagehead">
+    <div class="wrap">
+      <h1>Plane Wi-Fi is not broken</h1>
+      <p class="postmeta"><time datetime="2026-08-28">28 August 2026</time> · 7 min read</p>
+      <p class="lede">200 ms is a red flag at your desk and a good day at 38,000 feet. A connectivity monitor that cannot tell the difference is one you learn to ignore, including on the day it is right.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <article class="post">
+        <p>Many network tools were written by somebody sitting at a desk. You can tell,
+        because they all agree that 200 ms is bad. So I <a href="/blog/why-i-built-octomon/">wrote a tool</a> to help me understand more about the quality of my Internet connection.</p>
+        <h2>A threshold is an opinion about where you are</h2>
+        <p>At my desk at home, they are right. I have a Unifi <a href="https://store.ui.com/us/en/products/usw-flex-xg">USW Flex XG</a>
+        switch connected to a copper to fibre converter, with a fibre run into my house terminating into a
+        <a href="https://store.ui.com/us/en/products/usw-pro-xg-8-poe">USW Pro XG 8 PoE</a> that 
+        in turn connects to my <a href="https://store.ui.com/us/en/category/cloud-gateways-compact/collections/cloud-gateway-fiber/products/ucg-fiber">UCG Fibre</a> that connects to my Sonic Internet, also fibre, obviously. (Yes, I have a bit of a Unifi problem...)</p>
+        <p>So if my connection to the Internet starts hitting 200 ms to a well-connected site
+        (Let&#39;s say a Fortnite server), something has gone wrong and I want to know within
+        seconds. (Or my kids are likely to tell me anyway, re Fortnite)</p>
+        <p>At 38,000 feet, 200 ms is the good case. A tool that colours it red has just
+        told me the Internet is broken, and it will keep telling me that for the rest of the
+        flight, along with loss figures that would be alarming anywhere else. By the
+        second hour I will have stopped reading it. A monitor you have trained yourself
+        to ignore is worse than no monitor at all, because you will also ignore it on
+        the day it is right. octomon is designed to be more informative about what&#39;s going on with your Internet connection.</p>
+        <figure>
+          <img src="united-wifi.png" alt="The octomon dashboard on United WiFi, four panels at once. Connection quality shows every anchor sitting around 650ms with 0 to 13% loss and the gateway at 100%; the path table has more unresponsive hops than answering ones; the network panel names the ISP as ViaSat and the nearest Cloudflare PoP as Newark; bandwidth and machine graphs run down the right. The status line reads connection healthy, performance poor">
+          <figcaption>United Airlines WiFi connection summary as I write this article.</figcaption>
+        </figure>
+
+        <p>Hotel Wi-Fi is the mirror case. Perfectly fine at noon, congested every evening,
+        and a fixed threshold tuned to scream on the plane will say nothing useful about
+        the hotel, because the interesting thing there is a change, not a level.</p>
+        <p>This was the second gap I ran into, after the one that made me
+        <a href="/blog/why-i-built-octomon/">build octomon in the first place</a>.</p>
+        <h2>Learning a normal</h2>
+        <p>So octomon fingerprints every network you join. On Wi-Fi that is the network name
+        plus the router&#39;s hardware address, so the identity survives address changes and
+        mesh roaming. On a wired link there is no name to use, so it is the router&#39;s
+        hardware address plus the kind of link, which is why Wi-Fi and Ethernet through
+        the same router are deliberately two different locations. VPNs get their own.</p>
+        <p>For each one it keeps a baseline: what latency normally runs at to the gateway
+        and out to the monitored Internet locations, the loss it normally carries, connect times,
+        <a href="/understand#glossary">time to first byte</a>, DNS timing, Wi-Fi signal, and what a
+        speed test tends to return there. Most of those are rolling averages of the last
+        minute rather than a single best case, and a finished speed test simply replaces
+        the old one. The session&#39;s own latency floor is a separate measurement, and the
+        two only meet at grading time, where the reference is whichever of them is lower.</p>
+        <p>Two rules keep that honest.</p>
+        <ul>
+        <li><p>A minute with an active fault never teaches the baseline. Learn during
+        the outage and the outage becomes normal, which is the failure you were trying
+        to avoid in the first place, just arriving more slowly. Lesser findings still
+        fold, some of them with the latency fields blanked out, because a slow minute is
+        not a broken one.</p>
+        </li>
+        <li><p>Grading is relative with absolute floors. Latency within 1.5x of the path&#39;s
+        floor is fine and beyond 3x is bad; loss is judged tighter than that, fine below
+        1.5x of the learned normal and bad at 2x. The office-LAN absolutes are not a
+        fallback that learning eventually replaces, they are floors that always apply:
+        50 ms and 1% loss to go yellow, 150 ms and 5% to go red, however quiet the
+        network has taught octomon to expect. Learning can only ever loosen the grading,
+        never tighten it below those, and the learned normal does not get a vote at all
+        until five healthy minutes have gone into it. Relative alone would excuse
+        anything given enough time. Absolute alone is the desk-shaped tool I started out
+        annoyed by. You need both, and you need to say which one produced the verdict.</p>
+        </li>
+        </ul>
+        <h2>Weather, not alarms</h2>
+        <p>Some networks are simply like that. A satellite backhaul with a 600 ms floor is
+        not degraded, it is a satellite backhaul, and reporting it as a fault every
+        minute is a tool arguing with physics.</p>
+        <p>So once a degraded condition has stood for ten unbroken minutes, it stops
+        counting as an episode and becomes that location&#39;s weather. It does not vanish
+        from the footer, because it is still true and still worth seeing. What changes is
+        that it stops blocking the baseline, so the network location in octomon is finally allowed to learn
+        that this is its normal. From then on the comparison that survives is the one
+        that was always the useful one: worse than usual here.</p>
+        <p>This is also why the analysis changes its mind more slowly than the graphs do.
+        The graphs are raw truth, every second, deliberately. The analysis holds a state
+        until it has held across several evaluations, because one dropped ping is not an
+        outage and a verdict that repaints itself every second is noise, not judgement.</p>
+        <h2>You can see what it learned</h2>
+        <p>Every location octomon has learned is listed in the app with its metrics and the
+        date it was last seen, because a baseline you cannot inspect is just a number
+        the tool made up and expects you to trust. If one is wrong, because you were
+        learning during a bad week, delete it and it learns again. The outage history for
+        that network deliberately stays behind: forgetting what normal looked like is not
+        the same as pretending nothing ever went wrong.</p>
+        <figure>
+          <img src="locations.png" alt="The octomon locations overlay listing four learned networks. United WiFi is marked current with no ICMP to the gateway, internet around 771ms and 2h 14m healthy. MCO Airport, Sheraton Orlando and the same Sheraton over NordVPN each carry their own gateway, internet, tcp, web, DNS, signal and speed figures, a last-seen date, and a seven day line counting outages, downtime and degraded episodes">
+          <figcaption>I flew to Orlando this week, you can see how each location has its own baseline.</figcaption>
+        </figure>
+
+        <p>The same list is why switching networks is not disruptive. Move from the office
+        to the train and the comparison moves with you, rather than the train being
+        graded against the office.</p>
+        <h2>Usable, but degraded</h2>
+        <p>Most tools have two states, working and broken, and plane Wi-Fi is neither.
+        As I write this, I&#39;m flying home and the analysis says
+        <span style="color: var(--octo-green)">● connection healthy</span> ·
+        <span style="color: var(--octo-red)">performance poor</span>.
+        That&#39;s exactly my experience. (And oddly this accurately describes some of my personal relationships)</p>
+        <p>Loss is real and high. Ping-based measurement looks like an outage. Your mail
+        and your chat are going through anyway. Calling that an outage is not caution,
+        it is wrong, and calling it fine is also wrong. So there is a third
+        reading for exactly this case: usable, degraded, and here is what degraded looks
+        like on this network.</p>
+        <figure>
+          <img src="healthy-but-poor.png" alt="The octomon quality table in full screen, ICMP columns beside TCP columns for the same four targets. Over ICMP, Cloudflare, Google, Quad9 and octomon.dev all sit near 850ms with 10 to 20% loss and the gateway at 100%. Over TCP to the same addresses, every one answers in about 47ms with 0% loss. The header notes bufferbloat of plus 260ms and the status line reads connection healthy, performance poor">
+          <figcaption>Detailed view of the icmp and tcp performances of the United Airlines Wi-Fi I am currently using.</figcaption>
+        </figure>
+
+        <p>That reading is conditional, and the condition is the whole argument executing.
+        It only engages where the location is not already known to run clean, so at my
+        fibre desk the rule is switched off entirely and loss is reported loudly. It also
+        only demotes the claims that are driven by loss. A bufferbloat or latency
+        inflation finding is never quietly folded away, which is why the screenshot above
+        still says performance poor while the connection reads healthy.</p>
+        <p>That state is the whole argument in miniature. The tool is not there to protect
+        you from bad news, it is there to tell you what is actually happening, and on a
+        plane what is actually happening is that a very slow link is working quite hard.</p>
+        <p>Fast is not a property of a connection. It is a comparison, and octomon has to
+        know what it is comparing against. 200 ms at your fibre connected desk is a red flag. On a
+        satellite-backed hotel network whose normal is 200 ms, it is just Tuesday.</p>
+        <hr>
+        <p>Anyway, the Wi-Fi has held up beautifully for the entire fli</p>
+        <figure>
+          <img src="no-more-wifi.png" alt="The same octomon quality table a little later, its title now reading Cloudflare: not answering. Every ICMP column is a dash and every row reads 100% loss, gateway and public IP included. The TCP side has gone red too, 83 to 93% loss, with the few connections that got through taking over 900ms">
+          <figcaption>Turns out plane Wi-Fi can also just be broken.</figcaption>
+        </figure>
+      </article>
+      <p class="backlink"><a href="/blog/">← all posts</a></p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2025–2026 Simon Thorpe · MIT or Apache-2.0</span>
+    <a href="/blog/">blog</a>
+    <a href="/privacy">privacy</a>
+    <a href="https://github.com/securitypedant/octomon">github.com/securitypedant/octomon</a>
+    <a href="https://crates.io/crates/octomon">crates.io/crates/octomon</a>
+    <a href="https://www.youtube.com/watch?v=sHPd2LeYvaw">intro video</a>
+  </div>
+</footer>
+
+<div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="image, full size, click anywhere to close" hidden>
+  <img alt="">
+</div>
+
+<script>
+  // Lightbox: any image in the post opens full-screen; any click (or Esc)
+  // closes. currentSrc reuses whichever rendition the browser already fetched.
+  const lb = document.getElementById("lightbox");
+  const lbImg = lb.querySelector("img");
+  const openLb = (img) => {
+    lbImg.src = img.currentSrc || img.src;
+    lbImg.alt = img.alt;
+    lb.hidden = false;
+    document.body.style.overflow = "hidden";
+  };
+  const closeLb = () => {
+    lb.hidden = true;
+    lbImg.removeAttribute("src");
+    document.body.style.overflow = "";
+  };
+  for (const img of document.querySelectorAll(".post img")) {
+    img.tabIndex = 0;
+    img.setAttribute("role", "button");
+    img.addEventListener("click", () => openLb(img));
+    img.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openLb(img); }
+    });
+  }
+  lb.addEventListener("click", closeLb);
+  addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !lb.hidden) closeLb();
+  });
+</script>
+
+</body>
+</html>

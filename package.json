@@ -1,0 +1,15 @@
+{
+  "name": "octomon-site",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Build tooling for octomon.dev. The site itself is static; this only renders website/blog/*/index.md to HTML.",
+  "scripts": {
+    "blog": "node tools/blog.mjs",
+    "blog:watch": "node tools/blog.mjs --watch",
+    "deploy": "node tools/blog.mjs && wrangler deploy"
+  },
+  "devDependencies": {
+    "marked": "^15.0.7"
+  }
+}
