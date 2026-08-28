@@ -15,14 +15,19 @@ rust-version = "1.88"
 # always included. Keeps CI config, release tooling and the multi-megabyte
 # screenshot — which crates.io cannot render anyway — out of what users
 # download.
+#
+# Every pattern is anchored with a leading slash. These are gitignore globs, so
+# a bare `README.md` matches one at *any* depth: with a node_modules/ in the
+# tree (the blog tooling) `cargo package` swept up marked's README, and a bare
+# `src/**/*.rs` would take any dependency's sources the same way.
 include = [
-    "src/**/*.rs",
-    "build.rs",
-    "README.md",
-    "PRIVILEGES.md",
-    "LICENSE-MIT",
-    "LICENSE-APACHE",
-    "SECURITY.md",
+    "/src/**/*.rs",
+    "/build.rs",
+    "/README.md",
+    "/PRIVILEGES.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+    "/SECURITY.md",
 ]
 
 [build-dependencies]
