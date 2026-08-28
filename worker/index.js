@@ -172,8 +172,16 @@ export default {
       return edgeStats(env);
     }
     if (!url.pathname.startsWith("/apt/")) {
-      // Non-asset paths that reach the worker have no answer of their own.
-      return new Response("not found\n", { status: 404 });
+      // Non-asset paths that reach the worker have no answer of their own, so
+      // a browser gets the site's own 404 page rather than a bare string. The
+      // /apt/ branch below deliberately keeps text/plain: apt is a package
+      // manager, and an HTML error page only confuses it.
+      const page = await env.ASSETS.fetch(new URL("/404.html", url));
+      if (!page.ok) return new Response("not found\n", { status: 404 });
+      return new Response(page.body, {
+        status: 404,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
     }
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("method not allowed\n", {

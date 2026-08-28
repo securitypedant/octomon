@@ -10,9 +10,9 @@ because they all agree that 200 ms is bad. So I [wrote a tool](/blog/why-i-built
 ## A threshold is an opinion about where you are
 
 At my desk at home, they are right. I have a Unifi [USW Flex XG](https://store.ui.com/us/en/products/usw-flex-xg)
-switch connected to a copper to fibre converter, with a fibre run into my house terminating into a
+switch connected to a copper to fiber converter, with a fiber run into my house terminating into a
 [USW Pro XG 8 PoE](https://store.ui.com/us/en/products/usw-pro-xg-8-poe) that 
-in turn connects to my [UCG Fibre](https://store.ui.com/us/en/category/cloud-gateways-compact/collections/cloud-gateway-fiber/products/ucg-fiber) that connects to my Sonic Internet, also fibre, obviously. (Yes, I have a bit of a Unifi problem...)
+in turn connects to my [UCG Fiber](https://store.ui.com/us/en/category/cloud-gateways-compact/collections/cloud-gateway-fiber/products/ucg-fiber) that connects to my Sonic Internet, also fiber, obviously. (Yes, I have a bit of a Unifi problem...)
 
 So if my connection to the Internet starts hitting 200 ms to a well-connected site
 (Let's say a Fortnite server), something has gone wrong and I want to know within
@@ -129,7 +129,7 @@ like on this network.
 
 That reading is conditional, and the condition is the whole argument executing.
 It only engages where the location is not already known to run clean, so at my
-fibre desk the rule is switched off entirely and loss is reported loudly. It also
+fiber desk the rule is switched off entirely and loss is reported loudly. It also
 only demotes the claims that are driven by loss. A bufferbloat or latency
 inflation finding is never quietly folded away, which is why the screenshot above
 still says performance poor while the connection reads healthy.
@@ -139,7 +139,7 @@ you from bad news, it is there to tell you what is actually happening, and on a
 plane what is actually happening is that a very slow link is working quite hard.
 
 Fast is not a property of a connection. It is a comparison, and octomon has to
-know what it is comparing against. 200 ms at your fibre connected desk is a red flag. On a
+know what it is comparing against. 200 ms at your fiber connected desk is a red flag. On a
 satellite-backed hotel network whose normal is 200 ms, it is just Tuesday.
 
 ---

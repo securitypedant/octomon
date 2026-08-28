@@ -665,6 +665,51 @@ ${cards}
   });
 }
 
+// The site's 404. Generated here rather than hand-written because this is the
+// only place that already owns the nav, footer and base CSS, so it cannot drift
+// away from the other pages the way a fourth hand-maintained file would.
+function render404() {
+  const body = `<main>
+  <div class="pagehead">
+    <div class="wrap">
+      <h1>404</h1>
+      <p class="postmeta"><span style="color: var(--octo-red)">\u25cf destination unreachable</span> \u00b7 this end, not yours</p>
+      <p class="lede">The address resolved, the server answered, and there is
+      nothing at this path. Your connection is fine, which is the one diagnosis
+      octomon cannot help you with.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <article class="post">
+        <p>Somewhere to go instead:</p>
+        <ul>
+          <li><a href="/">what octomon is, and what the dashboard shows</a></li>
+          <li><a href="/blog/">the blog</a></li>
+          <li><a href="/understand">the FAQ and the glossary</a></li>
+          <li><a href="/privacy">what octomon keeps, and what it does not</a></li>
+          <li><a href="https://github.com/securitypedant/octomon">the source on GitHub</a></li>
+        </ul>
+      </article>
+    </div>
+  </section>
+</main>`;
+
+  return page({
+    title: "octomon: not found",
+    description: "That page does not exist on octomon.dev.",
+    url: `${ORIGIN}/404`,
+    ogType: "website",
+    ogTitle: "octomon: not found",
+    ogDescription: "That page does not exist on octomon.dev.",
+    ogImage: DEFAULT_OG,
+    body,
+    // a 404 has no business in an index
+    extraMeta: '<meta name="robots" content="noindex">\n',
+  });
+}
+
 function renderFeed(posts) {
   const items = posts
     .map(
@@ -756,9 +801,10 @@ function build({ force = false } = {}) {
   }
   writeFileSync(join(BLOG, "index.html"), renderIndex(posts));
   writeFileSync(join(BLOG, "feed.xml"), renderFeed(posts));
+  writeFileSync(join(SITE, "404.html"), render404());
   updateSitemap(posts);
   updateAssetsIgnore(posts.drafts);
-  console.log(`  /blog, /blog/feed.xml, sitemap.xml  (${posts.length} posts)`);
+  console.log(`  /blog, /blog/feed.xml, /404.html, sitemap.xml  (${posts.length} posts)`);
 }
 
 const force = process.argv.includes("--cards");
