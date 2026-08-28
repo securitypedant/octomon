@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Advisories land against dependencies that have not changed, so the audit
+  # cannot only run when something is pushed. Weekly, on main.
+  schedule:
+    - cron: "0 6 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,8 +18,71 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Website, README and brand art cannot affect a binary, and compiling five
+  # platforms to prove it costs about twelve minutes of runner time — most of
+  # it the Windows ARM leg, which installs LLVM before it can start. So the
+  # expensive jobs ask this one first.
+  #
+  # `paths-ignore` on the trigger would be the obvious way and is the wrong
+  # one: a workflow skipped that way never reports its checks, and the branch
+  # protection rule requires `fmt · clippy · build · test`, so a website-only
+  # pull request would sit unmergeable with nothing to explain why. Gating the
+  # jobs instead keeps that check reporting on every run.
+  changes:
+    name: what changed
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Does anything that compiles differ?
+        id: filter
+        env:
+          # `before` on a push, the merge base on a pull request.
+          BEFORE: ${{ github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          decide() { echo "code=$1" >> "$GITHUB_OUTPUT"; echo "→ code=$1: $2"; }
+
+          # The weekly run exists for the audit alone.
+          if [ "$EVENT" = "schedule" ]; then
+            decide false "scheduled audit"
+            exit 0
+          fi
+
+          base="${BASE:-$BEFORE}"
+          # A new branch, a force-push, or any base we cannot resolve: build,
+          # because guessing wrong in that direction is the cheap mistake.
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            decide true "no usable base to diff against (${base:-none})"
+            exit 0
+          fi
+
+          changed=$(git diff --name-only "$base" "$HEAD")
+          echo "changed files:"; echo "$changed" | sed 's/^/  /'
+
+          # Everything that cannot reach a compiler. No markdown is pulled in
+          # with include_str!, so documentation really is inert; add future
+          # web-only trees (a blog, say) here rather than to the trigger.
+          inert='^(website/|octomon-brand/|packaging/|\.github/ISSUE_TEMPLATE/|screenshot\.png$|LICENSE|.*\.md$)'
+          if [ -z "$changed" ]; then
+            decide true "empty diff — not trusting it"
+          elif echo "$changed" | grep -qvE "$inert"; then
+            decide true "something outside the web/docs set changed"
+          else
+            decide false "web, docs and art only — nothing to compile"
+          fi
+
   check:
     name: fmt · clippy · build · test (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       # Report all platforms, not just whichever fails first — a Windows-only
@@ -117,19 +184,29 @@ jobs:
   # point at it permanently.
   check-all:
     name: fmt · clippy · build · test
-    needs: check
+    needs: [changes, check]
     # Run even when a leg fails, so the result is a failure rather than a
-    # skipped check that never reports.
+    # skipped check that never reports. This is the context branch protection
+    # requires, so it has to report on *every* run — including the ones where
+    # the matrix was skipped for having nothing to compile.
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Verify every platform passed
         run: |
+          if [ "${{ needs.changes.outputs.code }}" != "true" ]; then
+            echo "nothing that compiles changed — matrix skipped, passing"
+            exit 0
+          fi
           echo "matrix result: ${{ needs.check.result }}"
           [ "${{ needs.check.result }}" = "success" ]
 
   audit:
     name: cargo audit
+    needs: changes
+    # Dependencies cannot change without a manifest change, and the weekly run
+    # covers advisories published against ones that stayed put.
+    if: needs.changes.outputs.code == 'true' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
