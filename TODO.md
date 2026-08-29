@@ -10,13 +10,6 @@ an interface (bind the ICMP/HTTP sockets to a chosen local address) so "Wi-Fi
 vs cable" is measured side by side rather than guessed. Today octomon reports
 a second interface coming up but measures only over the default route.
 
-## Watchdog / alert mode
-
-`--log` already gives a headless recorder; add `--alert` (or a config hook)
-that fires on state change — desktop notification, a shell command, or a
-webhook — for the intermittent-dropout case where nobody is watching the TUI.
-The finding raise/clear transitions on the timeline are the trigger.
-
 ## "Is it just me?"
 
 Cross-check a wide-internet finding against a public status signal, or at

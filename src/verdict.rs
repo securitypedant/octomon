@@ -2948,6 +2948,8 @@ pub struct Transition {
     pub finding: Finding,
     /// How long the finding was active — set on clears.
     pub after: Option<Duration>,
+    /// What else had just changed when this raised — see [`onset_context`].
+    pub onset: Option<String>,
 }
 
 #[derive(Clone)]
@@ -2964,6 +2966,10 @@ struct Active {
     since: Instant,
     quiet: u32,
     last: Finding,
+    /// What else had changed in the seconds before this raised, captured once
+    /// at onset — the state it describes is long gone by the time anyone
+    /// reads the finding.
+    onset: Option<String>,
 }
 
 /// Hysteresis over [`evaluate`]'s raw findings, keyed by `(cause, subject)`:
@@ -2979,11 +2985,15 @@ pub struct VerdictState {
 
 impl VerdictState {
     /// Fold one tick's evaluation in; returns raise/clear transitions.
+    ///
+    /// `context` is what else changed in the last minute ([`onset_context`]),
+    /// stamped onto whatever raises this tick.
     pub fn ingest(
         &mut self,
         triage: Triage,
         insufficient: Option<String>,
         now: Instant,
+        context: Option<String>,
     ) -> Vec<Transition> {
         let mut present: HashMap<(Cause, String), Finding> = triage
             .findings
@@ -3018,6 +3028,9 @@ impl VerdictState {
                             raised: true,
                             finding: f.clone(),
                             after: None,
+                            // An escalation belongs to the episode that is
+                            // already running: what changed then, not now.
+                            onset: active.onset.clone(),
                         });
                     }
                     active.last = f;
@@ -3045,12 +3058,14 @@ impl VerdictState {
                                 raised: true,
                                 finding: f.clone(),
                                 after: None,
+                                onset: context.clone(),
                             });
                         }
                         tr.active = Some(Active {
                             since: resumed.unwrap_or(now),
                             quiet: 0,
                             last: f,
+                            onset: context.clone(),
                         });
                     }
                 }
@@ -3068,6 +3083,7 @@ impl VerdictState {
                     raised: false,
                     finding,
                     after: Some(at.duration_since(since)),
+                    onset: None,
                 });
             }
             tr.active.is_some() || tr.cleared.is_some() || tr.hits.iter().any(|h| *h)
@@ -3080,6 +3096,13 @@ impl VerdictState {
                 t.active.as_ref().map(|a| {
                     let mut f = a.last.clone();
                     f.since = Some(a.since);
+                    // Carried as evidence rather than as a field of its own,
+                    // so every surface that already shows a finding's
+                    // evidence — the [y] overlay, the doctor report — shows
+                    // what it started after without knowing about onsets.
+                    if let Some(onset) = &a.onset {
+                        f.evidence.push(format!("started {onset}"));
+                    }
                     f
                 })
             })
@@ -3198,8 +3221,84 @@ enum BaselineIo {
 /// event timeline — this is where "loss spike started / ended" comes from.
 /// Also owns the baseline lifecycle: it already wakes every second and knows
 /// whether the verdict is Healthy, which is the anti-poisoning gate.
+/// How far back a change is still worth naming as the setting a finding
+/// raised in. Past this it is coincidence, not context.
+const ONSET_WINDOW_SECS: i64 = 60;
+
+/// What else had just changed when a finding raised — the fact a person would
+/// otherwise have to reconstruct by reading the Network history against the
+/// timeline.
+///
+/// Strictly correlation, and worded as such: "3s after the roam" says *when*
+/// it started, never that the roam caused it. The attachment change is the
+/// strongest such fact octomon holds (it is timestamped, objective, and
+/// usually the answer); a speed test in flight is the other, because it is
+/// octomon's own traffic making the connection look worse.
+pub fn onset_context(s: &AppState) -> Option<String> {
+    use crate::app::NetChangeKind as K;
+    // Sentence forms rather than the history's column labels: this clause is
+    // read inside a line, not down a table. `LocationKnown` is absent on
+    // purpose — recognising which network this is happens seconds after every
+    // start and is octomon noticing something, not the network doing
+    // anything; naming it would put "8s after location" under half the
+    // findings a session ever raises.
+    let phrase = |kind: K| match kind {
+        K::IfaceUp => Some("an interface came up"),
+        K::IfaceDown => Some("an interface went down"),
+        K::NetworkChanged => Some("the network changed"),
+        K::LinkLost => Some("the link dropped"),
+        K::LinkRestored => Some("the link came back"),
+        K::WifiJoined => Some("joining a different Wi-Fi network"),
+        K::WifiRoamed => Some("a Wi-Fi roam"),
+        K::AddressChanged => Some("an address change"),
+        K::VpnUp => Some("the VPN came up"),
+        K::VpnDown => Some("the VPN went down"),
+        K::LocationKnown => None,
+    };
+    let now = chrono::Utc::now().timestamp();
+    if let Some((change, phrase)) = s
+        .net_history
+        .iter()
+        .rev()
+        .filter(|c| c.at <= now && now - c.at <= ONSET_WINDOW_SECS)
+        .find_map(|c| phrase(c.kind).map(|p| (c, p)))
+    {
+        let ago = now - change.at;
+        return Some(if ago <= 1 {
+            format!("just after {phrase}")
+        } else {
+            format!("{ago}s after {phrase}")
+        });
+    }
+    matches!(s.speedtest.status, crate::app::SpeedStatus::Running)
+        .then(|| "during a speed test".to_string())
+}
+
+/// One tick of the verdict as a session-strip cell. Deliberately coarser than
+/// the footer: notes (a busy CPU, a weak-but-working radio) are not the
+/// connection failing and stay green, while "degraded but usable" — note-class
+/// for the baseline's purposes, but the connection's real state — is the
+/// yellow its headline already is.
+pub fn session_state(v: &Verdict) -> crate::session::SessionState {
+    use crate::session::SessionState as S;
+    match v {
+        Verdict::Insufficient(_) => S::Unknown,
+        Verdict::Healthy => S::Healthy,
+        Verdict::Problems(findings) => match findings.first() {
+            None => S::Healthy,
+            Some(top) if top.cause == Cause::UsableDegraded => S::Degraded,
+            Some(top) => match top.severity {
+                Severity::Info => S::Healthy,
+                Severity::Degraded => S::Degraded,
+                Severity::Down => S::Down,
+            },
+        },
+    }
+}
+
 pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::config::Config) {
     let mut tick = tokio::time::interval(cfg.sample_interval());
+    let sinks = cfg.alert.sinks();
     // Consecutive fully-healthy ticks; a fold happens each time this hits 60.
     let mut healthy_run: u32 = 0;
     // Whether any second of the current healthy run had latency-suspect
@@ -3217,9 +3316,18 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
             let triage = evaluate(&s);
             let insufficient = insufficient_reason(&s);
             let network = s.baseline_key.clone();
-            for t in s.verdict.ingest(triage, insufficient, now) {
+            let context = onset_context(&s);
+            let transitions = s.verdict.ingest(triage, insufficient, now, context);
+            for t in &transitions {
                 let (severity, message) = if t.raised {
-                    (t.finding.severity, format!("▲ {}", t.finding.summary))
+                    // "▲ latency degraded · 3s after wifi roam" — the timeline
+                    // entry carries the setting, so reading it back later does
+                    // not mean cross-referencing the network history by eye.
+                    let mut m = format!("▲ {}", t.finding.summary);
+                    if let Some(onset) = &t.onset {
+                        m.push_str(&format!(" · {onset}"));
+                    }
+                    (t.finding.severity, m)
                 } else {
                     // Clears are good news: Info regardless of how bad it was.
                     let after = t.after.unwrap_or_default();
@@ -3248,6 +3356,35 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
                     )
                 };
                 s.push_event(severity, crate::app::EventCategory::Analysis, message);
+            }
+
+            // One cell of the session strip per tick, from the settled
+            // verdict — the same judgement the footer states, kept.
+            let state = session_state(&s.verdict.current);
+            let cause = match &s.verdict.current {
+                Verdict::Problems(f) if state > crate::session::SessionState::Healthy => {
+                    f.first().map(|top| top.cause)
+                }
+                _ => None,
+            };
+            s.session.record(state, cause);
+
+            // Alerts leave with the location's name where there is one: "on
+            // Home" is the difference between a notification you can act on
+            // and one you have to come back to the screen to interpret.
+            if sinks.is_active() {
+                let where_ = Some(
+                    s.baseline
+                        .as_ref()
+                        .map(|b| b.display_name().to_string())
+                        .unwrap_or_else(|| s.netinfo.medium.label().to_string()),
+                );
+                for t in &transitions {
+                    crate::alert::dispatch(
+                        &sinks,
+                        crate::alert::Alert::from_transition(t, where_.clone()),
+                    );
+                }
             }
 
             net_changes = std::mem::take(&mut s.net_history_unsaved);
@@ -4717,6 +4854,110 @@ mod tests {
         }
     }
 
+    /// The context itself: the most recent attachment change inside the
+    /// window, then octomon's own speed test, then nothing.
+    #[test]
+    fn onset_context_names_the_nearest_change() {
+        use crate::app::{NetChange, NetChangeKind};
+        let mut s = AppState::new(vec![]);
+        let now = chrono::Utc::now().timestamp();
+        let change = |at: i64, kind: NetChangeKind| NetChange {
+            at,
+            kind,
+            iface: "en0".into(),
+            summary: String::new(),
+            detail: vec![],
+        };
+
+        assert_eq!(onset_context(&s), None, "a quiet session invents nothing");
+
+        // Old news is not context.
+        s.net_history
+            .push_back(change(now - 600, NetChangeKind::WifiJoined));
+        assert_eq!(onset_context(&s), None);
+
+        s.net_history
+            .push_back(change(now - 3, NetChangeKind::WifiRoamed));
+        assert_eq!(onset_context(&s).as_deref(), Some("3s after a Wi-Fi roam"));
+
+        // The newest change wins, and one landing this very second reads as
+        // simultaneous rather than as "0s after".
+        s.net_history.push_back(change(now, NetChangeKind::VpnUp));
+        assert_eq!(
+            onset_context(&s).as_deref(),
+            Some("just after the VPN came up")
+        );
+
+        // Recognising the location is octomon noticing something, not the
+        // network moving: it happens seconds after every start, and would
+        // otherwise be stamped on half the findings a session ever raises.
+        s.net_history.clear();
+        s.net_history
+            .push_back(change(now - 2, NetChangeKind::LocationKnown));
+        assert_eq!(onset_context(&s), None);
+
+        // With nothing on the network's side, octomon's own load is the
+        // honest caveat.
+        s.net_history.clear();
+        s.speedtest.status = crate::app::SpeedStatus::Running;
+        assert_eq!(onset_context(&s).as_deref(), Some("during a speed test"));
+    }
+
+    /// A finding that raises seconds after the network moved says so, and
+    /// keeps saying so for as long as it stands: the roam that explains it is
+    /// long gone from the eye by the time anyone reads the finding.
+    #[test]
+    fn a_raise_records_what_had_just_changed() {
+        let mut vs = VerdictState::default();
+        let now = Instant::now();
+        let with = Triage {
+            rungs: vec![],
+            performance: None,
+            checks: vec![],
+            findings: vec![fake(Cause::GatewayLan)],
+        };
+        let context = Some("3s after wifi roam".to_string());
+        let mut raised = None;
+        for _ in 0..4 {
+            if let Some(t) = vs
+                .ingest(with.clone(), None, now, context.clone())
+                .into_iter()
+                .find(|t| t.raised)
+            {
+                raised = Some(t);
+            }
+        }
+        let raised = raised.expect("the finding raises");
+        assert_eq!(raised.onset.as_deref(), Some("3s after wifi roam"));
+
+        // And it rides along as evidence, so the analysis overlay and the
+        // doctor report show it without knowing what an onset is.
+        let Verdict::Problems(findings) = &vs.current else {
+            panic!("expected an active finding");
+        };
+        assert!(
+            findings[0]
+                .evidence
+                .iter()
+                .any(|e| e == "started 3s after wifi roam"),
+            "evidence: {:?}",
+            findings[0].evidence
+        );
+
+        // A quiet network attaches nothing rather than reaching for a
+        // coincidence.
+        let mut vs = VerdictState::default();
+        for _ in 0..4 {
+            for t in vs.ingest(with.clone(), None, now, None) {
+                assert!(t.onset.is_none());
+            }
+        }
+        let Verdict::Problems(findings) = &vs.current else {
+            panic!("expected an active finding");
+        };
+        assert!(findings[0].evidence.is_empty());
+    }
+
     #[test]
     fn findings_raise_on_four_of_six_ticks_and_clear_after_eight_quiet() {
         let mut vs = VerdictState::default();
@@ -4730,25 +4971,25 @@ mod tests {
         let without = Triage::default();
 
         for _ in 0..3 {
-            vs.ingest(with.clone(), None, now);
+            vs.ingest(with.clone(), None, now, None);
             assert!(
                 matches!(vs.current, Verdict::Healthy),
                 "3 hits must not raise"
             );
         }
-        let transitions = vs.ingest(with.clone(), None, now);
+        let transitions = vs.ingest(with.clone(), None, now, None);
         assert!(matches!(vs.current, Verdict::Problems(_)), "4th hit raises");
         assert!(transitions.iter().any(|t| t.raised));
 
         for i in 0..7 {
-            vs.ingest(without.clone(), None, now);
+            vs.ingest(without.clone(), None, now, None);
             assert!(
                 matches!(vs.current, Verdict::Problems(_)),
                 "still active after {} quiet ticks",
                 i + 1
             );
         }
-        let transitions = vs.ingest(without.clone(), None, now);
+        let transitions = vs.ingest(without.clone(), None, now, None);
         assert!(
             matches!(vs.current, Verdict::Healthy),
             "8th quiet tick clears"
@@ -4760,7 +5001,7 @@ mod tests {
             "clear is held, not emitted yet"
         );
         let later = now + Duration::from_secs(th::FLAP_GRACE_SECS + 1);
-        let transitions = vs.ingest(without.clone(), None, later);
+        let transitions = vs.ingest(without.clone(), None, later, None);
         let cleared = transitions.iter().find(|t| !t.raised).unwrap();
         assert!(cleared.after.is_some(), "clears carry the active duration");
     }
@@ -4792,11 +5033,11 @@ mod tests {
         // 30 s apart in wall time.
         for _ in 0..3 {
             for _ in 0..6 {
-                count(vs.ingest(with.clone(), None, now));
+                count(vs.ingest(with.clone(), None, now, None));
             }
             for _ in 0..12 {
                 now += Duration::from_secs(1);
-                count(vs.ingest(without.clone(), None, now));
+                count(vs.ingest(without.clone(), None, now, None));
             }
             now += Duration::from_secs(12);
         }
@@ -4804,7 +5045,7 @@ mod tests {
         assert_eq!(clears, 0, "no clear while it keeps coming back");
         // Silence beyond the grace: the one clear, spanning the episode.
         now += Duration::from_secs(th::FLAP_GRACE_SECS + 1);
-        let ts = vs.ingest(without.clone(), None, now);
+        let ts = vs.ingest(without.clone(), None, now, None);
         let cleared = ts.iter().find(|t| !t.raised).expect("the final clear");
         assert!(
             cleared.after.unwrap() >= Duration::from_secs(50),
@@ -4827,7 +5068,7 @@ mod tests {
             findings: vec![fake(Cause::GatewayLan)],
         };
         for _ in 0..4 {
-            vs.ingest(degraded.clone(), None, now);
+            vs.ingest(degraded.clone(), None, now, None);
         }
         assert!(matches!(vs.current, Verdict::Problems(_)));
 
@@ -4843,6 +5084,7 @@ mod tests {
             },
             None,
             now,
+            None,
         );
         let esc = t.iter().find(|t| t.raised).expect("escalation transition");
         assert_eq!(esc.finding.severity, Severity::Down);
@@ -4858,6 +5100,7 @@ mod tests {
             },
             None,
             now,
+            None,
         );
         assert!(t.is_empty());
     }
@@ -4873,9 +5116,9 @@ mod tests {
             findings: vec![fake(Cause::WideInternet)],
         };
         for _ in 0..3 {
-            vs.ingest(with.clone(), None, now);
+            vs.ingest(with.clone(), None, now, None);
             for _ in 0..6 {
-                vs.ingest(Triage::default(), None, now);
+                vs.ingest(Triage::default(), None, now, None);
             }
         }
         assert!(matches!(vs.current, Verdict::Healthy));
@@ -4938,7 +5181,7 @@ mod tests {
     fn insufficient_overrides_everything() {
         let mut vs = VerdictState::default();
         let now = Instant::now();
-        let out = vs.ingest(Triage::default(), Some("measuring…".into()), now);
+        let out = vs.ingest(Triage::default(), Some("measuring…".into()), now, None);
         assert!(out.is_empty());
         assert!(matches!(vs.current, Verdict::Insufficient(_)));
     }

@@ -62,12 +62,46 @@ What it looks for beyond the graphs:
   here" and "3 outages this week, clustering 20–23h".
 - **Event timeline** (`e`) and a **network history** of every join, roam,
   address, route and VPN change.
+- **The whole session in one bar** — the strip above the analysis line grades
+  every slice of the run from launch to now, oldest at the left: green fine,
+  yellow degraded, red down. Cells fold as the session grows, so a nine-hour
+  flight fits the same row a five-minute check does, and a one-minute outage
+  three hours ago is still visible. Press **`b`** to walk it: each column says
+  which minutes it covers and what was wrong with them, and **`Enter`** opens
+  the timeline at that moment.
+- **What else had just changed** — a finding that raises seconds after a Wi-Fi
+  roam, a VPN coming up or the network moving says so ("`▲ latency degraded ·
+  3s after a Wi-Fi roam`"), on the timeline, in the analysis and in alerts.
+  Correlation stated as correlation: it says when it started, not why.
 
 **Doctor mode** — `octomon --doctor` observes headless for ~20s (longer with `--observe`) and prints the
 analysis, this network's normal, its history, the measurements and recent
 events; `--json` for machines. Redacted by default (SSID, IPs, MACs) so it is
 safe to paste into a forum or ISP ticket; `--full` prints everything. Exit
 codes: `0` healthy, `1` problems found, `3` couldn't measure.
+
+**Watch mode** — `octomon --watch` runs headless until Ctrl-C and prints each
+finding as it raises and again when it ends; the intermittent dropout that
+happens while nobody is looking is exactly the case the dashboard cannot help
+with. Add `--alert` for a desktop notification, `--alert-cmd` to run something,
+`--alert-url` to POST JSON at a webhook — any combination, and they work with
+the TUI too. Alerts fire from the same hysteresised raise/clear transitions the
+timeline records, so a flapping link does not become a flapping notification,
+and the payload reaches a command through the environment (`OCTOMON_TEXT`,
+`OCTOMON_SEVERITY`, `OCTOMON_CAUSE`, …), never substituted into your command
+string. Settings persist under `[alert]` in the config.
+
+```sh
+octomon --watch                                    # print findings, nothing else
+octomon --watch --alert                            # + desktop notifications
+octomon --watch --alert-cmd 'ntfy pub mytopic "$OCTOMON_TEXT"'
+octomon --watch --alert-url https://example.com/hook --alert-level down
+```
+
+On macOS, `--alert` posts through `osascript`, which means the system
+attributes the notification to Script Editor and clicking one opens that
+rather than anything useful. With `brew install terminal-notifier` octomon
+uses it instead, and a click brings your terminal to the front.
 
 Any session can be **recorded to CSV** with `l`, and `D` writes a **support
 bundle** (report, routes, events, config and data files) to your Desktop.

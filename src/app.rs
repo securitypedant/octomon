@@ -8,9 +8,15 @@ use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 /// Fixed-capacity ring buffer of samples backing sparklines / charts.
+///
+/// One slot per probe, oldest first, and a probe that never answered keeps its
+/// slot as `None`. That is what makes the x axis time rather than a count of
+/// successes: an outage has *width*, so a chart cannot quietly splice the
+/// samples either side of it together and present pre-outage figures as
+/// current. Series that cannot miss (throughput, CPU) simply never store one.
 #[derive(Clone)]
 pub struct History {
-    pub data: VecDeque<f64>,
+    pub data: VecDeque<Option<f64>>,
     pub cap: usize,
 }
 
@@ -23,30 +29,55 @@ impl History {
     }
 
     pub fn push(&mut self, v: f64) {
+        self.push_slot(Some(v));
+    }
+
+    /// Record that this probe went unanswered — a gap the charts draw, not a
+    /// sample they plot.
+    pub fn push_loss(&mut self) {
+        self.push_slot(None);
+    }
+
+    fn push_slot(&mut self, v: Option<f64>) {
         if self.data.len() == self.cap {
             self.data.pop_front();
         }
         self.data.push_back(v);
     }
 
+    /// The retained samples that *are* measurements, oldest first.
+    pub fn successes(&self) -> impl DoubleEndedIterator<Item = f64> + '_ {
+        self.data.iter().filter_map(|v| *v)
+    }
+
+    /// The most recent measurement — the last answered probe, not the last
+    /// slot: jitter and the like compare against a real previous RTT.
     pub fn last(&self) -> Option<f64> {
-        self.data.back().copied()
+        self.successes().next_back()
     }
 
     #[allow(dead_code)] // used for future fixed-scale charts
     pub fn max(&self) -> f64 {
-        self.data.iter().cloned().fold(0.0_f64, f64::max)
+        self.successes().fold(0.0_f64, f64::max)
     }
 
-    /// Most-recent `n` samples as `u64`, oldest first — the shape ratatui's
-    /// `Sparkline` wants.
+    /// Most-recent `n` slots as `u64`, oldest first — the shape ratatui's
+    /// `Sparkline` wants. A lost probe reads as zero: on a sparkline, which has
+    /// no room to say more, a missing bar is the honest rendering of a miss.
     pub fn tail_u64(&self, n: usize) -> Vec<u64> {
         let skip = self.data.len().saturating_sub(n);
         self.data
             .iter()
             .skip(skip)
-            .map(|v| v.max(0.0) as u64)
+            .map(|v| v.unwrap_or(0.0).max(0.0) as u64)
             .collect()
+    }
+
+    /// Most-recent `n` slots, oldest first, gaps intact — for charts that draw
+    /// the misses rather than skipping them.
+    pub fn tail_slots(&self, n: usize) -> Vec<Option<f64>> {
+        let skip = self.data.len().saturating_sub(n);
+        self.data.iter().skip(skip).copied().collect()
     }
 }
 
@@ -208,6 +239,7 @@ impl Series {
         self.sent += 1;
         self.push_window(false);
         self.last_ms = None;
+        self.history.push_loss();
     }
 
     fn push_window(&mut self, ok: bool) {
@@ -254,14 +286,7 @@ impl Series {
 
     /// Distribution over the most recent `n` successful samples.
     pub fn stats(&self, n: usize) -> RttStats {
-        let mut v: Vec<f64> = self
-            .history
-            .data
-            .iter()
-            .rev()
-            .take(n.max(1))
-            .copied()
-            .collect();
+        let mut v: Vec<f64> = self.history.successes().rev().take(n.max(1)).collect();
         if v.is_empty() {
             return RttStats::default();
         }
@@ -282,10 +307,12 @@ impl Series {
     /// The series' usual best (see [`TargetStat::floor_ms`]).
     pub fn floor_ms(&self) -> Option<f64> {
         const MIN_HISTORY: usize = 30;
-        if self.history.data.len() < MIN_HISTORY {
+        // Successes, and enough of them: on a path that mostly fails, the few
+        // replies that do land are still what "usual best" means.
+        let mut v: Vec<f64> = self.history.successes().collect();
+        if v.len() < MIN_HISTORY {
             return self.min_ever_ms;
         }
-        let mut v: Vec<f64> = self.history.data.iter().copied().collect();
         v.sort_by(f64::total_cmp);
         Some(v[v.len() / 10])
     }
@@ -341,6 +368,7 @@ impl TargetStat {
         self.sent += 1;
         self.push_window(false);
         self.last_rtt_ms = None;
+        self.history.push_loss();
     }
 
     fn push_window(&mut self, ok: bool) {
@@ -425,14 +453,7 @@ impl TargetStat {
 
     /// Distribution over the most recent `n` successful samples.
     pub fn stats(&self, n: usize) -> RttStats {
-        let mut v: Vec<f64> = self
-            .history
-            .data
-            .iter()
-            .rev()
-            .take(n.max(1))
-            .copied()
-            .collect();
+        let mut v: Vec<f64> = self.history.successes().rev().take(n.max(1)).collect();
         if v.is_empty() {
             return RttStats::default();
         }
@@ -469,10 +490,12 @@ impl TargetStat {
     /// question really is "how far above true idle".)
     pub fn floor_ms(&self) -> Option<f64> {
         const MIN_HISTORY: usize = 30;
-        if self.history.data.len() < MIN_HISTORY {
+        // Successes, and enough of them: on a path that mostly fails, the few
+        // replies that do land are still what "usual best" means.
+        let mut v: Vec<f64> = self.history.successes().collect();
+        if v.len() < MIN_HISTORY {
             return self.min_ever_ms;
         }
-        let mut v: Vec<f64> = self.history.data.iter().copied().collect();
         v.sort_by(f64::total_cmp);
         Some(v[v.len() / 10])
     }
@@ -1124,13 +1147,19 @@ impl DnsProbe {
             self.window.pop_front();
         }
         self.window.push_back(rtt_ms.is_some());
-        if let Some(ms) = rtt_ms {
-            self.ok += 1;
-            self.hist.push(ms);
-            if self.recent.len() == DNS_RECENT {
-                self.recent.pop_front();
+        match rtt_ms {
+            Some(ms) => {
+                self.ok += 1;
+                self.hist.push(ms);
+                if self.recent.len() == DNS_RECENT {
+                    self.recent.pop_front();
+                }
+                self.recent.push_back(ms);
             }
-            self.recent.push_back(ms);
+            // A timeout holds its slot in the trace: a resolver that stops
+            // answering must stop drawing, not keep repainting the last good
+            // answers as though they were still arriving.
+            None => self.hist.push_loss(),
         }
         self.last_ms = rtt_ms;
     }
@@ -1150,10 +1179,11 @@ impl DnsProbe {
 
     /// Mean round trip over the retained history.
     pub fn mean_ms(&self) -> Option<f64> {
-        if self.hist.data.is_empty() {
+        let n = self.hist.successes().count();
+        if n == 0 {
             return None;
         }
-        Some(self.hist.data.iter().sum::<f64>() / self.hist.data.len() as f64)
+        Some(self.hist.successes().sum::<f64>() / n as f64)
     }
 
     /// Share of *recent* queries that went unanswered, as a percentage.
@@ -2496,6 +2526,13 @@ pub struct AppState {
     pub overlay: Overlay,
     /// Synthesized diagnosis: the footer one-liner and the triage ladder.
     pub verdict: crate::verdict::VerdictState,
+    /// The same diagnosis, one coarse cell per slice of time, for the whole
+    /// session — the strip above the footer.
+    pub session: crate::session::SessionTrack,
+    /// Which column of the session bar the [b] cursor is on, if it is up.
+    /// Indexes the bar as drawn, so it is clamped against the terminal width
+    /// on every use.
+    pub bar_cursor: Option<usize>,
     /// This network's learned baseline (present once the network is
     /// fingerprinted; freshly created when the network is new).
     pub baseline: Option<crate::baseline::Baseline>,
@@ -2696,6 +2733,8 @@ impl AppState {
             paused: false,
             overlay: Overlay::None,
             verdict: crate::verdict::VerdictState::default(),
+            session: crate::session::SessionTrack::default(),
+            bar_cursor: None,
             link_lost: false,
             baseline: None,
             baseline_key: None,
@@ -2752,6 +2791,9 @@ impl AppState {
         self.bw_filter_other = live.bw_filter_other.clone();
         self.zoom_view = live.zoom_view;
         self.zoom_behind = live.zoom_behind;
+        // The bar the cursor walks is the frozen one, but which column it is
+        // on is the user's doing and follows them across a pause.
+        self.bar_cursor = live.bar_cursor;
         self.proc_details = live.proc_details.clone();
         self.pinned_procs = live.pinned_procs.clone();
         self.pinned_remotes = live.pinned_remotes.clone();

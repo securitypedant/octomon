@@ -159,6 +159,12 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
                     t.web.last_ttfb_ms = None;
                     if next == WebStatus::Web {
                         t.web.fails += 1;
+                        // A server that answered before and has stopped: the
+                        // failure holds a slot in the trace, so the strip
+                        // shows the stall instead of freezing on the last
+                        // good TTFB. A target with no web service at all
+                        // records nothing — there is nothing to miss.
+                        t.web.hist.push_loss();
                     }
                 }
             }

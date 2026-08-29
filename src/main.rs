@@ -4,6 +4,7 @@
 //! (behind a std `Mutex`); a render loop reads a snapshot and draws with ratatui.
 //! Input is read on a dedicated OS thread and delivered over a channel.
 
+mod alert;
 mod app;
 mod baseline;
 mod collectors;
@@ -12,6 +13,7 @@ mod demo;
 mod errlog;
 mod history;
 mod platform;
+mod session;
 mod store;
 mod theme;
 mod ui;
@@ -92,6 +94,15 @@ struct Cli {
     /// Print where the config, data and bundles live, then exit
     #[arg(long, help_heading = "Modes")]
     paths: bool,
+
+    /// Watch without a screen: print findings as they happen, until Ctrl-C
+    ///
+    /// The unattended form — a service, a spare terminal, a screen session.
+    /// Every collector runs as usual and each finding prints one line as it
+    /// raises and again when it ends. Combines with --alert, --alert-cmd and
+    /// --alert-url; add --log to record the session to CSV as well.
+    #[arg(long, help_heading = "Modes")]
+    watch: bool,
 
     // ---- Report options --------------------------------------------------
     /// Seconds to observe before reporting [default: 20, or 45 with --speedtest]
@@ -178,6 +189,39 @@ struct Cli {
         help_heading = "Overrides"
     )]
     theme: Option<String>,
+
+    // ---- Alerts ----------------------------------------------------------
+    /// Notify the desktop when a finding raises or clears
+    ///
+    /// Uses whatever notifier this OS ships with. Alerts fire from the same
+    /// raise/clear transitions the timeline records, so they are already
+    /// hysteresised: a flapping link does not become a flapping notification.
+    #[arg(long, help_heading = "Alerts")]
+    alert: bool,
+
+    /// Run this command for each alert
+    ///
+    /// The payload arrives in the environment — OCTOMON_TEXT, OCTOMON_EVENT
+    /// (raised/cleared), OCTOMON_SEVERITY, OCTOMON_CAUSE, OCTOMON_SUMMARY,
+    /// OCTOMON_ONSET, OCTOMON_AFTER_SECS, OCTOMON_NETWORK — and never inside
+    /// the command string, so a network cannot name itself into your shell.
+    #[arg(long, value_name = "CMD", help_heading = "Alerts")]
+    alert_cmd: Option<String>,
+
+    /// POST each alert to this URL as JSON
+    #[arg(long, value_name = "URL", help_heading = "Alerts")]
+    alert_url: Option<String>,
+
+    /// Lowest severity worth an alert [default: degraded]
+    ///
+    /// Notes (a busy CPU, a weak-but-working radio) never alert either way.
+    #[arg(
+        long,
+        value_name = "LEVEL",
+        value_parser = ["degraded", "down"],
+        help_heading = "Alerts"
+    )]
+    alert_level: Option<String>,
 
     // ---- Turn things off -------------------------------------------------
     /// Disable the on-demand speed test
@@ -282,6 +326,23 @@ async fn main() -> Result<()> {
     if cli.no_edge {
         cfg.edge_check_url.clear();
     }
+    if cli.watch {
+        cfg.alert.stdout = true;
+    }
+    // Alert flags override the saved settings for this run only; naming any
+    // sink on the command line is itself the "switch it on".
+    if cli.alert {
+        cfg.alert.desktop = true;
+    }
+    if let Some(cmd) = &cli.alert_cmd {
+        cfg.alert.command = Some(cmd.clone());
+    }
+    if let Some(url) = &cli.alert_url {
+        cfg.alert.url = Some(url.clone());
+    }
+    if let Some(level) = &cli.alert_level {
+        cfg.alert.min_severity = level.clone();
+    }
     for t in &cli.targets {
         match config::parse_target(t) {
             Ok(target) => cfg.targets.push(target),
@@ -368,6 +429,17 @@ async fn main() -> Result<()> {
                 std::env::consts::OS
             ),
         );
+        // Asked for notifications on a machine with no notifier: say so now,
+        // rather than letting the first finding be one nobody is told about.
+        if cfg.alert.desktop
+            && let Some(tool) = alert::missing_notifier()
+        {
+            s.notice_event(
+                verdict::Severity::Info,
+                app::EventCategory::Logging,
+                format!("desktop alerts need {tool} — install libnotify-bin"),
+            );
+        }
     }
 
     // Triggers fired by key presses.
@@ -591,6 +663,14 @@ async fn main() -> Result<()> {
         std::process::exit(code);
     }
 
+    // Headless watch: every collector is already running, so this process now
+    // exists only to keep them running and to let the alert sinks talk. No
+    // terminal is touched — it must be safe under a service manager with no
+    // TTY at all.
+    if cli.watch {
+        return watch(&state, &cfg).await;
+    }
+
     // Resolve dark/light before the input thread exists: theme auto-detection
     // asks the terminal its background colour and reads the reply off the
     // terminal input — once the thread below owns stdin it would eat it.
@@ -627,6 +707,125 @@ async fn main() -> Result<()> {
     let result = run_ui(&mut terminal, &ctx, rx).await;
     ratatui::restore();
     result
+}
+
+/// Wait for the signal that means "stop": Ctrl-C, or the SIGTERM a service
+/// manager sends. Both end the run the same way, so a watch running under
+/// systemd or launchd still gets to print its closing count.
+async fn stop_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate())?;
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r?,
+            _ = term.recv() => {}
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.map_err(Into::into)
+    }
+}
+
+/// `--watch`: run headless until Ctrl-C, printing findings as they happen.
+///
+/// The alerts themselves come out of the verdict loop's sinks — this only
+/// frames them, so that a run is legible in a terminal and in a service's
+/// journal: what is being watched, where the alerts are going, and, once the
+/// picture has formed, the state it started from. Then silence, which for a
+/// watchdog is the correct output.
+async fn watch(state: &Arc<Mutex<AppState>>, cfg: &config::Config) -> Result<()> {
+    let sinks = cfg.alert.sinks();
+    println!(
+        "octomon v{} · watching · findings print here{}",
+        util::VERSION,
+        match (sinks.desktop, sinks.command.is_some(), sinks.url.is_some()) {
+            (false, false, false) => String::new(),
+            (d, c, u) => {
+                let mut also: Vec<&str> = Vec::new();
+                if d {
+                    also.push("desktop");
+                }
+                if c {
+                    also.push("command");
+                }
+                if u {
+                    also.push("webhook");
+                }
+                format!(" and to {}", also.join(" + "))
+            }
+        }
+    );
+    println!(
+        "alerting from {} up · Ctrl-C to stop",
+        sinks.min_severity.label()
+    );
+    if sinks.desktop
+        && let Some(tool) = alert::missing_notifier()
+    {
+        println!(
+            "warning: desktop notifications need {tool} (install libnotify-bin) — \
+             findings will still print here"
+        );
+    }
+
+    // Say the opening state once the analysis has one — a watchdog that says
+    // nothing at all for its first minute is indistinguishable from a broken
+    // one. After this it speaks only when something changes.
+    let settled = async {
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tick.tick().await;
+            let line = {
+                let s = state.lock().unwrap();
+                match &s.verdict.current {
+                    verdict::Verdict::Insufficient(_) => None,
+                    verdict::Verdict::Healthy => Some("● connection healthy".to_string()),
+                    verdict::Verdict::Problems(f) => Some(format!("▲ {}", f[0].summary)),
+                }
+            };
+            if let Some(line) = line {
+                // Unless the alerts have already said it: a connection that
+                // is in trouble at startup raises before the analysis
+                // settles, and hearing it twice reads as a stutter.
+                if !alert::has_printed() {
+                    println!(
+                        "{}  {line}",
+                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                    );
+                }
+                return;
+            }
+        }
+    };
+    tokio::select! {
+        _ = settled => {}
+        r = stop_signal() => return r,
+    }
+
+    stop_signal().await?;
+    // A closing count, so a run that is stopped after a week says what it saw
+    // without anyone reading back through the journal.
+    let (elapsed, raised) = {
+        let s = state.lock().unwrap();
+        (
+            s.started.elapsed(),
+            s.events
+                .iter()
+                .filter(|e| {
+                    e.category == app::EventCategory::Analysis && e.message.starts_with('▲')
+                })
+                .count(),
+        )
+    };
+    println!(
+        "\nwatched {} · {raised} finding{} raised",
+        verdict::fmt_duration(elapsed),
+        if raised == 1 { "" } else { "s" }
+    );
+    Ok(())
 }
 
 async fn run_ui(
@@ -1740,6 +1939,57 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
             InputMode::Normal => match key.code {
                 KeyCode::Char('q') => s.should_quit = true,
                 KeyCode::Char('c') if ctrl => s.should_quit = true,
+
+                // --- The session bar's cursor ---------------------------
+                // These come before the panel keys they share: while the
+                // cursor is walking the bar, ←/→/Esc/Enter belong to it. The
+                // cursor is a mode, entered and left deliberately with [b],
+                // so nothing is stolen from the panels unless it is up.
+                KeyCode::Char('b') => {
+                    let (tw, th) = crossterm::terminal::size().unwrap_or((80, 24));
+                    s.bar_cursor = match s.bar_cursor {
+                        Some(_) => None,
+                        // Opens on "now", the end everyone reads from.
+                        None => ui::bar_cursor_cap(&s, tw, th),
+                    };
+                }
+                KeyCode::Esc if s.bar_cursor.is_some() => s.bar_cursor = None,
+                KeyCode::Left | KeyCode::Right | KeyCode::PageUp | KeyCode::PageDown
+                    if s.bar_cursor.is_some() =>
+                {
+                    let (tw, th) = crossterm::terminal::size().unwrap_or((80, 24));
+                    // Every move clamps against the bar as it is drawn now: a
+                    // terminal resized since [b] was pressed has a different
+                    // number of columns, and the cursor must land on one.
+                    let cap = ui::bar_cursor_cap(&s, tw, th).unwrap_or(0);
+                    let at = s.bar_cursor.unwrap_or(cap).min(cap);
+                    let step = if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+                        10
+                    } else {
+                        1
+                    };
+                    s.bar_cursor = Some(match key.code {
+                        KeyCode::Left | KeyCode::PageUp => at.saturating_sub(step),
+                        _ => (at + step).min(cap),
+                    });
+                }
+                // The bar says when something happened; the timeline says
+                // what. Enter carries the cursor's moment straight into it.
+                KeyCode::Enter if s.bar_cursor.is_some() => {
+                    let (tw, _) = crossterm::terminal::size().unwrap_or((80, 24));
+                    let slices = ui::session_slices(&s, tw);
+                    let at = s
+                        .bar_cursor
+                        .unwrap_or(0)
+                        .min(slices.len().saturating_sub(1));
+                    if let Some(slice) = slices.get(at) {
+                        // Scroll so the newest event at or before this column
+                        // sits at the top of the list.
+                        s.events_scroll = s.events.iter().filter(|e| e.at > slice.to).count();
+                        s.bar_cursor = None;
+                        s.overlay = Overlay::Events;
+                    }
+                }
                 // Ctrl+R (global): total reset — erase all config and stored
                 // data. Ordered before the plain 'r' arms, which would
                 // otherwise swallow the modified press. Confirmation is a

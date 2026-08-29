@@ -138,6 +138,72 @@ pub struct Config {
     /// never call it.
     #[serde(default = "default_edge_check_url")]
     pub edge_check_url: String,
+    /// Where to send analysis findings when nobody is watching the screen.
+    #[serde(default)]
+    pub alert: AlertConfig,
+}
+
+/// Persistent alert settings; `--alert*` overrides them for one run.
+///
+/// Everything here is off by default. Alerting is the one thing octomon does
+/// that leaves the machine on its own initiative (a webhook does, at least),
+/// so it is only ever done because someone asked for it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AlertConfig {
+    /// Post a notification through the desktop's own notifier.
+    pub desktop: bool,
+    /// Shell command run for each alert. The payload arrives in the
+    /// environment (`OCTOMON_TEXT`, `OCTOMON_SEVERITY`, `OCTOMON_CAUSE`, …),
+    /// never substituted into this string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Endpoint the payload is POSTed to as JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Lowest severity worth an alert: "degraded" or "down". Notes never
+    /// alert whatever this says.
+    #[serde(default = "default_alert_level")]
+    pub min_severity: String,
+    /// Print each alert to stdout. Set by `--watch` for the run; never read
+    /// from the file, and never written to it.
+    #[serde(skip)]
+    pub stdout: bool,
+}
+
+fn default_alert_level() -> String {
+    "degraded".to_string()
+}
+
+impl Default for AlertConfig {
+    fn default() -> Self {
+        Self {
+            desktop: false,
+            command: None,
+            url: None,
+            min_severity: default_alert_level(),
+            stdout: false,
+        }
+    }
+}
+
+impl AlertConfig {
+    /// The runtime form, with the severity word resolved. An unrecognised
+    /// word reads as "degraded" — the same forgiving treatment
+    /// `bandwidth_units` gets, since a typo here must not silently mean
+    /// "never alert".
+    pub fn sinks(&self) -> crate::alert::AlertSinks {
+        crate::alert::AlertSinks {
+            stdout: self.stdout,
+            desktop: self.desktop,
+            command: self.command.clone().filter(|c| !c.trim().is_empty()),
+            url: self.url.clone().filter(|u| !u.trim().is_empty()),
+            min_severity: match self.min_severity.trim().to_ascii_lowercase().as_str() {
+                "down" => crate::verdict::Severity::Down,
+                _ => crate::verdict::Severity::Degraded,
+            },
+        }
+    }
 }
 
 fn default_edge_check_url() -> String {
@@ -301,6 +367,7 @@ impl Default for Config {
             theme: default_theme(),
             iperf3_servers: Vec::new(),
             edge_check_url: default_edge_check_url(),
+            alert: AlertConfig::default(),
         }
     }
 }
@@ -662,6 +729,69 @@ mod path_tests {
         let legacy = "[[targets]]\nlabel = \"Cloudflare\"\naddr = \"1.1.1.1\"\n";
         let back: Config = toml::from_str(legacy).unwrap();
         assert!(back.targets[0].host.is_none());
+    }
+
+    /// Alerting is opt-in, survives a save/load, and never falls silent
+    /// through a typo — a setting that quietly means "tell me nothing" is
+    /// the one failure an alert system must not have.
+    #[test]
+    fn alerts_are_off_until_asked_for_and_round_trip() {
+        let cfg = Config::default();
+        assert!(
+            !cfg.alert.sinks().is_active(),
+            "a fresh install alerts nowhere"
+        );
+
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(text.contains("[alert]"), "the section is written out");
+        assert!(
+            !text.contains("stdout"),
+            "--watch's own sink is never persisted"
+        );
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.alert, cfg.alert);
+
+        // A config file written before alerts existed still loads, with the
+        // same floor as a fresh one.
+        let legacy: Config = toml::from_str("").unwrap();
+        assert_eq!(legacy.alert.min_severity, "degraded");
+        assert_eq!(
+            legacy.alert.sinks().min_severity,
+            crate::verdict::Severity::Degraded
+        );
+
+        let with = |level: &str| {
+            Config {
+                alert: AlertConfig {
+                    desktop: true,
+                    min_severity: level.to_string(),
+                    ..AlertConfig::default()
+                },
+                ..Config::default()
+            }
+            .alert
+            .sinks()
+        };
+        assert_eq!(with("down").min_severity, crate::verdict::Severity::Down);
+        assert_eq!(with("DOWN").min_severity, crate::verdict::Severity::Down);
+        // Not "never": a misspelt floor still alerts.
+        assert_eq!(
+            with("critcal").min_severity,
+            crate::verdict::Severity::Degraded
+        );
+        assert!(with("down").is_active());
+
+        // An empty command or URL is the same as not setting one, rather
+        // than an empty shell line run on every finding.
+        let blank = Config {
+            alert: AlertConfig {
+                command: Some("  ".into()),
+                url: Some(String::new()),
+                ..AlertConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(!blank.alert.sinks().is_active());
     }
 
     #[test]

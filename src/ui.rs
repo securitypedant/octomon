@@ -19,10 +19,17 @@ use crate::verdict::{RungStatus, Severity, Verdict, thresholds as th};
 
 /// Draw the whole dashboard.
 pub fn render(f: &mut Frame, s: &AppState) {
+    // The session strip sits against the footer: the footer says how the
+    // connection is *now*, the strip is that same judgement all session. It
+    // lives in the root layout rather than in a panel so it spans the full
+    // width and survives full-screen, where a long session is most likely to
+    // be watched. A short terminal spends the row on data instead.
+    let strip_h: u16 = u16::from(session_strip_fits(s, f.area()));
     let root = Layout::vertical([
-        Constraint::Length(1), // header
-        Constraint::Min(0),    // body
-        Constraint::Length(1), // footer (input / notice / hints)
+        Constraint::Length(1),       // header
+        Constraint::Min(0),          // body
+        Constraint::Length(strip_h), // session strip
+        Constraint::Length(1),       // footer (input / notice / hints)
     ])
     .split(f.area());
     header(f, s, root[0]);
@@ -48,7 +55,10 @@ pub fn render(f: &mut Frame, s: &AppState) {
         vitals_panel(f, s, bottom[1]);
     }
 
-    footer(f, s, root[2]);
+    if strip_h > 0 {
+        session_strip(f, s, root[2]);
+    }
+    footer(f, s, root[3]);
 
     // Setup problems come first: with ICMP unavailable most of the dashboard is
     // dead, and a one-line footer notice is far too easy to miss.
@@ -1195,6 +1205,8 @@ fn explainer_overlay(f: &mut Frame, area: Rect) {
         Line::from(""),
         bullet("a live analysis at the bottom left of the screen"),
         dim("press [y] anytime to see details"),
+        bullet("the bar above it is the whole session, oldest left, now right"),
+        dim("green fine, yellow degraded, red down; press [b] to walk it"),
         bullet("[e] shows a timeline of what changed and when"),
         bullet("octomon learns what normal looks like on each network you use"),
         dim("(gateway latency, DNS, signal — saved and judged per location,"),
@@ -1698,6 +1710,10 @@ fn footer(f: &mut Frame, s: &AppState, area: Rect) {
             format!(" {n}"),
             Style::new().fg(theme::warn()),
         ))
+    } else if let Some(line) = bar_readout(s, area.width) {
+        // Walking the session bar takes over this line: while the cursor is
+        // up, "how is it now" is not the question being asked.
+        line
     } else {
         verdict_line(s)
     };
@@ -1729,6 +1745,162 @@ fn footer(f: &mut Frame, s: &AppState, area: Rect) {
         }
         None => f.render_widget(Paragraph::new(line), area),
     }
+}
+
+/// How a session cell is drawn: the verdict headline's own three colours, so
+/// a red cell and a red footer mean the same thing, and a block that grows
+/// taller as things get worse — the strip stays readable in a screenshot, on a
+/// monochrome terminal, and to a reader who cannot separate red from green.
+///
+/// The glyphs come from the configured bar set, so a console without the
+/// eighth-blocks gets the two levels it can draw rather than tofu.
+fn session_cell(
+    state: crate::session::SessionState,
+    bars: &ratatui::symbols::bar::Set<'static>,
+) -> (&'static str, Color) {
+    use crate::session::SessionState as S;
+    match state {
+        S::Unknown => (bars.one_eighth, theme::dim()),
+        S::Healthy => (bars.half, Color::Green),
+        S::Degraded => (bars.three_quarters, theme::warn()),
+        S::Down => (bars.full, Color::Red),
+    }
+}
+
+/// Whether the session strip earns its row: there has to be a session to draw
+/// and room to draw it in. A short terminal spends the row on data, and a
+/// narrow one would be left with a handful of blocks that overstate whatever
+/// they landed on.
+fn session_strip_fits(s: &AppState, area: Rect) -> bool {
+    !s.session.is_empty() && area.height >= 12 && area.width as usize >= MIN_STRIP_CELLS
+}
+
+/// Fewer cells than this and each one covers so much of the session that the
+/// strip stops being a shape and becomes a rumour.
+const MIN_STRIP_CELLS: usize = 16;
+
+/// The whole session as one bar across the bottom of the screen, oldest at the
+/// left, now at the right. Coarse on purpose: it answers "how has this
+/// connection been?", a question none of the live panels can reach once their
+/// buffers roll over.
+///
+/// It keeps its span rather than its resolution, so the bar covers the entire
+/// run — five minutes or nine hours — without ever scrolling.
+///
+/// No label and no clock: it sits directly above the analysis line, in the
+/// analysis line's own colours, and edge to edge it reads as what it is. The
+/// header already counts how long the run has been.
+fn session_strip(f: &mut Frame, s: &AppState, area: Rect) {
+    let cells = session_slices(s, area.width);
+    // A session younger than the terminal is wide grows leftward from the
+    // right edge, the way the hop traces do: "now" stays put under the
+    // analysis line it belongs to, instead of marching across the screen for
+    // the first two minutes and stopping.
+    let mut spans = Vec::new();
+    let blank = (area.width as usize).saturating_sub(cells.len());
+    if blank > 0 {
+        spans.push(Span::raw(" ".repeat(blank)));
+    }
+    let cursor = s.bar_cursor.map(|c| c.min(cells.len().saturating_sub(1)));
+    // Runs of one state merge into a single span: a whole-session bar is
+    // mostly one state, and a span per cell would be hundreds of them. The
+    // cursor breaks its run so the column under it can be picked out.
+    for (state, start, len) in fold_runs(&cells) {
+        let (glyph, color) = session_cell(state, &s.bar_set);
+        let style = Style::new().fg(color);
+        match cursor.filter(|c| (start..start + len).contains(c)) {
+            Some(c) => {
+                let (before, after) = (c - start, start + len - c - 1);
+                if before > 0 {
+                    spans.push(Span::styled(glyph.repeat(before), style));
+                }
+                spans.push(Span::styled(glyph, style.add_modifier(Modifier::REVERSED)));
+                if after > 0 {
+                    spans.push(Span::styled(glyph.repeat(after), style));
+                }
+            }
+            None => spans.push(Span::styled(glyph.repeat(len), style)),
+        }
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// The bar's columns at the width it is drawn at — one place, so the cursor
+/// keys and the draw can never disagree about which column is which.
+pub fn session_slices(s: &AppState, width: u16) -> Vec<crate::session::Slice> {
+    s.session.slices(width as usize)
+}
+
+/// The rightmost column index the bar cursor can hold, or `None` when there
+/// is no bar to walk.
+pub fn bar_cursor_cap(s: &AppState, term_w: u16, term_h: u16) -> Option<usize> {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: term_w,
+        height: term_h,
+    };
+    if !session_strip_fits(s, area) {
+        return None;
+    }
+    session_slices(s, term_w).len().checked_sub(1)
+}
+
+/// Consecutive columns of the same state as (state, first column, length).
+fn fold_runs(cells: &[crate::session::Slice]) -> Vec<(crate::session::SessionState, usize, usize)> {
+    let mut out: Vec<(crate::session::SessionState, usize, usize)> = Vec::new();
+    for (i, c) in cells.iter().enumerate() {
+        match out.last_mut() {
+            Some((state, _, n)) if *state == c.state => *n += 1,
+            _ => out.push((c.state, i, 1)),
+        }
+    }
+    out
+}
+
+/// What the column under the bar cursor stands for: which minutes, how they
+/// read, and what was wrong with them.
+///
+/// The bar on its own says *that* something happened and roughly when. This is
+/// the answer to the question it provokes, and the way into the timeline for
+/// the rest of the answer.
+fn bar_readout(s: &AppState, width: u16) -> Option<Line<'static>> {
+    let cursor = s.bar_cursor?;
+    let slices = session_slices(s, width);
+    let slice = slices.get(cursor.min(slices.len().saturating_sub(1)))?;
+
+    let clock = |ts: i64| {
+        use chrono::{Local, TimeZone};
+        Local
+            .timestamp_opt(ts, 0)
+            .single()
+            .map(|t| t.format("%H:%M:%S").to_string())
+            .unwrap_or_else(|| "—".into())
+    };
+    let (word, color) = match slice.state {
+        crate::session::SessionState::Unknown => ("not measured", theme::dim()),
+        crate::session::SessionState::Healthy => ("healthy", Color::Green),
+        crate::session::SessionState::Degraded => ("degraded", theme::warn()),
+        crate::session::SessionState::Down => ("down", Color::Red),
+    };
+    let mut spans = vec![
+        Span::styled(
+            format!(" {} → {}  ", clock(slice.from), clock(slice.to)),
+            Style::new().fg(theme::text()),
+        ),
+        Span::styled(word.to_string(), Style::new().fg(color).bold()),
+    ];
+    if let Some(cause) = slice.cause {
+        spans.push(Span::styled(
+            format!(" · {}", cause.label()),
+            Style::new().fg(theme::text()),
+        ));
+    }
+    spans.push(Span::styled(
+        "   ←→ move · ↵ timeline · Esc back",
+        Style::new().fg(theme::dim()),
+    ));
+    Some(Line::from(spans))
 }
 
 /// The absolute performance grade as a footer span — the counterweight to a
@@ -2654,17 +2826,30 @@ fn web_graph(f: &mut Frame, s: &AppState, area: Rect) {
     };
     f.render_widget(Paragraph::new(Line::from(vec![head, detail])), rows[0]);
 
-    let data = t.web.hist.tail_u64(rows[1].width as usize);
-    if !data.is_empty() {
+    let slots = t.web.hist.tail_slots(rows[1].width as usize);
+    if !slots.is_empty() {
+        let max = slots
+            .iter()
+            .filter_map(|v| v.map(|ms| ms.max(0.0) as u64))
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        // A probe that never came back is red at full height; the TTFBs keep
+        // the accent colour.
+        let bars: Vec<SparklineBar> = slots
+            .iter()
+            .map(|slot| match slot {
+                Some(ms) => {
+                    SparklineBar::from(ms.max(0.0) as u64).style(Style::new().fg(theme::accent()))
+                }
+                None => SparklineBar::from(max).style(Style::new().fg(Color::Red)),
+            })
+            .collect();
         f.render_widget(
             Sparkline::default()
-                .data(
-                    data.iter()
-                        .map(|v| SparklineBar::from(*v))
-                        .collect::<Vec<_>>(),
-                )
-                .bar_set(s.bar_set.clone())
-                .style(Style::new().fg(theme::accent())),
+                .data(bars)
+                .max(max)
+                .bar_set(s.bar_set.clone()),
             rows[1],
         );
     }
@@ -2911,7 +3096,11 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                     continue;
                 }
                 let Some(stat) = &h.stat else { continue };
-                let data = stat.history.tail_u64(spark_w as usize);
+                let slots = stat.history.tail_slots(spark_w as usize);
+                let data: Vec<u64> = slots
+                    .iter()
+                    .map(|v| v.unwrap_or(0.0).max(0.0) as u64)
+                    .collect();
                 if data.is_empty() {
                     continue;
                 }
@@ -2931,10 +3120,14 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                 // height alone makes you squint to work out.
                 let bars: Vec<SparklineBar> = heights
                     .iter()
-                    .zip(data.iter())
-                    .map(|(&h, &raw)| {
-                        SparklineBar::from(h)
-                            .style(Style::new().fg(rtt_color(raw as f64, stat.floor_ms())))
+                    .zip(slots.iter())
+                    .map(|(&h, slot)| match slot {
+                        Some(ms) => SparklineBar::from(h)
+                            .style(Style::new().fg(rtt_color(*ms, stat.floor_ms()))),
+                        // A probe that never came back is not a 0 ms reply —
+                        // left to the floor-and-colour path it would draw as
+                        // the fastest bar on the row. Full height, red.
+                        None => SparklineBar::from(max).style(Style::new().fg(Color::Red)),
                     })
                     .collect();
                 f.render_widget(
@@ -2989,12 +3182,8 @@ fn hop_chart(f: &mut Frame, m: &crate::app::HopMonitor, n: usize, area: Rect, ma
     };
 
     let want = (inner.width as usize).saturating_mul(2).max(20);
-    let raw: Vec<f64> = {
-        let mut v: Vec<f64> = stat.history.data.iter().rev().take(want).copied().collect();
-        v.reverse();
-        v
-    };
-    if raw.is_empty() {
+    let runs = LatencyRuns::from_slots(&stat.history.tail_slots(want));
+    if runs.len == 0 {
         f.render_widget(
             Paragraph::new(Span::styled("collecting…", Style::new().fg(theme::dim()))),
             inner,
@@ -3002,38 +3191,43 @@ fn hop_chart(f: &mut Frame, m: &crate::app::HopMonitor, n: usize, area: Rect, ma
         return;
     }
 
-    let series: Vec<(f64, f64)> = raw
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| (i as f64, v))
-        .collect();
-    let xmax = (series.len().saturating_sub(1)).max(1) as f64;
+    let xmax = runs.xmax();
     let st = stat.stats(n);
     let p95 = st.p95.unwrap_or(0.0);
-    let ymax = raw.iter().copied().fold(0.0_f64, f64::max).max(p95) * 1.15 + 1.0;
+    let ymax = if runs.has_samples() {
+        runs.peak().max(p95) * 1.15 + 1.0
+    } else {
+        1.0
+    };
+    let gaps = runs.gap_bands();
+    let mut datasets = latency_datasets(&runs.runs, &gaps, marker);
+    let stale = stat.stats_stale(n);
     let p95_line = [(0.0, p95), (xmax, p95)];
     let jitter_line = [(0.0, stat.jitter_ms), (xmax, stat.jitter_ms)];
-
-    let datasets = vec![
-        Dataset::default()
-            .marker(marker)
-            .graph_type(GraphType::Line)
-            .style(Style::new().fg(theme::accent()))
-            .data(&series),
-        Dataset::default()
-            .marker(marker)
-            .graph_type(GraphType::Line)
-            .style(Style::new().fg(P95_COLOR))
-            .data(&p95_line),
-        Dataset::default()
-            .marker(marker)
-            .graph_type(GraphType::Line)
-            .style(Style::new().fg(theme::jitter()))
-            .data(&jitter_line),
-    ];
-    let chart = Chart::new(datasets)
-        .block(Block::new().title(Line::from(vec![
-            Span::styled(" latency ", Style::new().fg(theme::accent())),
+    if !stale {
+        datasets.push(
+            Dataset::default()
+                .marker(marker)
+                .graph_type(GraphType::Line)
+                .style(Style::new().fg(P95_COLOR))
+                .data(&p95_line),
+        );
+        datasets.push(
+            Dataset::default()
+                .marker(marker)
+                .graph_type(GraphType::Line)
+                .style(Style::new().fg(theme::jitter()))
+                .data(&jitter_line),
+        );
+    }
+    let mut title = vec![Span::styled(" latency ", Style::new().fg(theme::accent()))];
+    if stale {
+        title.push(Span::styled(
+            "· not answering ",
+            Style::new().fg(Color::Red).bold(),
+        ));
+    } else {
+        title.extend([
             Span::styled("· p95 ", Style::new().fg(theme::dim())),
             Span::styled(format!("{p95:.0}ms"), Style::new().fg(P95_COLOR)),
             Span::styled(" · jitter ", Style::new().fg(theme::dim())),
@@ -3041,16 +3235,24 @@ fn hop_chart(f: &mut Frame, m: &crate::app::HopMonitor, n: usize, area: Rect, ma
                 format!("{:.1}ms", stat.jitter_ms),
                 Style::new().fg(theme::jitter()),
             ),
-            Span::styled(
-                format!(" · loss {:.0}% ", stat.recent_loss_pct(n)),
-                Style::new().fg(theme::dim()),
-            ),
-        ])))
+        ]);
+    }
+    title.push(Span::styled(
+        format!(" · loss {:.0}% ", stat.recent_loss_pct(n)),
+        Style::new().fg(theme::dim()),
+    ));
+    let top = if runs.has_samples() {
+        format!("{ymax:.0}ms")
+    } else {
+        String::new()
+    };
+    let chart = Chart::new(datasets)
+        .block(Block::new().title(Line::from(title)))
         .x_axis(Axis::default().bounds([0.0, xmax]))
         .y_axis(
             Axis::default()
                 .bounds([0.0, ymax])
-                .labels([Line::from("0"), Line::from(format!("{ymax:.0}ms"))]),
+                .labels([Line::from("0"), Line::from(top)]),
         );
     f.render_widget(chart, inner);
 }
@@ -3136,18 +3338,152 @@ fn tunnel_note(s: &AppState) -> Vec<Line<'static>> {
 }
 
 /// Latency line chart for the graphed target, with a p95 reference line.
+/// A latency chart's samples split at the misses: the answered probes as
+/// unbroken runs, and every unanswered stretch as its own span.
+///
+/// Losses hold their slot on the x axis, so a chart drawn from this cannot do
+/// what the old success-only series did — freeze on the last good reading and
+/// then, once replies returned, splice the two sides of an outage together
+/// until the gap had no width at all.
+struct LatencyRuns {
+    /// Unbroken runs of answered probes as (x, ms) points.
+    runs: Vec<Vec<(f64, f64)>>,
+    /// Each unanswered stretch as (first x, last x).
+    gaps: Vec<(f64, f64)>,
+    /// Slots in the window, answered or not.
+    len: usize,
+    /// Unanswered probes at the right-hand edge: the outage still running.
+    trailing: usize,
+}
+
+impl LatencyRuns {
+    fn from_slots(slots: &[Option<f64>]) -> Self {
+        let mut runs: Vec<Vec<(f64, f64)>> = Vec::new();
+        let mut gaps = Vec::new();
+        let mut gap_start: Option<usize> = None;
+        for (i, slot) in slots.iter().enumerate() {
+            match slot {
+                Some(ms) => {
+                    if let Some(start) = gap_start.take() {
+                        gaps.push(((start as f64), ((i - 1) as f64)));
+                    }
+                    match runs.last_mut() {
+                        // Consecutive replies join up; one that follows a gap
+                        // starts a fresh run so the line is not drawn across it.
+                        Some(run) if run.last().is_some_and(|(x, _)| *x == (i - 1) as f64) => {
+                            run.push((i as f64, *ms))
+                        }
+                        _ => runs.push(vec![(i as f64, *ms)]),
+                    }
+                }
+                None => {
+                    gap_start.get_or_insert(i);
+                }
+            }
+        }
+        let trailing = match gap_start {
+            Some(start) => {
+                gaps.push((start as f64, (slots.len().saturating_sub(1)) as f64));
+                slots.len() - start
+            }
+            None => 0,
+        };
+        Self {
+            runs,
+            gaps,
+            len: slots.len(),
+            trailing,
+        }
+    }
+
+    /// Every miss as a segment pinned to the axis floor. Deliberately not
+    /// plotted as a 0 ms sample: zero is a *value* in the same units as the
+    /// data — it would read as an impossibly fast reply, join the real line
+    /// with a diagonal, and drag the y scale. A red bar along the floor says
+    /// "nothing answered through here", which is what actually happened.
+    fn gap_bands(&self) -> Vec<[(f64, f64); 2]> {
+        self.gaps
+            .iter()
+            .map(|(a, b)| [(*a, 0.0), (*b, 0.0)])
+            .collect()
+    }
+
+    fn xmax(&self) -> f64 {
+        (self.len.saturating_sub(1)).max(1) as f64
+    }
+
+    /// Whether anything answered in this window — the difference between a
+    /// chart with a gap in it and a chart of nothing at all.
+    fn has_samples(&self) -> bool {
+        !self.runs.is_empty()
+    }
+
+    /// The tallest reply in the window; zero when none answered.
+    fn peak(&self) -> f64 {
+        self.runs
+            .iter()
+            .flatten()
+            .fold(0.0_f64, |m, (_, v)| m.max(*v))
+    }
+}
+
+/// "no replies for 4m 12s" — how long the run of misses at the right-hand edge
+/// has lasted, in wall time rather than probe count.
+fn outage_note(runs: &LatencyRuns, samples_per_sec: f64) -> Option<String> {
+    if runs.trailing == 0 {
+        return None;
+    }
+    let rate = if samples_per_sec > 0.0 {
+        samples_per_sec
+    } else {
+        1.0
+    };
+    let secs = (runs.trailing as f64 / rate).round() as u64;
+    Some(format!(
+        "no replies for {}",
+        crate::verdict::fmt_duration(std::time::Duration::from_secs(secs.max(1)))
+    ))
+}
+
+/// The datasets every latency chart shares: the answered runs in the accent
+/// colour, then a red band along the floor for each stretch that went
+/// unanswered.
+fn latency_datasets<'a>(
+    runs: &'a [Vec<(f64, f64)>],
+    gaps: &'a [[(f64, f64); 2]],
+    marker: Marker,
+) -> Vec<Dataset<'a>> {
+    let mut sets: Vec<Dataset<'a>> = runs
+        .iter()
+        .map(|run| {
+            Dataset::default()
+                .marker(marker)
+                .graph_type(GraphType::Line)
+                .style(Style::new().fg(theme::accent()))
+                .data(run)
+        })
+        .collect();
+    sets.extend(gaps.iter().map(|band| {
+        Dataset::default()
+            .marker(marker)
+            .graph_type(GraphType::Line)
+            .style(Style::new().fg(Color::Red))
+            .data(band)
+    }));
+    sets
+}
+
 fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
     let Some(t) = s.targets.get(s.graph_target) else {
         return;
     };
     // Braille markers double horizontal resolution.
     let want = (area.width as usize).saturating_mul(2).max(20);
-    let raw: Vec<f64> = {
-        let mut v: Vec<f64> = t.history.data.iter().rev().take(want).copied().collect();
-        v.reverse();
-        v
-    };
-    if raw.is_empty() {
+    let runs = LatencyRuns::from_slots(&t.history.tail_slots(want));
+    // Nothing has ever answered here. Which *kind* of nothing matters: a
+    // network that drops ICMP as policy is not an outage, and a floor-to-floor
+    // red band would insist it was. Say it in words instead.
+    if !runs.has_samples() && (runs.len == 0 || crate::verdict::icmp_blackholed(s)) {
         // "collecting…" is a promise; on a network that blackholes ICMP it
         // will never be kept — say what is actually happening and where the
         // real signal lives instead.
@@ -3166,42 +3502,58 @@ fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
         return;
     }
 
-    let series: Vec<(f64, f64)> = raw
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| (i as f64, v))
-        .collect();
-    let xmax = (series.len().saturating_sub(1)).max(1) as f64;
+    let xmax = runs.xmax();
     let p95 = t.stats(n).p95.unwrap_or(0.0);
-    let ymax = raw.iter().copied().fold(0.0_f64, f64::max).max(p95) * 1.15 + 1.0;
+    // A window with nothing but misses has no scale to draw — the axis top is
+    // left blank rather than labelled with a millisecond figure describing a
+    // measurement that never happened.
+    let ymax = if runs.has_samples() {
+        runs.peak().max(p95) * 1.15 + 1.0
+    } else {
+        1.0
+    };
+    let gaps = runs.gap_bands();
+    let mut datasets = latency_datasets(&runs.runs, &gaps, s.graph_marker);
+
+    // Nothing has answered lately: p95 and jitter describe a period that has
+    // ended, and drawing them as reference lines across a dead chart is the
+    // same frozen-figures lie the target table dashes out. The red floor and
+    // the title carry the truth instead.
+    let stale = t.stats_stale(n);
     let p95_line = [(0.0, p95), (xmax, p95)];
     // Jitter as a reference line rather than a series: it is a single smoothed
     // figure, so plotting it per-sample would just redraw the same value.
     let jitter_line = [(0.0, t.jitter_ms), (xmax, t.jitter_ms)];
-
-    let datasets = vec![
-        Dataset::default()
-            .marker(s.graph_marker)
-            .graph_type(GraphType::Line)
-            .style(Style::new().fg(theme::accent()))
-            .data(&series),
-        Dataset::default()
-            .marker(s.graph_marker)
-            .graph_type(GraphType::Line)
-            .style(Style::new().fg(P95_COLOR))
-            .data(&p95_line),
-        Dataset::default()
-            .marker(s.graph_marker)
-            .graph_type(GraphType::Line)
-            .style(Style::new().fg(theme::jitter()))
-            .data(&jitter_line),
-    ];
+    if !stale {
+        datasets.push(
+            Dataset::default()
+                .marker(s.graph_marker)
+                .graph_type(GraphType::Line)
+                .style(Style::new().fg(P95_COLOR))
+                .data(&p95_line),
+        );
+        datasets.push(
+            Dataset::default()
+                .marker(s.graph_marker)
+                .graph_type(GraphType::Line)
+                .style(Style::new().fg(theme::jitter()))
+                .data(&jitter_line),
+        );
+    }
 
     // Each label is drawn in its series' colour, so the legend needs no key.
-    let chart = Chart::new(datasets)
-        .block(Block::new().title(Line::from(vec![
-            Span::styled(" latency ", Style::new().fg(theme::dim())),
-            Span::styled(t.label.clone(), Style::new().fg(theme::accent())),
+    let mut title = vec![
+        Span::styled(" latency ", Style::new().fg(theme::dim())),
+        Span::styled(t.label.clone(), Style::new().fg(theme::accent())),
+    ];
+    match outage_note(&runs, s.samples_per_sec) {
+        // A stalled graph explains nothing on its own — say how long it has
+        // been stalled, in the same red the floor band is drawn in.
+        Some(note) => title.push(Span::styled(
+            format!("   {note} "),
+            Style::new().fg(Color::Red).bold(),
+        )),
+        None => title.extend([
             Span::styled("   p95 ", Style::new().fg(theme::dim())),
             Span::styled(format!("{p95:.0}ms"), Style::new().fg(P95_COLOR)),
             Span::styled("   jitter ", Style::new().fg(theme::dim())),
@@ -3209,12 +3561,20 @@ fn latency_graph(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                 format!("{:.1}ms ", t.jitter_ms),
                 Style::new().fg(theme::jitter()),
             ),
-        ])))
+        ]),
+    }
+    let top = if runs.has_samples() {
+        format!("{ymax:.0}ms")
+    } else {
+        String::new()
+    };
+    let chart = Chart::new(datasets)
+        .block(Block::new().title(Line::from(title)))
         .x_axis(Axis::default().bounds([0.0, xmax]))
         .y_axis(
             Axis::default()
                 .bounds([0.0, ymax])
-                .labels([Line::from("0"), Line::from(format!("{ymax:.0}ms"))]),
+                .labels([Line::from("0"), Line::from(top)]),
         );
     f.render_widget(chart, area);
 }
@@ -3972,89 +4332,97 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         ))
     };
 
-    // Two columns, so the whole key set fits an 80x24 terminal without
-    // scrolling. Descriptions are kept short enough for a half-width column.
+    // Grouped by what the reader is looking for — the global keys, then
+    // getting around, then each panel's own — and kept to a size that packs
+    // into two columns of an 80x24 terminal, the smallest this dashboard is
+    // designed for. Nothing here scrolls: a shortcut list you have to page
+    // through to find a shortcut has failed at its one job. Descriptions stay
+    // inside 28 columns for the same reason.
     // Leading indent comes from the block's padding, not the lines.
-    let mut left = vec![
-        head("Global"),
-        row("Tab / ⇧Tab", "cycle panels"),
-        row("f", "full-screen focused panel"),
-        row("n", "next sub-pane in panel"),
-        row("Esc", "back / exit full-screen"),
-        row("s", "run speed test"),
-        row("P", "pause / resume the display"),
-        row("r", "re-probe network info"),
-        row("G", "rescan gateway/hops/IP"),
-        row("w", "stats window 30s/1m/5m/15m"),
-        row("l / D", "CSV recording / zip bundle"),
-        row("e / c / M", "events / ports / marker"),
-        // Paired to keep the left column inside 24 rows, which is what the
-        // whole overlay is sized against.
-        row("y / T", "analysis / routing table"),
-        row("?", "toggle this help"),
-        row("q / Ctrl+C", "quit"),
-        Line::from(""),
-        head("Navigation"),
-        row("↑/↓ or j/k", "move the cursor"),
-        row("PgUp/PgDn", "move by ten"),
-        row("←/→", "move sort-column cursor"),
-        row("Enter", "sort / flip direction"),
-        row("Shift+R/^R", "panel reset / ERASE ALL"),
-    ];
-
-    let mut right = vec![
-        head("Connection Quality"),
-        row("a", "add target (remembered)"),
-        row("d / Del", "delete + forget target"),
-        row("i", "stats: icmp ↔ tcp :443"),
-        row("g", "graph selected target"),
-        row("t", "traceroute once"),
-        row("m", "monitor every hop (MTR)"),
-        row("W", "whois: who owns address"),
-        Line::from(""),
-        head("Bandwidth"),
-        row("v / I / V", "provider cycle · add · del"),
-        row("n", "procs → remotes → history"),
-        row("W / a", "whois / add sel. remote"),
-        row("p / u", "pin / unpin row at the top"),
-        row("o", "follow row through re-sorts"),
-        row("/", "filter rows (Esc clears)"),
-        row("d / z", "del. speed test / zoom"),
-        Line::from(""),
-        head("Network"),
-        row("N", "name this network"),
-        row("L", "saved network locations"),
-        row("f", "full-screen: DNS + history"),
+    let mut sections: Vec<Vec<Line>> = vec![
+        vec![
+            head("Global"),
+            row("Tab / ⇧Tab", "cycle panels"),
+            row("f", "full-screen focused panel"),
+            row("n", "next sub-pane in panel"),
+            row("Esc", "back / exit full-screen"),
+            row("P", "pause / resume the display"),
+            row("w", "stats window 30s→15m"),
+            row("r / G", "re-probe / rescan the path"),
+            row("? / q", "this help / quit (^C too)"),
+        ],
+        vec![
+            head("Navigation"),
+            row("↑/↓ or j/k", "move the cursor"),
+            row("PgUp/PgDn", "move by ten"),
+            row("←/→", "move sort-column cursor"),
+            row("Enter", "sort / flip direction"),
+            row("Shift+R/^R", "panel reset / ERASE ALL"),
+        ],
+        vec![
+            head("Diagnose & record"),
+            row("y / T", "analysis / routing table"),
+            row("e / c / M", "events / ports / marker"),
+            row("b", "walk the session bar"),
+            row("l / D", "CSV recording / zip bundle"),
+        ],
+        vec![
+            head("Connection Quality"),
+            row("a", "add target (remembered)"),
+            row("d / Del", "delete + forget target"),
+            row("i", "stats: icmp ↔ tcp :443"),
+            row("g", "graph selected target"),
+            row("t", "traceroute once"),
+            row("m", "monitor every hop (MTR)"),
+            row("W", "whois: who owns address"),
+        ],
+        vec![
+            head("Bandwidth"),
+            row("s", "run a speed test"),
+            row("v / I / V", "provider cycle · add · del"),
+            row("n", "procs → remotes → history"),
+            row("W / a", "whois / add sel. remote"),
+            row("p / u", "pin / unpin row at the top"),
+            row("o / /", "follow row / filter rows"),
+            row("d / z", "del. speed test / zoom"),
+        ],
+        vec![
+            head("Network"),
+            row("N", "name this network"),
+            row("L", "saved network locations"),
+            row("f", "full-screen: DNS + history"),
+        ],
     ];
 
     // Only shown when something is actually absent, with the package that
     // provides it — which tools ship by default varies a lot by distribution.
     if !s.missing_tools.is_empty() {
-        right.push(Line::from(""));
-        right.push(Line::from(Span::styled(
+        let mut missing = vec![Line::from(Span::styled(
             "Missing tools",
             Style::new().fg(theme::warn()).bold(),
-        )));
+        ))];
         for (name, _provides, package) in &s.missing_tools {
-            right.push(Line::from(vec![
+            missing.push(Line::from(vec![
                 Span::styled(format!("{name:<11}"), Style::new().fg(theme::warn())),
                 Span::styled(package.to_string(), Style::new().fg(theme::dim())),
             ]));
         }
+        sections.push(missing);
     }
 
-    // Below this width the columns would truncate descriptions, so stack them
-    // and accept scrolling on a very narrow terminal.
-    let two_col = area.width >= 76;
-    let body_h = if two_col {
-        left.len().max(right.len())
-    } else {
-        left.push(Line::from(""));
-        left.append(&mut right);
-        left.len()
-    } as u16;
+    // Wider terminals get a third column rather than a taller box: columns
+    // cost width, which there is plenty of, and save height, which is what
+    // runs out. Below two columns' worth the sections stack and a very narrow
+    // terminal simply cannot show them all.
+    let (ncols, w) = match area.width {
+        aw if aw >= 126 => (3, 126),
+        aw if aw >= 96 => (2, 96),
+        aw if aw >= 76 => (2, 80),
+        aw => (1, 46.min(aw)),
+    };
+    let columns = pack_help(sections, ncols);
+    let body_h = columns.iter().map(|c| c.len()).max().unwrap_or(0) as u16;
 
-    let w = if two_col { 80 } else { 42 }.min(area.width);
     let h = (body_h + 3).min(area.height); // +2 border, +1 footer
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
@@ -4099,14 +4467,64 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         width: r.width.saturating_sub(1),
         ..r
     };
-    if two_col {
-        let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(inner);
-        f.render_widget(Paragraph::new(left), pad(cols[0]));
-        f.render_widget(Paragraph::new(right), pad(cols[1]));
-    } else {
-        f.render_widget(Paragraph::new(left), pad(inner));
+    let widths = vec![Constraint::Ratio(1, ncols as u32); ncols];
+    let rects = Layout::horizontal(widths).split(inner);
+    for (lines, rect) in columns.into_iter().zip(rects.iter()) {
+        f.render_widget(Paragraph::new(lines), pad(*rect));
     }
+}
+
+/// Lay the help sections out in `ncols` columns, in order, with a blank line
+/// between sections sharing a column.
+///
+/// The column height is the shortest one the sections actually fit in, so the
+/// box is as short as it can be — height is the scarce dimension in a terminal
+/// and the whole list has to be visible at once. A set too long for the
+/// columns available packs into the last one and is clipped by the border,
+/// which is only reachable on a terminal below the size this is designed for.
+fn pack_help(sections: Vec<Vec<Line<'static>>>, ncols: usize) -> Vec<Vec<Line<'static>>> {
+    let lens: Vec<usize> = sections.iter().map(|s| s.len()).collect();
+    let total: usize = lens.iter().sum::<usize>() + lens.len();
+    // Never shorter than the longest single section: one section is never
+    // split across columns, so it sets the floor.
+    let floor = lens.iter().copied().max().unwrap_or(0);
+    let height = (floor..=total.max(floor))
+        .find(|h| fits_columns(&lens, ncols, *h))
+        .unwrap_or(total);
+
+    let mut columns: Vec<Vec<Line>> = Vec::with_capacity(ncols);
+    let mut current: Vec<Line> = Vec::new();
+    for section in sections {
+        let need = current.len() + 1 + section.len();
+        if !current.is_empty() && (need > height && columns.len() + 1 < ncols) {
+            columns.push(std::mem::take(&mut current));
+        } else if !current.is_empty() {
+            current.push(Line::from(""));
+        }
+        current.extend(section);
+    }
+    columns.push(current);
+    columns
+}
+
+/// Whether the sections fit `ncols` columns of `height` lines, packed in
+/// order with a blank line between neighbours.
+fn fits_columns(lens: &[usize], ncols: usize, height: usize) -> bool {
+    let mut used = 0usize;
+    let mut cols = 1usize;
+    for len in lens {
+        let need = if used == 0 { *len } else { used + 1 + len };
+        if used > 0 && need > height {
+            cols += 1;
+            used = *len;
+            if cols > ncols || used > height {
+                return false;
+            }
+        } else {
+            used = need;
+        }
+    }
+    true
 }
 
 fn netinfo_panel(f: &mut Frame, s: &AppState, area: Rect) {
@@ -4779,17 +5197,28 @@ fn dns_graphs(f: &mut Frame, s: &AppState, area: Rect) {
         if spark_w < 4 {
             continue;
         }
-        let data = probe.hist.tail_u64(spark_w as usize);
-        if data.is_empty() {
+        let slots = probe.hist.tail_slots(spark_w as usize);
+        if slots.is_empty() {
             continue;
         }
-        let max = data.iter().copied().max().unwrap_or(1).max(1);
+        let max = slots
+            .iter()
+            .filter_map(|v| v.map(|ms| ms.max(0.0) as u64))
+            .max()
+            .unwrap_or(1)
+            .max(1);
         // Colour each bar by how slow that individual answer was, like the
         // quality sparklines — a graph tinted wholesale by the *latest*
-        // reading repaints history it isn't entitled to.
-        let bars: Vec<SparklineBar> = data
+        // reading repaints history it isn't entitled to. A query that timed
+        // out is drawn red at full height rather than as a 0 ms answer.
+        let bars: Vec<SparklineBar> = slots
             .iter()
-            .map(|&v| SparklineBar::from(v).style(Style::new().fg(dns_color(v as f64))))
+            .map(|slot| match slot {
+                Some(ms) => {
+                    SparklineBar::from(ms.max(0.0) as u64).style(Style::new().fg(dns_color(*ms)))
+                }
+                None => SparklineBar::from(max).style(Style::new().fg(Color::Red)),
+            })
             .collect();
         f.render_widget(
             Sparkline::default()
@@ -5005,8 +5434,7 @@ fn link_util_graph(f: &mut Frame, s: &AppState, area: Rect) {
     let tp = &s.throughput;
     let want = (area.width as usize).saturating_mul(2).max(20);
     let tail = |h: &crate::app::History| -> Vec<f64> {
-        let skip = h.data.len().saturating_sub(want);
-        h.data.iter().skip(skip).copied().collect()
+        h.tail_slots(want).into_iter().flatten().collect()
     };
     let down = tail(&tp.down_hist);
     let up = tail(&tp.up_hist);
@@ -5082,8 +5510,7 @@ fn signal_graph(f: &mut Frame, s: &AppState, area: Rect) {
     // as signal quality (−30 best … −100 worst); tx-rate against its own peak.
     let want = (area.width as usize).saturating_mul(2).max(20);
     let tail = |h: &crate::app::History| -> Vec<f64> {
-        let skip = h.data.len().saturating_sub(want);
-        h.data.iter().skip(skip).copied().collect()
+        h.tail_slots(want).into_iter().flatten().collect()
     };
     let rssi = tail(&sig.rssi_hist);
     let tx = tail(&sig.tx_hist);
@@ -5295,8 +5722,7 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
         let avail: Vec<(f64, f64)> = {
             let mut vals: Vec<f64> = v
                 .pressure_hist
-                .data
-                .iter()
+                .successes()
                 .rev()
                 .take(want)
                 .map(|p| (100.0 - p).clamp(0.0, 100.0))
@@ -6053,6 +6479,268 @@ mod tests {
         assert!(!out.contains("not answering"));
     }
 
+    /// Losses hold their slot, so the line breaks where they are and a run of
+    /// them has width — pre-outage samples cannot slide up against post-outage
+    /// ones and hide the gap entirely.
+    #[test]
+    fn latency_runs_break_at_the_misses() {
+        let runs =
+            LatencyRuns::from_slots(&[Some(10.0), Some(11.0), None, None, None, Some(12.0), None]);
+        assert_eq!(runs.len, 7);
+        assert_eq!(runs.runs.len(), 2, "two unbroken runs of replies");
+        assert_eq!(runs.runs[0].len(), 2);
+        assert_eq!(runs.runs[1], vec![(5.0, 12.0)]);
+        assert_eq!(runs.gaps, vec![(2.0, 4.0), (6.0, 6.0)]);
+        assert_eq!(runs.trailing, 1, "the miss at the edge is still running");
+        // Gaps ride the axis floor: never plotted as a 0 ms measurement.
+        assert_eq!(runs.gap_bands()[0], [(2.0, 0.0), (4.0, 0.0)]);
+
+        // A window that ends on a reply is not an outage.
+        let ok = LatencyRuns::from_slots(&[None, Some(9.0)]);
+        assert_eq!(ok.trailing, 0);
+        assert_eq!(ok.gaps, vec![(0.0, 0.0)]);
+        assert!(ok.has_samples());
+        assert!(!LatencyRuns::from_slots(&[None, None]).has_samples());
+    }
+
+    /// The plane case: the graph must not sit there drawing a healthy line
+    /// out of pre-outage samples. The floor goes red for the length of the
+    /// outage and the title says how long it has been running.
+    #[test]
+    fn a_dead_path_paints_the_graph_floor_red() {
+        let mut s = AppState::new(vec![crate::app::TargetStat::new(
+            "Cloudflare".into(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)),
+        )]);
+        s.focus = Panel::Quality;
+        s.fullscreen = true;
+        for _ in 0..60 {
+            s.targets[0].record_reply(20.0);
+        }
+
+        // Plotted braille cells of a given colour: the gap band is the only
+        // red one, the p95 reference line the only one in its own colour.
+        let marks = |s: &AppState, color: Color| -> usize {
+            let mut t = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            t.draw(|f| render(f, s)).unwrap();
+            let buf = t.backend().buffer();
+            buf.content()
+                .iter()
+                .filter(|c| {
+                    c.fg == color
+                        && c.symbol()
+                            .chars()
+                            .next()
+                            .is_some_and(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch))
+                })
+                .count()
+        };
+        assert_eq!(marks(&s, Color::Red), 0, "a healthy path draws no gap band");
+        assert!(marks(&s, P95_COLOR) > 0, "p95 rides across a live chart");
+
+        for _ in 0..120 {
+            s.targets[0].record_loss();
+        }
+        assert!(marks(&s, Color::Red) > 0, "the outage paints the floor red");
+        // Frozen p95 / jitter reference lines describe a period that ended.
+        assert_eq!(marks(&s, P95_COLOR), 0, "stale reference lines are dropped");
+        let out = draw(&s, 120, 30);
+        assert!(
+            out.contains("no replies for 2m"),
+            "the graph title says how long"
+        );
+    }
+
+    /// The session strip: the whole run as one unlabelled bar above the
+    /// footer, edge to edge, oldest left, now right, and a red block wherever
+    /// the connection was down.
+    #[test]
+    fn session_strip_carries_the_whole_run_above_the_footer() {
+        use crate::session::SessionState;
+        let mut s = AppState::new(vec![]);
+        // Ten minutes fine, one minute down, five minutes fine again.
+        for _ in 0..600 {
+            s.session.record(SessionState::Healthy, None);
+        }
+        for _ in 0..60 {
+            s.session.record(SessionState::Down, None);
+        }
+        for _ in 0..300 {
+            s.session.record(SessionState::Healthy, None);
+        }
+
+        let (w, h) = (120u16, 30u16);
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| render(f, &s)).unwrap();
+        let buf = t.backend().buffer();
+        let row = |y: u16| -> String { (0..w).map(|x| buf[(x, y)].symbol()).collect() };
+
+        // Second from the bottom: the footer keeps the last row.
+        let strip = row(h - 2);
+        assert!(row(h - 1).contains("[y] analysis"), "footer still last");
+        // Nothing but bar: no label, no clock (the header counts the run),
+        // no gaps at either end.
+        assert!(
+            strip.chars().all(|c| "▁▄▆█".contains(c)),
+            "the strip is bar and nothing else: {strip}"
+        );
+        assert_eq!(strip.chars().count(), w as usize, "edge to edge");
+        // Down draws the full block, healthy the half one: the strip reads
+        // without colour as well as with it.
+        assert!(strip.contains('█') && strip.contains('▄'));
+
+        let colored =
+            |y: u16, c: Color| -> Vec<u16> { (0..w).filter(|x| buf[(*x, y)].fg == c).collect() };
+        let green = colored(h - 2, Color::Green);
+        let red = colored(h - 2, Color::Red);
+        assert!(!green.is_empty() && !red.is_empty());
+        // The outage sits where it happened: after the first stretch of green
+        // and before the last.
+        let (first_red, last_red) = (red[0], red[red.len() - 1]);
+        assert!(green[0] < first_red, "the good start is left of the outage");
+        assert!(
+            green[green.len() - 1] > last_red,
+            "and the recovery is right of it"
+        );
+    }
+
+    /// The bar answers "what was that?" — the cursor picks a column, and the
+    /// footer says which minutes it covers, how they read and what was wrong.
+    #[test]
+    fn the_bar_cursor_reads_out_the_column_it_is_on() {
+        use crate::session::SessionState;
+        use crate::verdict::Cause;
+        let mut s = AppState::new(vec![]);
+        for _ in 0..300 {
+            s.session.record(SessionState::Healthy, None);
+        }
+        for _ in 0..120 {
+            s.session
+                .record(SessionState::Down, Some(Cause::GatewayLan));
+        }
+        for _ in 0..60 {
+            s.session.record(SessionState::Healthy, None);
+        }
+
+        let (w, h) = (120u16, 30u16);
+        // The footer row alone: "down" also appears in the Bandwidth panel,
+        // and the question here is what the readout says.
+        let readout = |s: &AppState| -> String {
+            let out = draw(s, w, h);
+            out.chars()
+                .skip((h as usize - 1) * w as usize)
+                .collect::<String>()
+        };
+
+        // With no cursor the footer is the analysis line, as ever.
+        assert!(readout(&s).contains("[y] analysis"));
+
+        // On the newest column: healthy again, and no cause to name.
+        let cap = bar_cursor_cap(&s, w, h).expect("the bar is drawn");
+        s.bar_cursor = Some(cap);
+        let line = readout(&s);
+        assert!(line.contains("healthy"), "state of the column: {line}");
+        assert!(line.contains("←→ move · ↵ timeline · Esc back"));
+        assert!(!line.contains("[y] analysis"), "the readout takes the line");
+
+        // The outage is reachable by walking, and names its cause when found.
+        let outage = (0..=cap)
+            .find(|i| {
+                s.bar_cursor = Some(*i);
+                readout(&s).contains("down")
+            })
+            .expect("the outage is reachable with the cursor");
+        s.bar_cursor = Some(outage);
+        let line = readout(&s);
+        assert!(
+            line.contains("gateway"),
+            "the column names its cause: {line}"
+        );
+        // And which minutes it stands for, as clock times.
+        assert!(line.contains(" → "), "the readout carries the span");
+        // The columns either side of the outage are not it: the cursor picks
+        // out one column, not a mood.
+        s.bar_cursor = Some(0);
+        assert!(readout(&s).contains("healthy"), "the session opened clean");
+
+        // The cursor marks its column: reversed, so it reads on any theme.
+        s.bar_cursor = Some(outage);
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| render(f, &s)).unwrap();
+        let buf = t.backend().buffer();
+        let marked = (0..w)
+            .filter(|x| buf[(*x, h - 2)].modifier.contains(Modifier::REVERSED))
+            .count();
+        assert_eq!(marked, 1, "exactly one column wears the cursor");
+    }
+
+    /// The cursor's range is the bar as drawn — which changes with the
+    /// terminal. Every key press re-clamps against this, so a window resized
+    /// while the cursor is up cannot leave it pointing off the end.
+    #[test]
+    fn the_cursor_range_follows_the_bar_it_is_drawn_on() {
+        let mut s = AppState::new(vec![]);
+        assert_eq!(
+            bar_cursor_cap(&s, 120, 30),
+            None,
+            "no session yet, nothing to walk"
+        );
+
+        for _ in 0..40 {
+            s.session
+                .record(crate::session::SessionState::Healthy, None);
+        }
+        // A young session is only as wide as it is long.
+        assert_eq!(bar_cursor_cap(&s, 120, 30), Some(39));
+        for _ in 0..400 {
+            s.session
+                .record(crate::session::SessionState::Healthy, None);
+        }
+        assert_eq!(bar_cursor_cap(&s, 120, 30), Some(119), "one per column");
+        assert_eq!(bar_cursor_cap(&s, 80, 30), Some(79), "narrower: fewer");
+        assert_eq!(
+            bar_cursor_cap(&s, 120, 10),
+            None,
+            "no bar on a short terminal, so no cursor either"
+        );
+    }
+
+    /// A terminal too short to spare a row spends it on data instead.
+    #[test]
+    fn a_short_terminal_drops_the_session_strip() {
+        let mut s = AppState::new(vec![]);
+        for _ in 0..60 {
+            s.session
+                .record(crate::session::SessionState::Healthy, None);
+        }
+        // Rows that are nothing but bar (and blank where the young session
+        // has not reached yet).
+        let bar_rows = |s: &AppState, w: u16, h: u16| -> usize {
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            t.draw(|f| render(f, s)).unwrap();
+            let buf = t.backend().buffer();
+            (0..h)
+                .filter(|y| {
+                    (0..w).any(|x| "▁▄▆█".contains(buf[(x, *y)].symbol()))
+                        && (0..w).all(|x| " ▁▄▆█".contains(buf[(x, *y)].symbol()))
+                })
+                .count()
+        };
+        assert_eq!(bar_rows(&s, 120, 30), 1);
+        assert_eq!(bar_rows(&s, 120, 10), 0, "a short terminal keeps the row");
+        // And nothing to draw before the first verdict tick.
+        assert_eq!(bar_rows(&AppState::new(vec![]), 120, 30), 0);
+
+        // One minute of a session in a 120-column terminal: the bar is 60
+        // cells wide and sits against the right edge, under "now".
+        let mut t = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        t.draw(|f| render(f, &s)).unwrap();
+        let buf = t.backend().buffer();
+        let bar = |x: u16| "▁▄▆█".contains(buf[(x, 28)].symbol());
+        assert!(bar(119), "the newest cell is flush right");
+        assert!(!bar(0), "and a young session has not reached the left yet");
+    }
+
     #[test]
     fn naming_prompt_takes_over_the_footer() {
         let mut s = AppState::new(vec![]);
@@ -6488,6 +7176,28 @@ mod tests {
         // A run of silent hops collapses; a lone one does not.
         assert!(out.contains("3 hops not responsive"));
         assert!(out.contains(" 5-7"));
+
+        // The per-hop trace draws misses red. They hold a slot now, and a
+        // slot holding no reply must not be coloured as though it held the
+        // fastest one on the row.
+        let mut t = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        t.draw(|f| render(f, &s)).unwrap();
+        let buf = t.backend().buffer();
+        let bars = |c: Color| {
+            buf.content()
+                .iter()
+                .filter(|cell| {
+                    cell.fg == c
+                        && cell
+                            .symbol()
+                            .chars()
+                            .next()
+                            .is_some_and(|ch| ('\u{2581}'..='\u{2588}').contains(&ch))
+                })
+                .count()
+        };
+        assert!(bars(Color::Red) > 0, "the misses draw as red bars");
+        assert!(bars(Color::Green) > 0, "the healthy hops keep their own");
     }
 
     #[test]
@@ -7461,13 +8171,9 @@ mod tests {
             "n",
             "Esc",
             "s",
-            "p",
-            "r",
-            "G",
+            "r / G",
             "w",
-            "l",
-            "?",
-            "q / Ctrl+C",
+            "? / q",
             "PgUp/PgDn",
             "Enter",
             "Shift+R",
@@ -7477,15 +8183,31 @@ mod tests {
             "t",
             "m",
             "v",
-            "y",
-            "e",
+            "y / T",
+            "e / c / M",
             "N",
             "W",
             "W / a",
             "l / D",
             "p / u",
+            "o / /",
         ] {
             assert!(out.contains(key), "help is missing a binding for {key:?}");
+        }
+        // Every group survives the packing: the section that lands last is
+        // the one a box one row too tall would swallow.
+        for section in [
+            "Global",
+            "Navigation",
+            "Diagnose & record",
+            "Connection Quality",
+            "Bandwidth",
+            "Network",
+        ] {
+            assert!(
+                out.contains(section),
+                "help is missing the {section:?} group"
+            );
         }
         // The closing hint sits in the bottom border; if the box overflowed the
         // terminal it would be the first thing lost.
@@ -7506,11 +8228,12 @@ mod tests {
             "provider cycle · add · del",
             "procs → remotes → history",
             "full-screen: DNS + history",
-            "filter rows (Esc clears)",
+            "follow row / filter rows",
             "events / ports / marker",
             "del. speed test / zoom",
             "analysis / routing table",
-            "rescan gateway/hops/IP",
+            "re-probe / rescan the path",
+            "this help / quit (^C too)",
         ] {
             assert!(
                 out.contains(desc),

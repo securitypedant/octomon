@@ -144,7 +144,7 @@ impl Sample {
             .iter()
             .filter(|t| !t.discovered)
             .filter_map(|t| {
-                let recent: Vec<f64> = t.web.hist.data.iter().rev().take(n).copied().collect();
+                let recent: Vec<f64> = t.web.hist.successes().rev().take(n).collect();
                 (!recent.is_empty()).then(|| recent.iter().sum::<f64>() / recent.len() as f64)
             })
             .min_by(f64::total_cmp);
