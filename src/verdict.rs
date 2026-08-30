@@ -3361,13 +3361,21 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
             // One cell of the session strip per tick, from the settled
             // verdict — the same judgement the footer states, kept.
             let state = session_state(&s.verdict.current);
-            let cause = match &s.verdict.current {
+            // What made this second yellow or red, kept with it: the bar is
+            // the only place that knows, because a stretch of colour usually
+            // holds no timeline entries at all — the finding raised before it
+            // and cleared after it.
+            let mark = match &s.verdict.current {
                 Verdict::Problems(f) if state > crate::session::SessionState::Healthy => {
-                    f.first().map(|top| top.cause)
+                    f.first().map(|top| crate::session::Mark {
+                        since: chrono::Utc::now().timestamp()
+                            - top.since.map_or(0, |t| t.elapsed().as_secs() as i64),
+                        summary: top.summary.as_str().into(),
+                    })
                 }
                 _ => None,
             };
-            s.session.record(state, cause);
+            s.session.record(state, mark);
 
             // Alerts leave with the location's name where there is one: "on
             // Home" is the difference between a notification you can act on

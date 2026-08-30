@@ -1205,7 +1205,7 @@ fn explainer_overlay(f: &mut Frame, area: Rect) {
         Line::from(""),
         bullet("a live analysis at the bottom left of the screen"),
         dim("press [y] anytime to see details"),
-        bullet("the bar above it is the whole session, oldest left, now right"),
+        bullet("the session bar above it is the whole run, oldest left, now right"),
         dim("green fine, yellow degraded, red down; press [b] to walk it"),
         bullet("[e] shows a timeline of what changed and when"),
         bullet("octomon learns what normal looks like on each network you use"),
@@ -1316,9 +1316,23 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         } else {
             severity_color(e.severity)
         };
+        // Arrived from the session bar: the entries inside the stretch that
+        // was selected wear a bar down the left, so the answer to "why am I
+        // looking at this part of the list" is visible rather than implied by
+        // the scroll position.
+        let inside = s
+            .events_focus
+            .as_ref()
+            .is_some_and(|f| e.at >= f.from && e.at <= f.to);
+        let gutter = if inside {
+            Span::styled("▏", Style::new().fg(theme::accent()).bold())
+        } else {
+            Span::raw(" ")
+        };
         lines.extend(column_lines(
             vec![
-                Span::styled(format!(" {}  ", e.when()), Style::new().fg(theme::dim())),
+                gutter,
+                Span::styled(format!("{}  ", e.when()), Style::new().fg(theme::dim())),
                 Span::styled(
                     format!("{:<9} ", e.category.label()),
                     Style::new().fg(if marker {
@@ -1335,21 +1349,77 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         ));
         taken += 1;
     }
+    // A heading for the stretch itself. The bar grades every second by the
+    // state standing at the time; the timeline records only the moments that
+    // state changed. So a solidly yellow stretch can hold no entries at all —
+    // the finding raised before it and cleared after it — and saying only
+    // "nothing was recorded" would read as a contradiction of the colour that
+    // sent the reader here. This says what was standing instead.
+    if let Some(focus) = s.events_focus.as_ref() {
+        let inside = s
+            .events
+            .iter()
+            .filter(|e| e.at >= focus.from && e.at <= focus.to)
+            .count();
+        let (word, color) = match focus.state {
+            crate::session::SessionState::Unknown => ("not measured", theme::dim()),
+            crate::session::SessionState::Healthy => ("healthy", Color::Green),
+            crate::session::SessionState::Degraded => ("degraded", theme::warn()),
+            crate::session::SessionState::Down => ("down", Color::Red),
+        };
+        let mut head = vec![
+            Span::styled(
+                format!(" {} → {}  ", clock_hms(focus.from), clock_hms(focus.to)),
+                Style::new().fg(theme::text()),
+            ),
+            Span::styled(word.to_string(), Style::new().fg(color).bold()),
+        ];
+        // The finding itself, in its own words — the answer to "what was
+        // that yellow?", which the list alone often cannot give: the episode
+        // may have raised long before this stretch.
+        if let Some(mark) = &focus.mark {
+            head.push(Span::styled(
+                format!(" · {}", mark.summary),
+                Style::new().fg(theme::text()),
+            ));
+        }
+        head.push(Span::styled(
+            match (inside, focus.mark.is_some()) {
+                (0, false) => "  ·  nothing raised or cleared in it".to_string(),
+                // Every episode writes a raise entry, so none here means the
+                // timeline has aged them out — it is capped, the bar is not.
+                (0, true) => "  ·  its entries have aged out of the timeline".to_string(),
+                (1, _) => "  ·  1 entry, marked ▏".to_string(),
+                (n, _) => format!("  ·  {n} entries, marked ▏"),
+            },
+            Style::new().fg(theme::dim()).italic(),
+        ));
+        lines.insert(0, Line::from(head));
+        lines.truncate(visible);
+    }
 
     let older = s
         .events
         .len()
         .saturating_sub(s.events_scroll)
         .saturating_sub(taken);
-    let title = format!(
-        " octomon · events ({} this session{}) ",
-        s.events_total,
-        if older > 0 {
-            format!(", ↓{older} older")
-        } else {
-            String::new()
-        }
-    );
+    // Opened from the bar, the title says which stretch of the session is
+    // being asked about — the same clock times the bar's readout showed, so
+    // the two views are visibly the same question.
+    let title = match s.events_focus.as_ref() {
+        // The stretch's own times lead the list below, so the title only has
+        // to say where the reader arrived from.
+        Some(_) => " octomon · events · from the session bar ".to_string(),
+        None => format!(
+            " octomon · events ({} this session{}) ",
+            s.events_total,
+            if older > 0 {
+                format!(", ↓{older} older")
+            } else {
+                String::new()
+            }
+        ),
+    };
     f.render_widget(Clear, rect);
     let outer = Block::bordered()
         .padding(Padding::new(1, 1, 0, 0))
@@ -1760,7 +1830,11 @@ fn session_cell(
 ) -> (&'static str, Color) {
     use crate::session::SessionState as S;
     match state {
-        S::Unknown => (bars.one_eighth, theme::dim()),
+        // Full height, grey: "no reading here", not a notch chopped out of
+        // the bar. The eighth-block it used to draw read as a hole punched in
+        // the row — which, on the two-second gaps a VPN switch produces, made
+        // octomon's own re-settling look like damage to the connection.
+        S::Unknown => (bars.half, theme::dim()),
         S::Healthy => (bars.half, Color::Green),
         S::Degraded => (bars.three_quarters, theme::warn()),
         S::Down => (bars.full, Color::Red),
@@ -1792,43 +1866,229 @@ const MIN_STRIP_CELLS: usize = 16;
 /// header already counts how long the run has been.
 fn session_strip(f: &mut Frame, s: &AppState, area: Rect) {
     let cells = session_slices(s, area.width);
-    // A session younger than the terminal is wide grows leftward from the
-    // right edge, the way the hop traces do: "now" stays put under the
-    // analysis line it belongs to, instead of marching across the screen for
-    // the first two minutes and stopping.
-    let mut spans = Vec::new();
-    let blank = (area.width as usize).saturating_sub(cells.len());
-    if blank > 0 {
-        spans.push(Span::raw(" ".repeat(blank)));
+    if cells.is_empty() {
+        return;
     }
-    let cursor = s.bar_cursor.map(|c| c.min(cells.len().saturating_sub(1)));
-    // Runs of one state merge into a single span: a whole-session bar is
-    // mostly one state, and a span per cell would be hundreds of them. The
-    // cursor breaks its run so the column under it can be picked out.
-    for (state, start, len) in fold_runs(&cells) {
-        let (glyph, color) = session_cell(state, &s.bar_set);
-        let style = Style::new().fg(color);
-        match cursor.filter(|c| (start..start + len).contains(c)) {
-            Some(c) => {
-                let (before, after) = (c - start, start + len - c - 1);
-                if before > 0 {
-                    spans.push(Span::styled(glyph.repeat(before), style));
-                }
-                spans.push(Span::styled(glyph, style.add_modifier(Modifier::REVERSED)));
-                if after > 0 {
-                    spans.push(Span::styled(glyph.repeat(after), style));
-                }
-            }
-            None => spans.push(Span::styled(glyph.repeat(len), style)),
+    // The cursor covers its whole cell, however many columns that is drawn
+    // as: early on a cell is three columns wide, and highlighting one of them
+    // would pick out a third of a second that means nothing on its own.
+    let cursor_from = bar_cursor_col(s, area.width).map(|c| cells[c].from);
+    let ticks = tick_columns(&cells);
+
+    // Built per column, then coalesced: a whole-session bar is mostly one
+    // state, and a span per column would be hundreds of them.
+    let mut runs: Vec<(&str, Style, usize)> = Vec::new();
+    for (i, cell) in cells.iter().enumerate() {
+        let (glyph, color) = session_cell(cell.state, &s.bar_set);
+        let (glyph, style) = if cursor_from == Some(cell.from) {
+            (
+                glyph,
+                Style::new().fg(color).add_modifier(Modifier::REVERSED),
+            )
+        } else if ticks.contains(&i) {
+            // A tick shades its column rather than replacing it: same glyph,
+            // same colour, one step down in intensity. Drawing a mark *over*
+            // the column meant a choice between hiding what happened there
+            // and skipping the mark — and skipping left visible holes in the
+            // grid wherever the connection had been busy, which reads as a
+            // fault rather than as deference. Shading costs nothing: the
+            // state's colour and height both survive it.
+            (glyph, Style::new().fg(color).add_modifier(Modifier::DIM))
+        } else {
+            (glyph, Style::new().fg(color))
+        };
+        match runs.last_mut() {
+            Some((g, st, n)) if *g == glyph && *st == style => *n += 1,
+            _ => runs.push((glyph, style, 1)),
         }
     }
+    let spans: Vec<Span> = runs
+        .into_iter()
+        .map(|(glyph, style, n)| Span::styled(glyph.repeat(n), style))
+        .collect();
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// A moment as a local wall-clock time — the bar's readout, the events
+/// overlay's title and the timeline all speak in these, so they read as one
+/// conversation about the same seconds.
+fn clock_hms(ts: i64) -> String {
+    use chrono::{Local, TimeZone};
+    Local
+        .timestamp_opt(ts, 0)
+        .single()
+        .map(|t| t.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| "—".into())
+}
+
+/// Intervals a tick can fall on, coarsest last. All divide an hour or a day,
+/// so the marks land on times a person recognises (:15, :30, the hour) rather
+/// than on "every 437 seconds".
+const TICK_STEPS: [i64; 9] = [60, 300, 900, 1800, 3600, 7200, 21600, 43200, 86400];
+
+/// At most this many marks: past it the row reads as a comb rather than a
+/// scale.
+const MAX_TICKS: i64 = 12;
+
+/// The interval to mark for a bar spanning `span` seconds.
+fn tick_interval(span: i64) -> i64 {
+    *TICK_STEPS
+        .iter()
+        .find(|step| span / **step <= MAX_TICKS)
+        .unwrap_or(&TICK_STEPS[TICK_STEPS.len() - 1])
+}
+
+/// Which columns carry a tick: the ones a wall-clock boundary falls inside.
+///
+/// The bar's own axis is uniform but unlabelled — every column is the same
+/// span of time, and there is no way to tell *how much* time without the
+/// cursor. These give the eye something to measure against, which is what
+/// turns "an outage somewhere in the middle" into "an outage about an hour
+/// before the end".
+fn tick_columns(cells: &[crate::session::Slice]) -> Vec<usize> {
+    if cells.len() < 3 {
+        return Vec::new();
+    }
+    let (start, end) = (cells[0].from, cells[cells.len() - 1].to);
+    if end <= start {
+        return Vec::new();
+    }
+    let step = tick_interval(end - start);
+    // Aligned to local wall clock, not to the epoch: on a half-hour offset
+    // the hour marks belong on the hour there, not at :30.
+    let offset = chrono::Local::now().offset().local_minus_utc() as i64;
+    let mut at = ((start + offset).div_euclid(step)) * step - offset;
+    if at < start {
+        at += step;
+    }
+    let mut out: Vec<usize> = Vec::new();
+    while at < end {
+        // The column that moment falls in — the last one that had begun.
+        if let Some(i) = cells.iter().rposition(|c| c.from <= at) {
+            // Never at the very ends: those edges are the session's start and
+            // now, which need no marking.
+            if i > 0 && i + 1 < cells.len() && out.last() != Some(&i) {
+                out.push(i);
+            }
+        }
+        at += step;
+    }
+    out
 }
 
 /// The bar's columns at the width it is drawn at — one place, so the cursor
 /// keys and the draw can never disagree about which column is which.
 pub fn session_slices(s: &AppState, width: u16) -> Vec<crate::session::Slice> {
-    s.session.slices(width as usize)
+    s.session.slices(width as usize, s.bar_scope)
+}
+
+/// The column the cursor lands on when jumping to the next change of state —
+/// ⌃→ forward, ⌃← back.
+///
+/// Word-jump semantics, because that is what the hands already know: forward
+/// goes to the first column of the next run, back to the first column of this
+/// run unless already on it, and then to the first column of the one before.
+/// On a bar where an outage can be three columns wide out of two hundred,
+/// arrowing to it one column at a time is not navigation.
+pub fn bar_jump(s: &AppState, term_w: u16, cursor: i64, forward: bool) -> i64 {
+    let cells = session_slices(s, term_w);
+    if cells.is_empty() {
+        return cursor;
+    }
+    let at = column_of(&cells, cursor);
+    let state = cells[at].state;
+    let col = if forward {
+        // The first column that reads differently from here.
+        cells
+            .iter()
+            .enumerate()
+            .skip(at + 1)
+            .find(|(_, c)| c.state != state)
+            .map_or(cells.len() - 1, |(i, _)| i)
+    } else {
+        // Walk back to where this run began…
+        let start = (0..=at)
+            .rev()
+            .take_while(|i| cells[*i].state == state)
+            .last()
+            .unwrap_or(at);
+        if start < at {
+            start
+        } else {
+            // …and if that is where the cursor already sat, to the start of
+            // the run before it.
+            let prev = start.saturating_sub(1);
+            let prev_state = cells[prev].state;
+            (0..=prev)
+                .rev()
+                .take_while(|i| cells[*i].state == prev_state)
+                .last()
+                .unwrap_or(0)
+        }
+    };
+    cells[col].from
+}
+
+/// The column covering a given moment.
+///
+/// Everything about the cursor goes through here: it is held as a moment, not
+/// as a column, so that when the bar shifts and recompresses underneath it —
+/// which it does every second the session grows — the highlight stays on the
+/// seconds it was put on rather than sliding onto different ones.
+pub fn bar_column_at(s: &AppState, term_w: u16, at: i64) -> usize {
+    column_of(&session_slices(s, term_w), at)
+}
+
+fn column_of(cells: &[crate::session::Slice], at: i64) -> usize {
+    if cells.is_empty() {
+        return 0;
+    }
+    cells
+        .iter()
+        .rposition(|c| c.from <= at)
+        .unwrap_or(0)
+        .min(cells.len() - 1)
+}
+
+/// The cursor's column, when it is up and the bar is drawn.
+pub fn bar_cursor_col(s: &AppState, term_w: u16) -> Option<usize> {
+    s.bar_cursor_at.map(|at| bar_column_at(s, term_w, at))
+}
+
+/// The moment a column stands for — its cell's opening second, which is what
+/// the cursor anchors to.
+pub fn bar_anchor_at(s: &AppState, term_w: u16, col: usize) -> Option<i64> {
+    let cells = session_slices(s, term_w);
+    cells
+        .get(col.min(cells.len().saturating_sub(1)))
+        .map(|c| c.from)
+}
+
+/// Move the cursor by `n` *cells*, not columns.
+///
+/// On a young bar one cell is drawn several columns wide, and stepping by
+/// column would spend two presses going nowhere. Stepping by cell means every
+/// press moves to a different piece of data, which is what the reader is
+/// actually walking through.
+pub fn bar_step(s: &AppState, term_w: u16, at: i64, forward: bool, n: usize) -> i64 {
+    let cells = session_slices(s, term_w);
+    if cells.is_empty() {
+        return at;
+    }
+    let mut col = column_of(&cells, at);
+    for _ in 0..n {
+        let here = cells[col].from;
+        let next = if forward {
+            (col + 1..cells.len()).find(|i| cells[*i].from != here)
+        } else {
+            (0..col).rev().find(|i| cells[*i].from != here)
+        };
+        match next {
+            Some(i) => col = i,
+            None => break,
+        }
+    }
+    cells[col].from
 }
 
 /// The rightmost column index the bar cursor can hold, or `None` when there
@@ -1846,18 +2106,6 @@ pub fn bar_cursor_cap(s: &AppState, term_w: u16, term_h: u16) -> Option<usize> {
     session_slices(s, term_w).len().checked_sub(1)
 }
 
-/// Consecutive columns of the same state as (state, first column, length).
-fn fold_runs(cells: &[crate::session::Slice]) -> Vec<(crate::session::SessionState, usize, usize)> {
-    let mut out: Vec<(crate::session::SessionState, usize, usize)> = Vec::new();
-    for (i, c) in cells.iter().enumerate() {
-        match out.last_mut() {
-            Some((state, _, n)) if *state == c.state => *n += 1,
-            _ => out.push((c.state, i, 1)),
-        }
-    }
-    out
-}
-
 /// What the column under the bar cursor stands for: which minutes, how they
 /// read, and what was wrong with them.
 ///
@@ -1865,18 +2113,11 @@ fn fold_runs(cells: &[crate::session::Slice]) -> Vec<(crate::session::SessionSta
 /// the answer to the question it provokes, and the way into the timeline for
 /// the rest of the answer.
 fn bar_readout(s: &AppState, width: u16) -> Option<Line<'static>> {
-    let cursor = s.bar_cursor?;
+    let col = bar_cursor_col(s, width)?;
     let slices = session_slices(s, width);
-    let slice = slices.get(cursor.min(slices.len().saturating_sub(1)))?;
+    let slice = slices.get(col)?;
 
-    let clock = |ts: i64| {
-        use chrono::{Local, TimeZone};
-        Local
-            .timestamp_opt(ts, 0)
-            .single()
-            .map(|t| t.format("%H:%M:%S").to_string())
-            .unwrap_or_else(|| "—".into())
-    };
+    let clock = clock_hms;
     let (word, color) = match slice.state {
         crate::session::SessionState::Unknown => ("not measured", theme::dim()),
         crate::session::SessionState::Healthy => ("healthy", Color::Green),
@@ -1890,14 +2131,25 @@ fn bar_readout(s: &AppState, width: u16) -> Option<Line<'static>> {
         ),
         Span::styled(word.to_string(), Style::new().fg(color).bold()),
     ];
-    if let Some(cause) = slice.cause {
+    if let Some(mark) = &slice.mark {
+        // What it was, as the analysis line worded it — the cause's slug
+        // ("link", "gateway") names the subsystem but not the problem.
         spans.push(Span::styled(
-            format!(" · {}", cause.label()),
+            format!(" · {}", mark.summary),
             Style::new().fg(theme::text()),
         ));
     }
+    // Zoomed, the bar no longer means "the whole session", so it has to say
+    // so — this line is the only place it can, and the only place it needs
+    // to, because leaving the cursor puts the bar back.
+    if matches!(s.bar_scope, crate::session::BarScope::Window { .. }) {
+        spans.push(Span::styled(
+            "  ⌕ 1h window",
+            Style::new().fg(theme::accent()),
+        ));
+    }
     spans.push(Span::styled(
-        "   ←→ move · ↵ timeline · Esc back",
+        "   ←→ move · [ ] change · z zoom · ↵ timeline · Esc back",
         Style::new().fg(theme::dim()),
     ));
     Some(Line::from(spans))
@@ -4363,7 +4615,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             head("Diagnose & record"),
             row("y / T", "analysis / routing table"),
             row("e / c / M", "events / ports / marker"),
-            row("b", "walk the session bar"),
+            row("b / z", "walk the session bar · 1h"),
             row("l / D", "CSV recording / zip bundle"),
         ],
         vec![
@@ -6604,30 +6856,43 @@ mod tests {
         );
     }
 
-    /// The bar answers "what was that?" — the cursor picks a column, and the
-    /// footer says which minutes it covers, how they read and what was wrong.
+    /// The bar answers "what was that?" — the cursor picks a cell, and the
+    /// footer says which seconds it covers, how they read and what was wrong.
     #[test]
     fn the_bar_cursor_reads_out_the_column_it_is_on() {
-        use crate::session::SessionState;
-        use crate::verdict::Cause;
+        use crate::session::{SessionState as S, SessionTrack};
+        // Eight minutes, a cell a second, two of them down.
+        let start = chrono::Utc::now().timestamp() - 480;
+        let cells: Vec<(S, i64)> = (0..480i64)
+            .map(|i| {
+                (
+                    (if (300..420).contains(&i) {
+                        S::Down
+                    } else {
+                        S::Healthy
+                    }),
+                    i,
+                )
+            })
+            .collect();
         let mut s = AppState::new(vec![]);
-        for _ in 0..300 {
-            s.session.record(SessionState::Healthy, None);
-        }
-        for _ in 0..120 {
-            s.session
-                .record(SessionState::Down, Some(Cause::GatewayLan));
-        }
-        for _ in 0..60 {
-            s.session.record(SessionState::Healthy, None);
-        }
+        s.session = SessionTrack::seeded(start, &cells);
+        // Seeded cells carry no cause; the live path does, so add one tick of
+        // it for the readout to name.
+        s.session.record(
+            S::Down,
+            Some(crate::session::Mark {
+                since: start + 300,
+                summary: "gateway unresponsive (100% loss)".into(),
+            }),
+        );
 
         let (w, h) = (120u16, 30u16);
         // The footer row alone: "down" also appears in the Bandwidth panel,
         // and the question here is what the readout says.
         let readout = |s: &AppState| -> String {
-            let out = draw(s, w, h);
-            out.chars()
+            draw(s, w, h)
+                .chars()
                 .skip((h as usize - 1) * w as usize)
                 .collect::<String>()
         };
@@ -6635,43 +6900,233 @@ mod tests {
         // With no cursor the footer is the analysis line, as ever.
         assert!(readout(&s).contains("[y] analysis"));
 
-        // On the newest column: healthy again, and no cause to name.
+        // On the newest column: the cell just recorded, which is down.
         let cap = bar_cursor_cap(&s, w, h).expect("the bar is drawn");
-        s.bar_cursor = Some(cap);
+        s.bar_cursor_at = bar_anchor_at(&s, w, cap);
         let line = readout(&s);
-        assert!(line.contains("healthy"), "state of the column: {line}");
-        assert!(line.contains("←→ move · ↵ timeline · Esc back"));
+        assert!(line.contains("down"), "state of the column: {line}");
+        assert!(line.contains("gateway"), "and its cause: {line}");
+        assert!(line.contains("←→ move · [ ] change · z zoom · ↵ timeline · Esc back"));
         assert!(!line.contains("[y] analysis"), "the readout takes the line");
 
-        // The outage is reachable by walking, and names its cause when found.
-        let outage = (0..=cap)
-            .find(|i| {
-                s.bar_cursor = Some(*i);
-                readout(&s).contains("down")
-            })
-            .expect("the outage is reachable with the cursor");
-        s.bar_cursor = Some(outage);
+        // The start of the session reads as the healthy stretch it was.
+        s.bar_cursor_at = bar_anchor_at(&s, w, 0);
         let line = readout(&s);
-        assert!(
-            line.contains("gateway"),
-            "the column names its cause: {line}"
-        );
-        // And which minutes it stands for, as clock times.
-        assert!(line.contains(" → "), "the readout carries the span");
-        // The columns either side of the outage are not it: the cursor picks
-        // out one column, not a mood.
-        s.bar_cursor = Some(0);
-        assert!(readout(&s).contains("healthy"), "the session opened clean");
+        assert!(line.contains("healthy"), "the session opened clean: {line}");
+        assert!(line.contains(" → "), "and says which seconds it covers");
 
-        // The cursor marks its column: reversed, so it reads on any theme.
-        s.bar_cursor = Some(outage);
+        // The cursor marks its cell: reversed, so it reads on any theme.
         let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
         t.draw(|f| render(f, &s)).unwrap();
         let buf = t.backend().buffer();
         let marked = (0..w)
             .filter(|x| buf[(*x, h - 2)].modifier.contains(Modifier::REVERSED))
             .count();
-        assert_eq!(marked, 1, "exactly one column wears the cursor");
+        assert!(marked >= 1, "a column wears the cursor");
+    }
+
+    /// [ ] and ⌃←/⌃→ move by change, not by column: on a bar where an outage
+    /// is three columns out of two hundred, the boundaries are the only
+    /// places worth stopping at.
+    #[test]
+    fn ctrl_arrows_jump_between_changes() {
+        use crate::session::{SessionState as S, SessionTrack};
+        // 20 green · 10 yellow · 20 green · 10 red · 20 green, a cell a
+        // second, drawn one column per cell.
+        let start = chrono::Utc::now().timestamp() - 80;
+        let cells: Vec<(S, i64)> = (0..80i64)
+            .map(|i| {
+                let state = match i {
+                    20..=29 => S::Degraded,
+                    50..=59 => S::Down,
+                    _ => S::Healthy,
+                };
+                (state, i)
+            })
+            .collect();
+        let mut s = AppState::new(vec![]);
+        s.session = SessionTrack::seeded(start, &cells);
+        let w = 80u16;
+        assert_eq!(session_slices(&s, w).len(), 80);
+
+        // The cursor is a moment; these are the columns those moments land in.
+        let col = |at: i64| bar_column_at(&s, w, at);
+        let from = |c: usize| bar_anchor_at(&s, w, c).unwrap();
+        let jump = |c: usize, fwd: bool| col(bar_jump(&s, w, from(c), fwd));
+
+        assert_eq!(jump(0, true), 20, "into the yellow");
+        assert_eq!(jump(20, true), 30, "out of it");
+        assert_eq!(jump(30, true), 50, "into the red");
+        // Nothing further to change into: stop at the end rather than wrap.
+        assert_eq!(jump(60, true), 79);
+
+        assert_eq!(jump(55, false), 50, "start of the red");
+        assert_eq!(jump(50, false), 30, "start of the green before");
+        assert_eq!(jump(30, false), 20, "start of the yellow");
+        assert_eq!(jump(20, false), 0, "back to the beginning");
+        assert_eq!(jump(0, false), 0, "and it stays there");
+
+        // A bar of one unbroken colour has nowhere to jump to.
+        let plain_cells: Vec<(S, i64)> = (0..80).map(|i| (S::Healthy, i)).collect();
+        let mut plain = AppState::new(vec![]);
+        plain.session = SessionTrack::seeded(start, &plain_cells);
+        let at = bar_anchor_at(&plain, w, 10).unwrap();
+        assert_eq!(bar_column_at(&plain, w, bar_jump(&plain, w, at, true)), 79);
+        assert_eq!(bar_column_at(&plain, w, bar_jump(&plain, w, at, false)), 0);
+    }
+
+    /// Arriving in the timeline from the bar, the view has to say which
+    /// stretch it was asked about: scrolled to a position with no explanation,
+    /// the reader cannot tell which of thirty entries they came for.
+    #[test]
+    fn the_timeline_says_which_stretch_the_bar_sent_it() {
+        let mut s = AppState::new(vec![]);
+        let now = chrono::Utc::now().timestamp();
+        let mut at = |secs: i64, msg: &str| {
+            s.push_event(
+                Severity::Info,
+                crate::app::EventCategory::Analysis,
+                msg.to_string(),
+            );
+            if let Some(e) = s.events.back_mut() {
+                e.at = now - secs;
+            }
+        };
+        at(600, "▲ oldest, long before");
+        at(300, "▲ inside the stretch");
+        at(60, "▲ newest, long after");
+
+        s.overlay = Overlay::Events;
+        let (w, h) = (150u16, 40u16);
+
+        // Opened with [e]: the plain timeline, no stretch, no gutter.
+        let plain = draw(&s, w, h);
+        assert!(plain.contains("events (3 this session"));
+        assert!(!plain.contains("from the session bar"));
+        assert!(!plain.contains('▏'), "nothing is singled out");
+
+        // Opened from the bar: the title carries the span, and only the
+        // entry inside it wears the gutter.
+        s.events_focus = Some(crate::app::EventsFocus {
+            from: now - 330,
+            to: now - 270,
+            state: crate::session::SessionState::Down,
+            mark: Some(crate::session::Mark {
+                since: now - 330,
+                summary: "gateway unresponsive (100% loss)".into(),
+            }),
+        });
+        let out = draw(&s, w, h);
+        assert!(
+            out.contains("from the session bar"),
+            "the title names where it came from"
+        );
+        assert!(
+            out.contains(&clock_hms(now - 330)),
+            "the stretch's own times"
+        );
+        // A marked entry is a gutter immediately followed by its timestamp;
+        // the heading's own "marked ▏" legend is not one.
+        let gutter_rows: Vec<String> = out
+            .as_str()
+            .split('▏')
+            .skip(1)
+            .filter(|tail| tail.starts_with(|c: char| c.is_ascii_digit()))
+            .map(|tail| tail.chars().take(60).collect())
+            .collect();
+        assert_eq!(gutter_rows.len(), 1, "exactly one entry is inside");
+        assert!(
+            gutter_rows[0].contains("inside the stretch"),
+            "the marked entry: {:?}",
+            gutter_rows[0]
+        );
+
+        // The stretch's own heading leads the list: times, how the bar read
+        // it, and what to expect below.
+        assert!(out.contains("down"), "the bar's verdict for the stretch");
+        assert!(
+            out.contains("gateway unresponsive (100% loss)"),
+            "and the finding behind it, in its own words"
+        );
+        assert!(out.contains("1 entry, marked"), "how many are inside");
+
+        // A yellow stretch with no entries in it is the case that started
+        // this: the finding raised before it and cleared after, so the list
+        // has nothing *in* the stretch and must say why rather than reading
+        // as a contradiction of the colour that sent the reader here.
+        s.events_focus = Some(crate::app::EventsFocus {
+            from: now - 200,
+            to: now - 190,
+            state: crate::session::SessionState::Degraded,
+            mark: Some(crate::session::Mark {
+                since: now - 205,
+                summary: "Wi-Fi signal weak (rssi -75 dBm)".into(),
+            }),
+        });
+        let quiet = draw(&s, w, h);
+        // The finding is named even though the list holds none of its
+        // entries: the bar kept it, which is the whole point.
+        assert!(quiet.contains("Wi-Fi signal weak (rssi -75 dBm)"));
+        assert!(quiet.contains("degraded"), "the colour is accounted for");
+    }
+
+    /// The cursor holds a *moment*, not a column. The bar shifts and
+    /// recompresses under it every second the session grows; a column index
+    /// would quietly come to point at different seconds than the ones it was
+    /// put on, which is the one thing a cursor must never do.
+    #[test]
+    fn the_cursor_stays_on_the_moment_as_the_bar_moves() {
+        use crate::session::{SessionState as S, SessionTrack};
+        let start = chrono::Utc::now().timestamp() - 600;
+        // Ten minutes, with a minute of trouble in the middle.
+        let cells: Vec<(S, i64)> = (0..600i64)
+            .map(|i| {
+                (
+                    (if (300..360).contains(&i) {
+                        S::Down
+                    } else {
+                        S::Healthy
+                    }),
+                    i,
+                )
+            })
+            .collect();
+        let mut s = AppState::new(vec![]);
+        s.session = SessionTrack::seeded(start, &cells);
+
+        let w = 120u16;
+        // Park the cursor on the outage.
+        let outage_col = session_slices(&s, w)
+            .iter()
+            .position(|c| c.state == S::Down)
+            .expect("the outage is drawn");
+        s.bar_cursor_at = bar_anchor_at(&s, w, outage_col);
+        let moment = s.bar_cursor_at.unwrap();
+
+        // Now the session runs on for another ten minutes. Every column of
+        // the bar now stands for different seconds than it did.
+        let grown: Vec<(S, i64)> = (0..1200i64)
+            .map(|i| {
+                (
+                    (if (300..360).contains(&i) {
+                        S::Down
+                    } else {
+                        S::Healthy
+                    }),
+                    i,
+                )
+            })
+            .collect();
+        s.session = SessionTrack::seeded(start, &grown);
+
+        let col = bar_cursor_col(&s, w).expect("the cursor is still up");
+        assert_ne!(col, outage_col, "the bar moved under it");
+        let cell = session_slices(&s, w)[col].clone();
+        assert!(
+            cell.from <= moment && moment <= cell.to,
+            "the cursor left the seconds it was put on"
+        );
+        assert_eq!(cell.state, S::Down, "and it is still on the outage");
     }
 
     /// The cursor's range is the bar as drawn — which changes with the
@@ -6690,8 +7145,9 @@ mod tests {
             s.session
                 .record(crate::session::SessionState::Healthy, None);
         }
-        // A young session is only as wide as it is long.
-        assert_eq!(bar_cursor_cap(&s, 120, 30), Some(39));
+        // Young or old, the bar spans the row, so the cursor's range is the
+        // row: no growing-in period where half the columns are not there.
+        assert_eq!(bar_cursor_cap(&s, 120, 30), Some(119));
         for _ in 0..400 {
             s.session
                 .record(crate::session::SessionState::Healthy, None);
@@ -6705,6 +7161,134 @@ mod tests {
         );
     }
 
+    /// The bar's axis is uniform but unlabelled, so the eye has nothing to
+    /// measure against. Ticks give it wall-clock boundaries — and yield to
+    /// any column that has something to say.
+    #[test]
+    fn ticks_mark_the_clock_and_never_cover_a_problem() {
+        use crate::session::{SessionState as S, Slice};
+        // Steps are chosen so a row carries a handful of marks, not a comb.
+        assert_eq!(tick_interval(600), 60, "ten minutes: every minute");
+        assert_eq!(tick_interval(3600), 300, "an hour: every five");
+        assert_eq!(tick_interval(9 * 3600), 3600, "a flight: on the hour");
+        assert_eq!(tick_interval(400 * 3600), 86400, "and it never runs out");
+
+        // A two-hour bar, one column per minute, marked every 15 minutes.
+        let start = 1_700_000_000 - 1_700_000_000 % 3600; // on an hour, UTC
+        let cells: Vec<Slice> = (0..120)
+            .map(|i| Slice {
+                state: S::Healthy,
+                mark: None,
+                from: start + i * 60,
+                to: start + (i + 1) * 60,
+            })
+            .collect();
+        let ticks = tick_columns(&cells);
+        assert!(!ticks.is_empty(), "a two-hour bar carries marks");
+        assert!(
+            ticks.iter().all(|i| *i > 0 && *i + 1 < cells.len()),
+            "never on the edges, which are the session's own ends"
+        );
+        // Evenly spaced, since every column is the same span of time.
+        let gaps: Vec<usize> = ticks.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(
+            gaps.windows(2).all(|g| g[0] == g[1]),
+            "uneven ticks: {ticks:?}"
+        );
+
+        // Drawn, on a six-hour session with a forty-minute outage in it —
+        // wider than the half-hour tick step, so a mark must fall inside it
+        // wherever the wall-clock boundaries happen to land.
+        // the marks are evenly spaced *through* the outage, and nothing they
+        // touch is hidden.
+        let now = chrono::Utc::now().timestamp();
+        let seeded: Vec<(S, i64)> = (0..360i64)
+            .map(|m| {
+                let state = if (120..160).contains(&m) {
+                    S::Down
+                } else {
+                    S::Healthy
+                };
+                (state, m * 60)
+            })
+            .collect();
+        let mut s = AppState::new(vec![]);
+        s.session = crate::session::SessionTrack::seeded(now - 6 * 3600, &seeded);
+
+        let (w, h) = (120u16, 30u16);
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| render(f, &s)).unwrap();
+        let buf = t.backend().buffer();
+        let slices = session_slices(&s, w);
+
+        let marked: Vec<usize> = (0..w as usize)
+            .filter(|i| buf[(*i as u16, h - 2)].modifier.contains(Modifier::DIM))
+            .collect();
+        assert!(marked.len() >= 4, "a six-hour bar carries marks");
+        // The complaint that produced this: a grid with holes in it reads as
+        // broken. Gaps may differ by one column from rounding cells into
+        // columns, never more.
+        let gaps: Vec<usize> = marked.windows(2).map(|g| g[1] - g[0]).collect();
+        let (lo, hi) = (
+            gaps.iter().min().copied().unwrap_or(0),
+            gaps.iter().max().copied().unwrap_or(0),
+        );
+        assert!(hi - lo <= 1, "uneven ticks: {gaps:?}");
+        // Marks fall inside the outage too, since they no longer step around
+        // it — and every one of them keeps its column's own state.
+        assert!(
+            marked.iter().any(|i| slices[*i].state == S::Down),
+            "the grid runs through the outage"
+        );
+        for i in &marked {
+            let (glyph, _) = session_cell(slices[*i].state, &s.bar_set);
+            assert_eq!(
+                buf[(*i as u16, h - 2)].symbol(),
+                glyph,
+                "a mark changed what its column said"
+            );
+        }
+        // And the outage still owns every column it did.
+        assert_eq!(
+            (0..w).filter(|x| buf[(*x, h - 2)].symbol() == "█").count(),
+            slices.iter().filter(|c| c.state == S::Down).count()
+        );
+    }
+
+    /// [z] zooms the bar to the hour around the cursor's moment, and back
+    /// out again, keeping the same moment under the cursor both ways.
+    #[test]
+    fn zooming_holds_the_moment_under_the_cursor() {
+        use crate::session::{BarScope, SessionState as S};
+        let mut s = AppState::new(vec![]);
+        for _ in 0..400 {
+            s.session.record(S::Healthy, None);
+        }
+        let w = 120u16;
+        let whole = session_slices(&s, w);
+        let target = whole[40].clone();
+        let centre = target.from + (target.to - target.from) / 2;
+
+        s.bar_scope = BarScope::Window {
+            from: centre - crate::session::ZOOM_HALF_SPAN,
+            to: centre + crate::session::ZOOM_HALF_SPAN,
+        };
+        let zoomed = session_slices(&s, w);
+        assert_eq!(zoomed.len(), whole.len(), "still fills the row");
+        let at = bar_column_at(&s, w, centre);
+        assert!(
+            zoomed[at].from <= centre && centre <= zoomed[at].to,
+            "the cursor still covers the moment it zoomed on"
+        );
+
+        // The readout says the bar has stopped meaning "the whole session".
+        s.bar_cursor_at = bar_anchor_at(&s, w, at);
+        let out = draw(&s, w, 30);
+        assert!(out.contains("⌕ 1h window"), "the zoom names itself");
+        s.bar_scope = BarScope::Session;
+        assert!(!draw(&s, w, 30).contains("1h window"));
+    }
+
     /// A terminal too short to spare a row spends it on data instead.
     #[test]
     fn a_short_terminal_drops_the_session_strip() {
@@ -6713,8 +7297,7 @@ mod tests {
             s.session
                 .record(crate::session::SessionState::Healthy, None);
         }
-        // Rows that are nothing but bar (and blank where the young session
-        // has not reached yet).
+        // Rows that are nothing but bar.
         let bar_rows = |s: &AppState, w: u16, h: u16| -> usize {
             let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
             t.draw(|f| render(f, s)).unwrap();
@@ -6731,14 +7314,16 @@ mod tests {
         // And nothing to draw before the first verdict tick.
         assert_eq!(bar_rows(&AppState::new(vec![]), 120, 30), 0);
 
-        // One minute of a session in a 120-column terminal: the bar is 60
-        // cells wide and sits against the right edge, under "now".
+        // One minute of session in a 120-column terminal still spans the
+        // whole row: no blank stub on the left waiting to be grown into.
         let mut t = Terminal::new(TestBackend::new(120, 30)).unwrap();
         t.draw(|f| render(f, &s)).unwrap();
         let buf = t.backend().buffer();
         let bar = |x: u16| "▁▄▆█".contains(buf[(x, 28)].symbol());
-        assert!(bar(119), "the newest cell is flush right");
-        assert!(!bar(0), "and a young session has not reached the left yet");
+        assert!(
+            bar(0) && bar(119),
+            "session start at one edge, now at the other"
+        );
     }
 
     #[test]

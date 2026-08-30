@@ -33,27 +33,73 @@ pub enum SessionState {
 /// other way round.
 const CELLS: usize = 512;
 
+/// The finding behind a cell's worst tick — what made it yellow or red.
+///
+/// Carried by the bar itself rather than reconstructed from the timeline
+/// later: a stretch of colour usually contains no timeline entries at all
+/// (the finding raised before it and cleared after it), so "what was that?"
+/// is a question only the bar can answer, and it can only answer it if it
+/// kept the answer at the time.
+#[derive(Clone, Debug)]
+pub struct Mark {
+    /// When the episode raised — the point the timeline should open at.
+    pub since: i64,
+    /// The finding's own one-liner, as the footer and the timeline word it.
+    pub summary: std::sync::Arc<str>,
+}
+
 /// One cell of the record: how it read, when it began, and what was wrong.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Cell {
     state: SessionState,
     /// Unix seconds at which this cell's span opened.
     from: i64,
-    /// The cause behind the worst tick in the cell — the bar's answer to
-    /// "what was that?" without having to hold the whole finding.
-    cause: Option<crate::verdict::Cause>,
+    /// The finding behind the worst tick in it, when there was one.
+    mark: Option<Mark>,
 }
 
+/// How much of the session the bar is showing.
+///
+/// Not a ladder of scales, and not a fixed "recent" window: a lens held over
+/// the moment the cursor is on. Walk to the interesting patch, zoom, and the
+/// row becomes the hour around it — which makes "the last hour" simply what
+/// you get by zooming at the right-hand end, without a second mode to explain.
+///
+/// Resolution is still whatever the ring holds: on a nine-hour session each
+/// cell already covers about a minute, and zooming cannot invent the seconds
+/// back. It buys width for the minutes that are there, not new detail.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BarScope {
+    #[default]
+    Session,
+    /// Unix seconds, inclusive of `from`, exclusive of `to`.
+    Window { from: i64, to: i64 },
+}
+
+/// How far either side of the cursor a zoom reaches.
+pub const ZOOM_HALF_SPAN: i64 = 1800;
+
 /// A drawn column: one cell of the bar, and the span of the session it covers.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Slice {
     pub state: SessionState,
-    pub cause: Option<crate::verdict::Cause>,
+    /// The finding behind this column, when it was not healthy.
+    pub mark: Option<Mark>,
     /// Unix seconds, inclusive.
     pub from: i64,
     /// Unix seconds: where the next column starts, or now for the last one.
     pub to: i64,
 }
+
+/// How long the analysis may be unable to judge before the bar says so.
+///
+/// Sized against what a network change costs: switching a VPN on resets every
+/// probe window, and the verdict reads "measuring…" until a target has
+/// gathered `MIN_SAMPLES` outcomes again — through an 8 s settle grace, so
+/// ten to fifteen seconds. Painting that reads as damage, and worse, as the
+/// bar having reset itself: it is octomon re-establishing its own footing,
+/// not the connection failing. Past this, a gap is real and gets drawn.
+const UNMEASURED_GRACE_TICKS: u32 = 20;
 
 #[derive(Clone)]
 pub struct SessionTrack {
@@ -63,6 +109,8 @@ pub struct SessionTrack {
     ticks_per_cell: u32,
     /// Ticks already folded into the cell currently filling.
     filled: u32,
+    /// Consecutive ticks the analysis has had no opinion on.
+    unmeasured_run: u32,
 }
 
 impl Default for SessionTrack {
@@ -71,27 +119,52 @@ impl Default for SessionTrack {
             cells: VecDeque::with_capacity(CELLS),
             ticks_per_cell: 1,
             filled: 0,
+            unmeasured_run: 0,
         }
     }
 }
 
 impl SessionTrack {
-    /// Fold one tick's state in, with the cause behind it when there was one.
-    pub fn record(&mut self, state: SessionState, cause: Option<crate::verdict::Cause>) {
+    /// Fold one tick's state in, with the finding behind it when there was one.
+    pub fn record(&mut self, state: SessionState, mark: Option<Mark>) {
+        // The seconds before the analysis has anything to say are not a state
+        // the bar should open with: they left a grey stub pinned to the left
+        // edge for the rest of the session, which reads as a defect rather
+        // than as "measuring". The bar starts when the measuring does.
+        if state == SessionState::Unknown && self.cells.is_empty() {
+            return;
+        }
+        // Nor does a short spell of not-knowing change what the bar says. A
+        // VPN coming up or the network moving resets every probe window, and
+        // the seconds spent refilling them are octomon's, not the
+        // connection's — so the bar holds its state through them and only
+        // draws a gap once one has lasted (see UNMEASURED_GRACE_TICKS).
+        let (state, mark) = if state == SessionState::Unknown {
+            self.unmeasured_run = self.unmeasured_run.saturating_add(1);
+            match self.cells.back() {
+                Some(last) if self.unmeasured_run <= UNMEASURED_GRACE_TICKS => {
+                    (last.state, last.mark.clone())
+                }
+                _ => (SessionState::Unknown, None),
+            }
+        } else {
+            self.unmeasured_run = 0;
+            (state, mark)
+        };
         let at = chrono::Utc::now().timestamp();
         if self.filled == 0 {
             self.cells.push_back(Cell {
                 state,
                 from: at,
-                cause,
+                mark,
             });
         } else if let Some(last) = self.cells.back_mut() {
-            // The worst tick in the cell owns it, and brings its cause: a
+            // The worst tick in the cell owns it, and brings its finding: a
             // minute that was down for one second reads as down, and says
             // what was down.
             if state > last.state {
                 last.state = state;
-                last.cause = cause;
+                last.mark = mark;
             }
         }
         self.filled += 1;
@@ -116,7 +189,7 @@ impl SessionTrack {
         };
 
         let mut folded = VecDeque::with_capacity(CELLS);
-        let mut it = self.cells.iter().copied();
+        let mut it = self.cells.iter().cloned();
         while let Some(a) = it.next() {
             folded.push_back(match it.next() {
                 // The worse half wins the merged cell, but the span still
@@ -146,48 +219,74 @@ impl SessionTrack {
     /// column's stretch of the session, what caused it, and the span of time
     /// it covers.
     ///
-    /// The columns divide the record evenly rather than in fixed-size groups,
-    /// so the bar fills the row it is given and both ends stay anchored: the
-    /// session's first tick at the left edge, now at the right. The spans are
-    /// what make the bar navigable — every column can say which minutes it
-    /// stands for.
-    pub fn slices(&self, width: usize) -> Vec<Slice> {
+    /// The columns divide the record evenly, and there are always exactly
+    /// `width` of them: the bar spans the row it is given from the very first
+    /// second of the session, and both ends stay anchored — session start at
+    /// the left edge, now at the right — at every age.
+    ///
+    /// A session shorter than the row is *stretched* across it rather than
+    /// drawn short and padded. That keeps one rule true the whole way through
+    /// ("this row is the session, left to right") instead of having the bar
+    /// grow in from the right for the first two minutes and then start
+    /// compressing. Several columns simply share a cell early on, and each of
+    /// them reports that cell's real span, so nothing is invented.
+    pub fn slices(&self, width: usize, scope: BarScope) -> Vec<Slice> {
         let n = self.cells.len();
         if width == 0 || n == 0 {
             return Vec::new();
         }
-        let src: Vec<Cell> = self.cells.iter().copied().collect();
-        let bounds: Vec<(usize, usize)> = if n <= width {
-            (0..n).map(|i| (i, i + 1)).collect()
-        } else {
-            (0..width)
-                .map(|i| {
-                    let from = i * n / width;
-                    (from, ((i + 1) * n / width).max(from + 1))
-                })
-                .collect()
-        };
+        let src: Vec<Cell> = self.cells.iter().cloned().collect();
         let now = chrono::Utc::now().timestamp();
-        bounds
-            .iter()
-            .enumerate()
-            .map(|(i, (a, b))| {
-                let group = &src[*a..*b];
-                let worst = group
-                    .iter()
-                    .max_by_key(|c| c.state)
-                    .copied()
-                    .unwrap_or(group[0]);
+        // A cell runs until the next one opens; the newest runs up to now.
+        let end_of = |i: usize| src.get(i + 1).map_or(now, |c: &Cell| c.from);
+        // Zoomed, the row draws only the cells overlapping the window — at
+        // least one, so a window over a quiet stretch still shows what was
+        // there rather than going blank.
+        let (lo, hi) = match scope {
+            BarScope::Session => (0, n),
+            BarScope::Window { from, to } => {
+                let lo = (0..n).find(|i| end_of(*i) > from).unwrap_or(n - 1);
+                let hi = (lo..n).find(|i| src[*i].from >= to).unwrap_or(n);
+                (lo, hi.max(lo + 1))
+            }
+        };
+        let n = hi - lo;
+        (0..width)
+            .map(|i| {
+                let a = lo + i * n / width;
+                let b = (lo + ((i + 1) * n / width)).max(a + 1).min(hi);
+                let group = &src[a..b];
+                let worst = group.iter().max_by_key(|c| c.state).unwrap_or(&group[0]);
                 Slice {
                     state: worst.state,
-                    cause: worst.cause,
+                    mark: worst.mark.clone(),
                     from: group[0].from,
-                    // A column ends where the next one starts; the newest ends
-                    // at now, which is what it is still filling towards.
-                    to: bounds.get(i + 1).map_or(now, |(next, _)| src[*next].from),
+                    // The span is the *cells'*, not the column's: several
+                    // columns sharing a cell all report the seconds that cell
+                    // actually covers, and the newest runs up to now.
+                    to: src.get(b).map_or(now, |next| next.from),
                 }
             })
             .collect()
+    }
+
+    /// A track with cells at chosen times: `(state, seconds after `start`)`.
+    ///
+    /// Tests need a session that spans hours, and a test cannot wait for one
+    /// — every `record` inside a test lands in the same wall-clock second, so
+    /// the spans (and everything drawn from them: ticks, the readout, the
+    /// zoom) would all collapse to zero.
+    #[cfg(test)]
+    pub fn seeded(start: i64, cells: &[(SessionState, i64)]) -> Self {
+        let mut t = Self::default();
+        for (state, offset) in cells {
+            t.cells.push_back(Cell {
+                state: *state,
+                from: start + offset,
+                mark: None,
+            });
+        }
+        t
     }
 
     /// Ticks recorded in total — cells times what each one covers, plus the
@@ -221,7 +320,10 @@ mod tests {
     /// The drawn states at a width — what the bar renders, without the
     /// spans.
     fn drawn(t: &SessionTrack, width: usize) -> Vec<SessionState> {
-        t.slices(width).into_iter().map(|s| s.state).collect()
+        t.slices(width, BarScope::Session)
+            .into_iter()
+            .map(|s| s.state)
+            .collect()
     }
 
     fn track(states: &[SessionState]) -> SessionTrack {
@@ -236,8 +338,17 @@ mod tests {
     fn a_short_session_is_one_cell_per_tick() {
         use SessionState::*;
         let t = track(&[Healthy, Healthy, Down, Healthy]);
-        assert_eq!(drawn(&t, 80), vec![Healthy, Healthy, Down, Healthy]);
+        assert_eq!(drawn(&t, 4), vec![Healthy, Healthy, Down, Healthy]);
         assert_eq!(t.ticks(), 4);
+
+        // Asked for a wider row, the same four seconds stretch across all of
+        // it — the bar is always the session, edge to edge — and the shape
+        // survives the stretch.
+        let wide = drawn(&t, 80);
+        assert_eq!(wide.len(), 80);
+        assert_eq!(wide[0], Healthy);
+        assert_eq!(*wide.last().unwrap(), Healthy);
+        assert_eq!(wide.iter().filter(|c| **c == Down).count(), 20, "a quarter");
     }
 
     /// The whole point: a long session keeps its full span. Cells fold in
@@ -278,6 +389,29 @@ mod tests {
         assert_eq!(t.ticks(), (CELLS * 4 + 7) as u64);
     }
 
+    /// The VPN case, reported from a real session: switching NordVPN on reset
+    /// every probe window, the verdict went back to "measuring…" while they
+    /// refilled, and the bar painted that as a run of dark cells — which read
+    /// first as the bar having reset itself, then as damage. Nothing about
+    /// the connection had changed; octomon had lost its own footing for ten
+    /// seconds.
+    #[test]
+    fn a_network_change_does_not_punch_a_hole_in_the_bar() {
+        use SessionState::*;
+        let mut states = vec![Healthy; 60];
+        // The switch: ~12 s of no opinion, then healthy on the new path.
+        states.extend(std::iter::repeat_n(Unknown, 12));
+        states.extend(std::iter::repeat_n(Healthy, 60));
+        let t = track(&states);
+
+        let drawn = drawn(&t, states.len());
+        assert!(
+            !drawn.contains(&Unknown),
+            "the re-settling shows as nothing at all: {drawn:?}"
+        );
+        assert_eq!(t.ticks(), states.len() as u64, "the time is still counted");
+    }
+
     /// "now" belongs at the right edge: downsampling must not shift the
     /// newest cell inwards to make the groups come out even.
     #[test]
@@ -293,9 +427,38 @@ mod tests {
     }
 
     #[test]
-    fn an_unmeasured_start_reads_as_unknown_not_healthy() {
+    /// The seconds before the analysis can say anything are not the bar's
+    /// opening state: recorded, they left a grey stub pinned to the left edge
+    /// for the rest of the session, which reads as a rendering fault rather
+    /// than as "measuring". Once the bar has started, an unmeasured stretch
+    /// is real and stays.
+    fn the_bar_starts_when_the_measuring_does() {
         use SessionState::*;
         let t = track(&[Unknown, Unknown, Healthy]);
-        assert_eq!(drawn(&t, 3), vec![Unknown, Unknown, Healthy]);
+        assert_eq!(drawn(&t, 1), vec![Healthy], "the stub never lands");
+        assert_eq!(t.ticks(), 1);
+
+        // A short spell of not-knowing is octomon re-establishing itself
+        // after a network change, not the connection changing: the bar holds
+        // what it had rather than punching a hole in itself.
+        let blip = track(&[Healthy, Unknown, Healthy]);
+        assert_eq!(drawn(&blip, 3), vec![Healthy, Healthy, Healthy]);
+
+        // A sustained one is real, and gets drawn.
+        let mut long = vec![(Healthy)];
+        long.extend(std::iter::repeat_n(
+            Unknown,
+            UNMEASURED_GRACE_TICKS as usize + 5,
+        ));
+        long.push(Healthy);
+        let t = track(&long);
+        let states = drawn(&t, long.len());
+        assert!(
+            states.contains(&Unknown),
+            "a gap past the grace is a fact about the session: {states:?}"
+        );
+        // …and only past it: the first seconds still read as before.
+        assert_eq!(states[1], Healthy, "the grace holds the previous state");
+        assert_eq!(*states.last().unwrap(), Healthy, "and it recovers");
     }
 }

@@ -1572,6 +1572,9 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         s.events_scroll = 0;
                         Overlay::Events
                     };
+                    // [e] is "show me the timeline", not "show me that
+                    // stretch": the focus belongs to the trip from the bar.
+                    s.events_focus = None;
                 }
                 KeyCode::Char('L') => {
                     s.overlay = if s.overlay == Overlay::Locations {
@@ -1947,46 +1950,116 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 // so nothing is stolen from the panels unless it is up.
                 KeyCode::Char('b') => {
                     let (tw, th) = crossterm::terminal::size().unwrap_or((80, 24));
-                    s.bar_cursor = match s.bar_cursor {
+                    s.bar_cursor_at = match s.bar_cursor_at {
                         Some(_) => None,
                         // Opens on "now", the end everyone reads from.
-                        None => ui::bar_cursor_cap(&s, tw, th),
+                        None => ui::bar_cursor_cap(&s, tw, th)
+                            .and_then(|cap| ui::bar_anchor_at(&s, tw, cap)),
                     };
                 }
-                KeyCode::Esc if s.bar_cursor.is_some() => s.bar_cursor = None,
-                KeyCode::Left | KeyCode::Right | KeyCode::PageUp | KeyCode::PageDown
-                    if s.bar_cursor.is_some() =>
-                {
+                // Leaving the cursor puts the bar back to the whole session:
+                // the zoom is a lens held while inspecting, never a mode left
+                // behind for the next person to misread.
+                KeyCode::Esc if s.bar_cursor_at.is_some() => {
+                    s.bar_cursor_at = None;
+                    s.bar_scope = crate::session::BarScope::Session;
+                }
+                // Skip to the next change of colour. ⌃←/⌃→ is the word-jump
+                // the hands know, but plenty of terminals (and tmux without
+                // xterm-keys) never deliver a modified arrow at all, so [ and
+                // ] do the same thing and always arrive.
+                KeyCode::Left | KeyCode::Right if ctrl && s.bar_cursor_at.is_some() => {
+                    let (tw, _) = crossterm::terminal::size().unwrap_or((80, 24));
+                    let at = s.bar_cursor_at.unwrap_or_default();
+                    s.bar_cursor_at = Some(ui::bar_jump(&s, tw, at, key.code == KeyCode::Right));
+                }
+                KeyCode::Char('[') | KeyCode::Char(']') if s.bar_cursor_at.is_some() => {
+                    let (tw, _) = crossterm::terminal::size().unwrap_or((80, 24));
+                    let at = s.bar_cursor_at.unwrap_or_default();
+                    s.bar_cursor_at =
+                        Some(ui::bar_jump(&s, tw, at, key.code == KeyCode::Char(']')));
+                }
+                KeyCode::Home if s.bar_cursor_at.is_some() => {
+                    let (tw, _) = crossterm::terminal::size().unwrap_or((80, 24));
+                    s.bar_cursor_at = ui::bar_anchor_at(&s, tw, 0);
+                }
+                KeyCode::End if s.bar_cursor_at.is_some() => {
                     let (tw, th) = crossterm::terminal::size().unwrap_or((80, 24));
-                    // Every move clamps against the bar as it is drawn now: a
-                    // terminal resized since [b] was pressed has a different
-                    // number of columns, and the cursor must land on one.
-                    let cap = ui::bar_cursor_cap(&s, tw, th).unwrap_or(0);
-                    let at = s.bar_cursor.unwrap_or(cap).min(cap);
+                    s.bar_cursor_at = ui::bar_cursor_cap(&s, tw, th)
+                        .and_then(|cap| ui::bar_anchor_at(&s, tw, cap));
+                }
+                // [z] zooms the bar to the hour around the cursor's moment,
+                // and again zooms back out. Anchored on the cursor rather
+                // than on "now", so the question it answers is "what happened
+                // around *that*", of which "the last hour" is just the case
+                // where the cursor is at the right-hand end.
+                KeyCode::Char('z') if s.bar_cursor_at.is_some() => {
+                    let (tw, _) = crossterm::terminal::size().unwrap_or((80, 24));
+                    let at = s.bar_cursor_at.unwrap_or_default();
+                    s.bar_scope = match s.bar_scope {
+                        crate::session::BarScope::Window { .. } => {
+                            crate::session::BarScope::Session
+                        }
+                        crate::session::BarScope::Session => {
+                            let half = crate::session::ZOOM_HALF_SPAN;
+                            // Centred on the middle of the cursor's cell, so a
+                            // coarse cell zooms to the time it stands for
+                            // rather than to its leading edge.
+                            let centre = ui::session_slices(&s, tw)
+                                .get(ui::bar_column_at(&s, tw, at))
+                                .map_or(at, |c| c.from + (c.to - c.from) / 2);
+                            crate::session::BarScope::Window {
+                                from: centre - half,
+                                to: centre + half,
+                            }
+                        }
+                    };
+                    // The cursor is a moment, so it needs nothing doing to it
+                    // here: the same second stays under it on the way in and
+                    // on the way back out.
+                }
+                KeyCode::Left | KeyCode::Right | KeyCode::PageUp | KeyCode::PageDown
+                    if s.bar_cursor_at.is_some() =>
+                {
+                    let (tw, _) = crossterm::terminal::size().unwrap_or((80, 24));
+                    let at = s.bar_cursor_at.unwrap_or_default();
                     let step = if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
                         10
                     } else {
                         1
                     };
-                    s.bar_cursor = Some(match key.code {
-                        KeyCode::Left | KeyCode::PageUp => at.saturating_sub(step),
-                        _ => (at + step).min(cap),
-                    });
+                    let forward = matches!(key.code, KeyCode::Right | KeyCode::PageDown);
+                    s.bar_cursor_at = Some(ui::bar_step(&s, tw, at, forward, step));
                 }
                 // The bar says when something happened; the timeline says
                 // what. Enter carries the cursor's moment straight into it.
-                KeyCode::Enter if s.bar_cursor.is_some() => {
+                KeyCode::Enter if s.bar_cursor_at.is_some() => {
                     let (tw, _) = crossterm::terminal::size().unwrap_or((80, 24));
                     let slices = ui::session_slices(&s, tw);
-                    let at = s
-                        .bar_cursor
-                        .unwrap_or(0)
-                        .min(slices.len().saturating_sub(1));
+                    let at = ui::bar_column_at(&s, tw, s.bar_cursor_at.unwrap_or_default());
                     if let Some(slice) = slices.get(at) {
-                        // Scroll so the newest event at or before this column
-                        // sits at the top of the list.
-                        s.events_scroll = s.events.iter().filter(|e| e.at > slice.to).count();
-                        s.bar_cursor = None;
+                        // A coloured stretch opens on the *episode* behind it,
+                        // not on the seconds under the cursor: a two-second
+                        // stretch of yellow holds no entries of its own, since
+                        // the finding raised before it and cleared after it.
+                        // The point of pressing Enter there is that finding.
+                        let focus = app::EventsFocus {
+                            from: slice.mark.as_ref().map_or(slice.from, |m| m.since),
+                            to: slice.to,
+                            state: slice.state,
+                            mark: slice.mark.clone(),
+                        };
+                        // Scrolled so the raise sits a few lines down: what
+                        // came after it is above, the run-up below.
+                        s.events_scroll = s
+                            .events
+                            .iter()
+                            .filter(|e| e.at > focus.from)
+                            .count()
+                            .saturating_sub(3);
+                        s.events_focus = Some(focus);
+                        s.bar_cursor_at = None;
+                        s.bar_scope = crate::session::BarScope::Session;
                         s.overlay = Overlay::Events;
                     }
                 }
@@ -2025,9 +2098,11 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     }
                     s.overlay = Overlay::Egress;
                 }
-                // 'e' opens the session timeline.
+                // 'e' opens the session timeline — the whole of it, so any
+                // stretch the bar had asked about is no longer the subject.
                 KeyCode::Char('e') => {
                     s.events_scroll = 0;
+                    s.events_focus = None;
                     s.overlay = Overlay::Events;
                 }
                 KeyCode::Tab => s.focus = next_panel(s.focus),

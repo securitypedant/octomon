@@ -62,13 +62,16 @@ What it looks for beyond the graphs:
   here" and "3 outages this week, clustering 20–23h".
 - **Event timeline** (`e`) and a **network history** of every join, roam,
   address, route and VPN change.
-- **The whole session in one bar** — the strip above the analysis line grades
-  every slice of the run from launch to now, oldest at the left: green fine,
+- **The session bar** — the row above the analysis line grades every slice of
+  the run from launch to now, oldest at the left: green fine,
   yellow degraded, red down. Cells fold as the session grows, so a nine-hour
   flight fits the same row a five-minute check does, and a one-minute outage
-  three hours ago is still visible. Press **`b`** to walk it: each column says
-  which minutes it covers and what was wrong with them, and **`Enter`** opens
-  the timeline at that moment.
+  three hours ago is still visible. Wall-clock boundaries are marked by
+  shading their column rather than drawing over it, so the grid is regular
+  and nothing it touches is hidden. Press **`b`** to walk it:
+  each column says which minutes it covers and what was wrong with them,
+  **`[`** and **`]`** skip to the next change, **`z`** zooms to the hour around
+  the cursor, and **`Enter`** opens the timeline at that moment.
 - **What else had just changed** — a finding that raises seconds after a Wi-Fi
   roam, a VPN coming up or the network moving says so ("`▲ latency degraded ·
   3s after a Wi-Fi roam`"), on the timeline, in the analysis and in alerts.

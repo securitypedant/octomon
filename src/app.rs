@@ -1311,6 +1311,28 @@ impl ProxyConfig {
 /// machine is attached changed. The events overlay has the one-line version;
 /// this keeps the before/after detail so "what was the signal when it roamed"
 /// or "which address did we have on the old network" is answerable later.
+/// What the session bar was showing when the timeline was opened from it.
+///
+/// Carries the bar's *verdict*, not just the times, because the two views
+/// answer different questions: the bar colours every second by the state
+/// standing at the time, while the timeline records only the moments that
+/// state changed. A stretch can therefore be solidly yellow and contain no
+/// entries at all — the finding raised before it and cleared after it — and
+/// without this the overlay could only say "nothing was recorded", which
+/// reads as a contradiction of the colour that sent you there.
+#[derive(Clone, Debug)]
+pub struct EventsFocus {
+    /// The span the list highlights, in unix seconds: the whole episode when
+    /// the stretch had a finding behind it — because "take me to that
+    /// problem" means the problem, not the two seconds the cursor happened to
+    /// be on — and the stretch itself when it did not.
+    pub from: i64,
+    pub to: i64,
+    pub state: crate::session::SessionState,
+    /// The finding the bar was showing, straight from the cell.
+    pub mark: Option<crate::session::Mark>,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NetChange {
     /// Unix timestamp (seconds).
@@ -2322,7 +2344,21 @@ impl EventItem {
 }
 
 /// Bounded timeline length; older events fall off the front.
-pub const EVENTS_CAP: usize = 500;
+///
+/// Sized against the session bar, which now points into this list: pressing
+/// Enter on a stretch of colour opens the episode behind it, and an episode
+/// whose entries have aged out can only be named, not read. The bar folds
+/// rather than forgets, so the timeline should reach as far back as it
+/// practically can. At a few dozen entries an hour this covers days; on a
+/// network flapping badly enough to fill it, the per-network incident history
+/// and `l` recording are the durable record.
+///
+/// The cost is memory only — a one-line message each, so a few hundred
+/// kilobytes at this size. Drawing reads just the visible rows, and the
+/// render path holds the state under its lock rather than copying it; the one
+/// full clone per frame is `--demo`, which exists for screen recording and is
+/// not performance-critical.
+pub const EVENTS_CAP: usize = 1000;
 
 /// An in-progress session recording.
 #[derive(Clone)]
@@ -2529,10 +2565,21 @@ pub struct AppState {
     /// The same diagnosis, one coarse cell per slice of time, for the whole
     /// session — the strip above the footer.
     pub session: crate::session::SessionTrack,
-    /// Which column of the session bar the [b] cursor is on, if it is up.
-    /// Indexes the bar as drawn, so it is clamped against the terminal width
-    /// on every use.
-    pub bar_cursor: Option<usize>,
+    /// How much of the session the bar draws — the whole run, or the hour
+    /// around the moment the cursor was on when [z] was pressed.
+    pub bar_scope: crate::session::BarScope,
+    /// The stretch of session the events overlay was opened *for*, when it
+    /// was opened from the session bar. The overlay says which stretch it is
+    /// showing, how the bar read it, and marks the entries inside it;
+    /// without this, arriving from the bar drops the reader into a list with
+    /// no indication of why it is scrolled where it is.
+    pub events_focus: Option<EventsFocus>,
+    /// The *moment* the session bar's [b] cursor is on (unix seconds), if it
+    /// is up. Deliberately not a column: the bar shifts and recompresses
+    /// under the cursor as the session grows, so a column index would quietly
+    /// come to mean a different time than the one it was put on. The column
+    /// is derived at draw time from this.
+    pub bar_cursor_at: Option<i64>,
     /// This network's learned baseline (present once the network is
     /// fingerprinted; freshly created when the network is new).
     pub baseline: Option<crate::baseline::Baseline>,
@@ -2734,7 +2781,9 @@ impl AppState {
             overlay: Overlay::None,
             verdict: crate::verdict::VerdictState::default(),
             session: crate::session::SessionTrack::default(),
-            bar_cursor: None,
+            bar_scope: crate::session::BarScope::default(),
+            events_focus: None,
+            bar_cursor_at: None,
             link_lost: false,
             baseline: None,
             baseline_key: None,
@@ -2793,7 +2842,9 @@ impl AppState {
         self.zoom_behind = live.zoom_behind;
         // The bar the cursor walks is the frozen one, but which column it is
         // on is the user's doing and follows them across a pause.
-        self.bar_cursor = live.bar_cursor;
+        self.bar_cursor_at = live.bar_cursor_at;
+        self.events_focus = live.events_focus.clone();
+        self.bar_scope = live.bar_scope;
         self.proc_details = live.proc_details.clone();
         self.pinned_procs = live.pinned_procs.clone();
         self.pinned_remotes = live.pinned_remotes.clone();
