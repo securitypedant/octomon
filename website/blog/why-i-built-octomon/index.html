@@ -8,6 +8,7 @@
 <meta name="author" content="Simon Thorpe">
 <link rel="canonical" href="https://octomon.dev/blog/why-i-built-octomon/">
 <link rel="alternate" type="application/rss+xml" title="octomon blog" href="/blog/feed.xml">
+<link rel="alternate" type="application/rss+xml" title="octomon releases" href="/changelog.xml">
 <link rel="icon" type="image/png" sizes="32x32" href="/images/octomon-logo-32.png">
 <link rel="icon" type="image/png" sizes="512x512" href="/images/octomon-icon-tile.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/images/octomon-icon-tile.png">
@@ -236,11 +237,16 @@
       border-radius: var(--octo-radius-chip);
     }
     nav.links { display: none; }
-    /* air between the mark/burger row and the rule beneath it */
-    .nav { padding-bottom: 24px; }
+    /* the closed nav is one row: the mark left, the burger right, both
+       centred in a band with equal air above and below. The open menu gets
+       its bottom air from the checked links rule below instead. */
+    .nav { padding: 12px 0; }
+    /* the open menu lines up with the mark above it, which the tablet rule
+       has already nudged 12px in from the wrap's edge; without this the links
+       sit further left than the logo they hang under */
     .menu-toggle:checked ~ nav.links {
       display: flex; flex-basis: 100%; flex-direction: column;
-      gap: 12px; padding: 8px 2px 12px; font-size: 1rem;
+      gap: 12px; padding: 8px 2px 12px 12px; font-size: 1rem;
     }
     section { padding: 44px 0; }
     .pagehead { padding: 32px 0 22px; }
@@ -323,6 +329,7 @@
       <a href="/#features">features</a>
       <a href="/#video">video</a>
       <a href="/blog/">blog</a>
+      <a href="/changelog">changelog</a>
       <a href="/understand">faq</a>
       <a href="/understand#glossary">glossary</a>
       <a href="/privacy">privacy</a>
@@ -480,6 +487,7 @@
   <div class="wrap">
     <span>© 2025–2026 Simon Thorpe · MIT or Apache-2.0</span>
     <a href="/blog/">blog</a>
+    <a href="/changelog">changelog</a>
     <a href="/privacy">privacy</a>
     <a href="https://github.com/securitypedant/octomon">github.com/securitypedant/octomon</a>
     <a href="https://crates.io/crates/octomon">crates.io/crates/octomon</a>

@@ -12,6 +12,12 @@
     <loc>https://octomon.dev/privacy</loc>
     <lastmod>2026-08-26</lastmod>
   </url>
+  <!-- changelog:start -->
+  <url>
+    <loc>https://octomon.dev/changelog</loc>
+    <lastmod>2026-08-30</lastmod>
+  </url>
+  <!-- changelog:end -->
   <!-- blog:start -->
   <url>
     <loc>https://octomon.dev/blog/</loc>

@@ -24,8 +24,8 @@ function versionOf(ua) {
 
 // The call's reason: three constant labels, identical across the whole
 // fleet, so they identify nothing — but refresh calls tick every 15 minutes,
-// which lets the /privacy graph estimate running instances without any
-// identifier (refreshes per day ÷ 96 ≈ average octomons alive that day).
+// which lets the /privacy graph estimate how much octomon ran without any
+// identifier (refreshes per day ÷ 4 ≈ hours of octomon running that day).
 const WHYS = new Set(["start", "netchange", "refresh"]);
 
 // The colo's own city ("MIA" → "Miami"): a snapshot of Cloudflare's PoP

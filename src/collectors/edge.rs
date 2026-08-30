@@ -15,7 +15,8 @@ use crate::config::Config;
 
 /// Refresh cadence between network changes: the answer only moves when the
 /// path does, so a slow tick is plenty — and it is what makes the public
-/// request-count graph on /privacy interpretable (calls/hour ≈ 4× fleet).
+/// request-count graph on /privacy interpretable (4 refresh calls ≈ 1 hour of
+/// octomon running).
 const REFRESH: Duration = Duration::from_secs(15 * 60);
 
 pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config, changed: Arc<Notify>) {
@@ -38,8 +39,9 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config, changed: Arc<Notify>)
     // Each call names its reason with one of three constant labels — every
     // octomon in the world sends the identical strings, so the label links
     // nothing to anyone, but it lets the /privacy page turn call counts into
-    // an honest fleet estimate: refreshes tick every 15 minutes, so
-    // refresh-calls ÷ 96 ≈ instances running that day, no identifiers needed.
+    // an honest usage estimate: refreshes tick every 15 minutes, so
+    // refresh-calls ÷ 4 ≈ hours of octomon running that day, no identifiers
+    // needed.
     let mut why = "start";
     loop {
         // A failed refresh keeps the last answer — stale edge facts beat

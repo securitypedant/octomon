@@ -3,11 +3,14 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Build tooling for octomon.dev. The site itself is static; this only renders website/blog/*/index.md to HTML.",
+  "description": "Build tooling for octomon.dev. The site itself is static; this only renders website/blog/*/index.md and website/changelog.md to HTML.",
   "scripts": {
+    "dev": "node tools/serve.mjs",
+    "site": "node tools/blog.mjs && node tools/changelog.mjs",
     "blog": "node tools/blog.mjs",
     "blog:watch": "node tools/blog.mjs --watch",
-    "deploy": "node tools/blog.mjs && wrangler deploy"
+    "changelog": "node tools/changelog.mjs",
+    "deploy": "npm run site && wrangler deploy"
   },
   "devDependencies": {
     "marked": "^15.0.7"

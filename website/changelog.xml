@@ -1,0 +1,570 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<channel>
+  <title>octomon releases</title>
+  <link>https://octomon.dev/changelog</link>
+  <atom:link href="https://octomon.dev/changelog.xml" rel="self" type="application/rss+xml"/>
+  <description>Every octomon release, newest first, with what changed and why.</description>
+  <language>en</language>
+  <item>
+    <title>octomon 0.10.1</title>
+    <link>https://octomon.dev/changelog#v0.10.1</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.10.1</guid>
+    <pubDate>Sun, 30 Aug 2026 00:00:00 GMT</pubDate>
+    <description>A release of nothing but the session bar.</description>
+    <content:encoded><![CDATA[<p>A release of nothing but the session bar.</p>
+<ul>
+<li>The bar is the whole row at every age: stretched while the session is younger than the terminal is wide, rather than growing in from the right, and with no gray stub at the left for the seconds before the analysis can say anything.</li>
+<li>The cursor holds a moment, not a column. The bar shifts and recompresses every second the session grows, so a column index came to point at different seconds than the ones it was put on. It also covers its whole cell, steps by cell, and keeps its place through a zoom.</li>
+<li>Getting around: <code>[</code> and <code>]</code> jump to the next change of color, Home and End reach the session&#39;s start and now, and <code>z</code> zooms to the hour around the cursor. &quot;The last hour&quot; is then just zooming at the right-hand end, with no second mode to explain.</li>
+<li>Enter opens the episode, not the seconds under the cursor. The bar grades every second by the state standing at the time, while the timeline records only the moments that state changed, so asking a solidly amber stretch for details used to produce &quot;nothing was recorded here&quot;. Each cell now keeps the finding behind it. The timeline cap rose to 1000 entries.</li>
+<li>Switching a VPN on no longer punches holes in the bar. That resets every probe window, and those seconds are octomon re-establishing its own footing, not the connection failing: the bar holds its state through them and only draws a gap once one outlasts the settling.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.10.0</title>
+    <link>https://octomon.dev/changelog#v0.10.0</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.10.0</guid>
+    <pubDate>Sat, 29 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Alerts for when nobody is watching, and a session bar you can walk.</description>
+    <content:encoded><![CDATA[<p>Alerts for when nobody is watching, and a session bar you can walk.</p>
+<ul>
+<li><code>--watch</code> runs headless until Ctrl-C or SIGTERM, printing each finding as it raises and again when it ends.</li>
+<li><code>--alert</code> notifies the desktop, <code>--alert-cmd</code> runs a command, <code>--alert-url</code> POSTs JSON. Any combination, in watch mode or under the dashboard, persisted under <code>[alert]</code> in the config. Alerts fire from the analysis engine&#39;s own raise and clear transitions, so they inherit its hysteresis and flap grace. The payload reaches a command through the environment and a notifier through argv, never substituted into a script: a finding&#39;s summary can carry an SSID this machine did not choose.</li>
+<li>A finding that raises seconds after a Wi-Fi roam, a VPN coming up or the network moving now says so, on the timeline, in the analysis and in alerts. Correlation stated as correlation: when it started, not why.</li>
+<li>The latency graph stops lying during an outage. History held only successful probes, so the line froze on the last good reading and then spliced the two sides of an outage together until the gap had no width at all. Losses now hold their slot: the line breaks, the floor goes red for as long as nothing answers, and the title says how long. The same fix reaches the hop traces, the DNS traces and the web strip.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.9.8</title>
+    <link>https://octomon.dev/changelog#v0.9.8</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.9.8</guid>
+    <pubDate>Fri, 28 Aug 2026 00:00:00 GMT</pubDate>
+    <description>The command line reaches the whole config, `--bundle` for scripts, and a `--help` you can read.</description>
+    <content:encoded><![CDATA[<p>The command line reaches the whole config, <code>--bundle</code> for scripts, and a <code>--help</code> you can read.</p>
+<ul>
+<li><code>--bundle [PATH]</code> writes the <code>Shift+D</code> support zip from a script. It observes on the same window <code>--doctor</code> uses, so the capture holds real measurements rather than an empty session, then prints the path and nothing else, which is what makes <code>zip=$(octomon --bundle)</code> work.</li>
+<li><code>--paths</code> prints where the config, data folder, error log and bundles live. That is the question behind every &quot;edit your config&quot; and &quot;send me errors.log&quot;, and the answer moves with the platform and the XDG variables.</li>
+<li>New overrides: <code>--config</code> for a second profile, <code>--iperf3 NAME=host[:port]</code> for a run-only server, <code>--speedtest-provider</code>, <code>--ping-timeout</code>, <code>--bandwidth-units</code>, plus <code>--no-discovery</code> and <code>--no-edge</code>, which the README already documented as things you could only do by editing a file.</li>
+<li>A config named with <code>--config</code> is loaded differently from the default one: a missing file is still created, but a broken one is fatal rather than a silent fall back to defaults, which would look exactly like the file had been honored.</li>
+<li><code>--help</code> advertised 15 options against a config file with 27 settings. It now covers all of them, grouped into Modes, Report options, Overrides, Turn things off and Screen recording, because a flat list of 22 is a wall.</li>
+<li>The DNS honesty check gets a website FAQ entry: why octomon looks up a name that cannot exist, and why a hijacking resolver is invisible to every other measurement.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.9.7</title>
+    <link>https://octomon.dev/changelog#v0.9.7</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.9.7</guid>
+    <pubDate>Fri, 28 Aug 2026 00:00:00 GMT</pubDate>
+    <description>A lint fix, so the tagged source passes its own gate on Windows.</description>
+    <content:encoded><![CDATA[<p>A lint fix, so the tagged source passes its own gate on Windows.</p>
+<ul>
+<li><code>-D warnings</code> failed on both Windows runners: the mode block is <code>cfg</code>&#39;d to unix, so the binding it mutates is never mutated there and <code>unused_mut</code> fires. The 0.9.6 binaries are unaffected, since a build is not a lint, but the tagged source did not pass CI, so this supersedes it rather than leaving that on crates.io.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.9.6</title>
+    <link>https://octomon.dev/changelog#v0.9.6</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.9.6</guid>
+    <pubDate>Fri, 28 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Security and privacy hardening: everything octomon stores is now owner-only.</description>
+    <content:encoded><![CDATA[<p>Security and privacy hardening: everything octomon stores is now owner-only.</p>
+<ul>
+<li>Every file octomon writes describes someone&#39;s network, so all of it is mode 0600 in 0700 directories: config, baselines, both histories, whois.log, errors.log, the session CSVs, the event export and the <code>Shift+D</code> bundle. Files an older version wrote under the umask are tightened at startup, since a creation mode does nothing for what is already on disk.</li>
+<li><code>--demo</code> and <code>--demo-mac</code> drop process command lines. Both modes exist so a screen can be recorded, and argv is the one thing on show that routinely carries a secret outright. The path and user stay: they answer &quot;what is this?&quot; and name nothing.</li>
+<li>CSV fields starting with <code>=</code>, <code>+</code>, <code>-</code> or <code>@</code> are defused. A process name comes from whatever is running and an SSID from whoever owns the nearest access point, so a recording opened in a spreadsheet could otherwise run a formula that arrived in a beacon.</li>
+<li>whois.log is bounded: trimmed at 8 MB back to 6 MB on entry boundaries, which is tens of thousands of lookups. Cutting a byte count off the end lands mid-character on UTF-8 registry records, so the cut walks forward to a boundary first.</li>
+<li>The doctor report masks the home directory. The error log&#39;s &quot;full log:&quot; line and events naming an export had been dragging the account name into output advertised as safe to paste into a forum.</li>
+<li>Discovery re-checks the network sequence after every await, not only after its backoff sleeps: a traceroute started on the old network could otherwise land its hops minutes later, after the new network&#39;s walk had cleared them. A flapping network is now bounded to one live task instead of one per flap.</li>
+<li>The README is a third shorter. The shortcut table drops to essentials and points at <code>?</code>, which is exhaustive and cannot drift: it had gone stale on the pause key, the stats windows and a binding that no longer exists.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.9.5</title>
+    <link>https://octomon.dev/changelog#v0.9.5</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.9.5</guid>
+    <pubDate>Thu, 27 Aug 2026 00:00:00 GMT</pubDate>
+    <description>The `/` talkers filter is per-table.</description>
+    <content:encoded><![CDATA[<p>The <code>/</code> talkers filter is per-table.</p>
+<ul>
+<li>Filtering processes no longer narrows the remotes, and vice versa.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.9.4</title>
+    <link>https://octomon.dev/changelog#v0.9.4</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.9.4</guid>
+    <pubDate>Thu, 27 Aug 2026 00:00:00 GMT</pubDate>
+    <description>A talkers filter, a sortable split, and dates in the locations overlay.</description>
+    <content:encoded><![CDATA[<p>A talkers filter, a sortable split, and dates in the locations overlay.</p>
+<ul>
+<li><code>/</code> filters both talkers tables live (process name or pid, remote address, port or process). Enter keeps the filter, Esc clears it. The panel title carries the filter, an empty match says so, and the support bundle&#39;s CSVs deliberately ignore it.</li>
+<li>The zoom&#39;s <code>now↑</code> column joins the sort cursor&#39;s walk, which had skipped it, and a combined <code>now↕</code> column brings the compact table&#39;s total rate back, sortable like the rest.</li>
+<li>The locations overlay dates every entry, in the slot &quot;current&quot; occupies on the active network.</li>
+<li>A paused session syncs the parked sort, column, zoom view and filter, so those keys respond while the display is frozen.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.9.3</title>
+    <link>https://octomon.dev/changelog#v0.9.3</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.9.3</guid>
+    <pubDate>Thu, 27 Aug 2026 00:00:00 GMT</pubDate>
+    <description>The Network panel's edge row names the colo city.</description>
+    <content:encoded><![CDATA[<p>The Network panel&#39;s edge row names the colo city.</p>
+<ul>
+<li>&quot;MIA (Miami)&quot; was in the analysis but the panel kept the bare code. Both show it now, pinned by a draw test.</li>
+<li>The Homebrew trust step joined the website&#39;s install block.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.9.2</title>
+    <link>https://octomon.dev/changelog#v0.9.2</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.9.2</guid>
+    <pubDate>Thu, 27 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Update mentions, a provider column that fits, TTFB in the glossary.</description>
+    <content:encoded><![CDATA[<p>Update mentions, a provider column that fits, TTFB in the glossary.</p>
+<ul>
+<li><code>/edge</code> now carries the latest released version, and the client mentions it once, on the timeline and in the help title, when a newer build exists. It never acts on it.</li>
+<li>The zoomed speed history gives iPerf3 names a provider column they fit in.</li>
+<li>The website glossary explains TTFB.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.9.1</title>
+    <link>https://octomon.dev/changelog#v0.9.1</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.9.1</guid>
+    <pubDate>Thu, 27 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Speed history in human units, and the first public build of the 0.9.0 work.</description>
+    <content:encoded><![CDATA[<p>Speed history in human units, and the first public build of the 0.9.0 work.</p>
+<ul>
+<li>The history and zoom tables show compact speeds (943M, 1.2G) under bare arrow headers, and the zoom detail line says Gb/s where it earns it. A loopback iPerf3 run no longer prints 111718.8.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.9.0</title>
+    <link>https://octomon.dev/changelog#v0.9.0</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.9.0</guid>
+    <pubDate>Thu, 27 Aug 2026 00:00:00 GMT</pubDate>
+    <description>iPerf3 servers as first-class speed-test providers. Tag and crates.io only: the release build was cancelled before any binary went public, so 0.9.1 above is the first version you could install.</description>
+    <content:encoded><![CDATA[<p>iPerf3 servers as first-class speed-test providers. Tag and crates.io only: the release build was cancelled before any binary went public, so 0.9.1 above is the first version you could install.</p>
+<ul>
+<li>iPerf3 providers: add with <code>I</code> (Name=host[:port]), remove with <code>V</code>, cycle with <code>v</code>, and run against hardware you control. Live rates stream from iperf3&#39;s own per-second interval lines, because interface counters lied whenever the test did not cross the default interface, loopback most of all. Finals read the receiver summary, and every throughput surface adapts its units up to Gb/s.</li>
+<li>Sortable TCP columns and provably aligned dividers in the full-screen quality table, and per-cell grading in the Path table.</li>
+<li>Exact scroll clamping, a routing-table scrollbar, and a tidied locations overlay with readable speeds.</li>
+<li>An isp row, and a colo that names its city (&quot;MIA (Miami)&quot;).</li>
+<li>Available memory drawn over the cpu history.</li>
+<li>A bufferbloat reading no longer votes against minutes of clean evidence.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.8.2</title>
+    <link>https://octomon.dev/changelog#v0.8.2</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.8.2</guid>
+    <pubDate>Wed, 26 Aug 2026 00:00:00 GMT</pubDate>
+    <description>A fleet estimate, with no identifiers.</description>
+    <content:encoded><![CDATA[<p>A fleet estimate, with no identifiers.</p>
+<ul>
+<li>Every <code>/edge</code> call names its reason with one of three constant labels (start, netchange, refresh) that every client sends identically, so the label links nothing to anyone. Refreshes tick every 15 minutes, which turns public call counts into an honest census of how much octomon is running.</li>
+<li>The graph on /privacy draws that over the version bars, with the math stated so anyone can recompute it from the same public data. The worker stores the reason as a second blob and nothing else.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.8.1</title>
+    <link>https://octomon.dev/changelog#v0.8.1</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.8.1</guid>
+    <pubDate>Wed, 26 Aug 2026 00:00:00 GMT</pubDate>
+    <description>The quality panel names both probe families everywhere.</description>
+    <content:encoded><![CDATA[<p>The quality panel names both probe families everywhere.</p>
+<ul>
+<li>The split view&#39;s title always says which family it is showing (<code>· icmp</code> or <code>· tcp :443</code>), the full-screen dual table labels the ICMP group with its own divider to match, and the Path panel says &quot;Path · icmp&quot;.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.8.0</title>
+    <link>https://octomon.dev/changelog#v0.8.0</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.8.0</guid>
+    <pubDate>Wed, 26 Aug 2026 00:00:00 GMT</pubDate>
+    <description>TCP metrics beside ICMP, the /edge check, and a public privacy dashboard.</description>
+    <content:encoded><![CDATA[<p>TCP metrics beside ICMP, the /edge check, and a public privacy dashboard.</p>
+<ul>
+<li>A second probe family: TCP connects to port 443 at ping cadence give last, avg, p95, max, jitter and loss that keep working where ICMP is blackholed. <code>i</code> toggles the split view between families, and a network with no ICMP defaults to TCP, so an Azure VM opens onto numbers instead of dashes. Full screen shows both families side by side, and the max columns yield first on narrow terminals.</li>
+<li>Baselines learn tcp-connect and web-TTFB normals per location, and the performance grade uses TCP while ICMP is blind (&quot;latency 12ms (tcp)&quot;).</li>
+<li>The /edge check: octomon.dev/edge answers with the Cloudflare edge&#39;s view of this connection, meaning the serving PoP, the ISP&#39;s AS, and the edge&#39;s own TCP RTT measurement of the client. It shows as an &quot;edge&quot; row in the Network panel and an analysis check, which also flags a public-IP disagreement. On by default, and <code>edge_check_url = &quot;&quot;</code> never calls it.</li>
+<li>The endpoint stores nothing about callers: no logs, no identifiers. The one thing counted is requests per octomon version family, and that count is published in full at <a href="/privacy">octomon.dev/privacy</a>, the only dashboard that exists.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.7.7</title>
+    <link>https://octomon.dev/changelog#v0.7.7</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.7.7</guid>
+    <pubDate>Wed, 26 Aug 2026 00:00:00 GMT</pubDate>
+    <description>VPN locations know the network underneath, honest gateway labeling, light-mode teal.</description>
+    <content:encoded><![CDATA[<p>VPN locations know the network underneath, honest gateway labeling, light-mode teal.</p>
+<ul>
+<li>A VPN is its own location per underlying network. Split tunnels key the LAN&#39;s identity plus the vendor (&quot;HomeNet via Cloudflare WARP&quot;), and full tunnels find the gatewayed physical interface beneath the tunnel and key on that (&quot;10.90.0.1 via Cloudflare WARP&quot;). Home-via-WARP and hotel-via-WARP have different uplinks and exit PoPs, so they must not share a normal.</li>
+<li>Discovery no longer labels whatever answered at TTL 1 as &quot;gateway&quot;. A hotel whose gateway stays silent puts the first answering hop upstream at a carrier router, and a VPN&#39;s walk starts at the vendor&#39;s edge. Both contradicted the Network panel and fed a stranger&#39;s router into the gateway baseline. TTL 1 earns the label only when it matches the routing-table gateway or sits on the private side.</li>
+<li>Cyan text, focused borders, key hints and the latency series render as dark teal on light backgrounds, because cyan on white was unreadable.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.7.6</title>
+    <link>https://octomon.dev/changelog#v0.7.6</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.7.6</guid>
+    <pubDate>Wed, 26 Aug 2026 00:00:00 GMT</pubDate>
+    <description>WARP on Windows detected, per-VPN locations, the routing table, light terminals.</description>
+    <content:encoded><![CDATA[<p>WARP on Windows detected, per-VPN locations, the routing table, light terminals.</p>
+<ul>
+<li>Tunnel detection now checks the adapter&#39;s friendly name, because Windows reports the GUID as the name and &quot;CloudflareWARP&quot; was invisible, plus a heuristic for a MAC-less unknown adapter carrying a known VPN address. This kills the false &quot;has an address but no gateway, nothing routes off the LAN&quot; finding on WARP.</li>
+<li>Full-tunnel VPNs are their own location, keyed per vendor: one stable &quot;Cloudflare WARP&quot; or &quot;NordVPN&quot; entry across reconnects, exit servers and utun renumbering. Split tunnels keep the physical network&#39;s identity.</li>
+<li>Networks that blackhole ICMP (Azure VMs, some hotels) read as &quot;no ICMP&quot; in the locations overlay instead of an eternal dash, and the quality panel title notes that web works.</li>
+<li><code>Shift+T</code> shows the OS routing table verbatim as a global overlay, and support bundles include routes.txt.</li>
+<li>Light-background terminals: octomon asks the terminal its background (OSC 11, with a COLORFGBG fallback) and swaps the light-on-dark ramp for dark-on-light roles. <code>theme</code> in config and <code>--theme</code> override it.</li>
+<li>Quality-table stats dash out during a total outage instead of freezing at their last green values, and the title says the target is not answering.</li>
+<li>The VPN vendor list grew ExpressVPN, Surfshark, PIA, Windscribe, Zscaler and FortiClient.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.7.5</title>
+    <link>https://octomon.dev/changelog#v0.7.5</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.7.5</guid>
+    <pubDate>Wed, 26 Aug 2026 00:00:00 GMT</pubDate>
+    <description>The octomon mark greets you on the welcome screen.</description>
+    <content:encoded><![CDATA[<p>The octomon mark greets you on the welcome screen.</p>
+<ul>
+<li>Half-block art of the mark (green dome and legs, amber sixth leg, red eyes) sits left of the first-run welcome text on terminals 100 columns and wider. Narrower terminals keep the text-only layout.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.7.4</title>
+    <link>https://octomon.dev/changelog#v0.7.4</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.7.4</guid>
+    <pubDate>Wed, 26 Aug 2026 00:00:00 GMT</pubDate>
+    <description>The VM feedback batch: site-local IPv6, weather baselines, live table colors.</description>
+    <content:encoded><![CDATA[<p>The VM feedback batch: site-local IPv6, weather baselines, live table colors.</p>
+<ul>
+<li><code>fec0::/10</code> (site-local, as used by UTM and QEMU NAT) no longer counts as global IPv6, so there is no false &quot;IPv6 broken&quot; finding and the v6 probe reads n/a.</li>
+<li>Baseline fold gate: findings that skew nothing never block learning, and non-latency Degraded findings standing 10 minutes or more are the location&#39;s weather and fold in full. Poor-but-working connections finally establish a normal.</li>
+<li>The performance grade lets bufferbloat vote only while the speed test is under 5 minutes old, so a stale reading no longer pins &quot;poor&quot; under green rungs.</li>
+<li>The ISP path rung tells the truth when the monitor runs but early hops are ICMP-silent, instead of claiming no monitor exists.</li>
+<li>Loss figures honor the stats window everywhere. The outcome ring held only 100 probes, so every loss read as &quot;last 1m40s&quot; no matter what the header said.</li>
+<li>Per-cell grading in the quality table, and a marker on loss that is draining out of the window after recovery.</li>
+<li>The stats window ladder is 30s / 1m / 5m / 15m, defaulting to 30s.</li>
+<li>winget: portable-zip manifests and a post-release publish workflow.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.7.3</title>
+    <link>https://octomon.dev/changelog#v0.7.3</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.7.3</guid>
+    <pubDate>Tue, 25 Aug 2026 00:00:00 GMT</pubDate>
+    <description>An absolute performance grade, a positional talkers cursor, and network history that persists.</description>
+    <content:encoded><![CDATA[<p>An absolute performance grade, a positional talkers cursor, and network history that persists.</p>
+<ul>
+<li>A performance line in the analysis and the footer: the same measurements graded on an absolute scale, blind to the location&#39;s learned normal. Latency, jitter and loss across anchors, plus speed-test bufferbloat, worst component wins. The <a href="/understand">FAQ</a> explains the thresholds.</li>
+<li>Steady findings keep their finding but drop the &quot;for 3m 12s&quot; timer that just counted uptime on an always-on VPN.</li>
+<li>A network or VPN switch now opens an 8-second settling grace, so losses from the switchover are dropped and loss starts at 0% instead of reading around 30% and trickling down.</li>
+<li>VPN gateways teach the baseline again: the sampler resolves the gateway target the way the analysis does, instead of missing it behind the tunnel&#39;s own routing-table address.</li>
+<li>A jitter column in the target table, with the Path panel&#39;s columns reordered to match. Enter flips sort direction on repeat.</li>
+<li>The talkers cursor is positional: it holds its row while the sort re-ranks, and <code>o</code> follows the row under the cursor.</li>
+<li>Pause moved to <code>Shift+P</code> globally, and <code>p</code> and <code>u</code> pin everywhere including zooms.</li>
+<li>Every address in the Network panel is selectable and whois-able, and whois results append to whois.log in the data directory, riding into support bundles.</li>
+<li>Network history persists across sessions, capped and self-compacting.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.7.2</title>
+    <link>https://octomon.dev/changelog#v0.7.2</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.7.2</guid>
+    <pubDate>Tue, 25 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Ctrl+R erases everything octomon has learned.</description>
+    <content:encoded><![CDATA[<p>Ctrl+R erases everything octomon has learned.</p>
+<ul>
+<li>Ctrl+R, global and available from overlays, erases all config and stored data (the config directory, baselines, incident history, speed tests and session CSVs) after you type ERASE to confirm. In-memory learned state clears immediately, and a restart completes the fresh start.</li>
+<li>Also ships the post-0.7.1 fix: <code>d</code> deletes the selected speed test while the history is zoomed.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.7.1</title>
+    <link>https://octomon.dev/changelog#v0.7.1</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.7.1</guid>
+    <pubDate>Tue, 25 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Analysis learns what normal looks like at each location, and judges against it.</description>
+    <content:encoded><![CDATA[<p>Analysis learns what normal looks like at each location, and judges against it.</p>
+<ul>
+<li>Degraded but usable: an ICMP outage claim folds to a note when the web check proves traffic still flows, which is what plane and hotel Wi-Fi actually look like. That unlocks baseline learning on always-lossy networks.</li>
+<li>Baselines learn loss (gateway and anchor) alongside latency, and loss grading is relative with absolute floors, like RTT.</li>
+<li>The fold gate is refined so incidents only block the numbers they skew: latency-congested or loaded minutes fold latency-blind instead of never.</li>
+<li>One latency reference everywhere: a p10 usual-best floor feeds the table, the rungs and the findings, and the internet rung grades latency rather than just loss.</li>
+<li>Access-link consensus: uniform inflation blames the shared first hop, with own-load attribution (quiet, busy or loaded, naming the top talker) and the location&#39;s episode-cluster history cited when the pattern recurs.</li>
+<li>The path-MTU black hole is gated on loss to the probe target, because loss is not MTU.</li>
+<li><code>z</code> zooms the active talkers table across the bottom band: full names and addresses, pid, exe path, command line, user, parent and start time, on all platforms.</li>
+<li>Talker tables lead with a flexed name column and default-sort by &quot;now&quot;, and <code>bandwidth_units</code> chooses bytes or bits.</li>
+<li>Each speed-test result records the network, the medium and the serving server, the history pane gains a detail block, and <code>d</code> deletes an unwanted result.</li>
+<li>Also: <code>Shift+M</code> event markers, DNS graphs colored per bar, and a Network title that shows baseline learning progress.</li>
+<li>Website: the /understand FAQ and glossary.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.7.0</title>
+    <link>https://octomon.dev/changelog#v0.7.0</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.7.0</guid>
+    <pubDate>Mon, 24 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Gateways that drop ICMP read as notes, not alarms. Plus an apt repo, support bundles and octomon.dev.</description>
+    <content:encoded><![CDATA[<p>Gateways that drop ICMP read as notes, not alarms. Plus an apt repo, support bundles and octomon.dev.</p>
+<ul>
+<li>Analysis: ICMP-silent gateways and hops beside clean anchors are policy, not outage. Baselines learn through note-class findings, and private or CGNAT targets never vote on internet health.</li>
+<li>Locations are sorted by last seen with the current one pinned, join and loss events name known locations, and hotspot gateways are probed from the routing table.</li>
+<li>Network panel: DHCP server and static detection, a public IP row, and deduplicated resolver references.</li>
+<li>Events are dated, with a session-start marker, green clears and amber raises.</li>
+<li><code>p</code> and <code>u</code> pin a process or remote to the top of the talkers.</li>
+<li><code>Shift+D</code> writes a support bundle: a zip with the report, timeline, config, logs and baselines.</li>
+<li><code>--demo-mac</code> hides only this machine&#39;s identifiers on non-private networks.</li>
+<li>Packaging: cargo-deb metadata and a workflow publishing a signed apt repo to octomon.dev/apt, plus the octomon.dev site itself.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.6.5</title>
+    <link>https://octomon.dev/changelog#v0.6.5</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.6.5</guid>
+    <pubDate>Sun, 23 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Local DNS outages get named, and DNS judgement gets faster.</description>
+    <content:encoded><![CDATA[<p>Local DNS outages get named, and DNS judgement gets faster.</p>
+<ul>
+<li>A failing LAN resolver is no longer a footnote. When the network&#39;s own resolver times out while public ones answer, the analysis raises a Degraded &quot;local DNS is down, internet OK, local names will not resolve&quot; finding, lands it on the timeline, and names what is lost: the search domain, and why every lookup got slower when that resolver is first in order. A public resolver failing while the LAN&#39;s works stays an informational note.</li>
+<li>Resolvers are judged by streak before window share: three timeouts in a row is down, three answers in a row is back, roughly 15 seconds each way instead of half a minute.</li>
+<li><code>←</code> and <code>→</code> walk the resolvers on the dns row, and <code>W</code> asks whois about the highlighted one.</li>
+<li><code>d</code> deletes the selected location. The network you are on comes straight back as a blank entry tagged &quot;learning from scratch&quot;. Monitoring time reads as &quot;2d 9h healthy&quot; rather than &quot;3458 healthy min&quot;.</li>
+<li><code>C</code> clears the events timeline, and the session counter stays honest.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.6.4</title>
+    <link>https://octomon.dev/changelog#v0.6.4</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.6.4</guid>
+    <pubDate>Sat, 22 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Long content wraps, narrow terminals survive, and added targets are remembered.</description>
+    <content:encoded><![CDATA[<p>Long content wraps, narrow terminals survive, and added targets are remembered.</p>
+<ul>
+<li>Text that outgrows its space wraps inside its own column with a hanging indent, never under the timestamp and label columns to its left: the events overlay (also enlarged), the analysis overlay, the port-scan overlay, the Network panel rows, and the network history list and detail pane. Words wider than a line, such as paths and address lists, hard-split.</li>
+<li>Four crossed-bounds panics fixed. The analysis overlay crashed any terminal under about 80 columns, taking the collectors down with it; locations crashed under 86; the port-scan and whois overlays crashed on very short terminals. Every overlay is now drawn at degenerate sizes in tests.</li>
+<li>Targets added with <code>a</code> are saved to config.toml and probed on every start, and <code>d</code> deletes and forgets them. A new optional <code>host</code> key keeps name-targets re-resolving with real SNI across restarts, and old config files parse unchanged.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.6.3</title>
+    <link>https://octomon.dev/changelog#v0.6.3</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.6.3</guid>
+    <pubDate>Fri, 21 Aug 2026 00:00:00 GMT</pubDate>
+    <description>octomon starts on Windows Server.</description>
+    <content:encoded><![CDATA[<p>octomon starts on Windows Server.</p>
+<ul>
+<li>octomon.exe imported wlanapi.dll at load time, and Windows Server ships without that DLL unless the optional Wireless LAN Service feature is installed, so on a stock server the loader killed the process before main and printed nothing. The import is now delay-loaded on MSVC targets, and the single funnel for every WLAN call checks the DLL exists first. Servers without wireless simply get no Wi-Fi details, which was already their reality.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.6.2</title>
+    <link>https://octomon.dev/changelog#v0.6.2</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.6.2</guid>
+    <pubDate>Thu, 20 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Legacy-console glyph fallback, speed-test attribution, a TLS provider that survives inspection.</description>
+    <content:encoded><![CDATA[<p>Legacy-console glyph fallback, speed-test attribution, a TLS provider that survives inspection.</p>
+<ul>
+<li>Bar graphs render correctly in the legacy Windows console. A new <code>bar_glyphs</code> config (&quot;auto&quot;, &quot;fine&quot; or &quot;coarse&quot;) switches sparklines to half or full blocks when the console font lacks the eighth-block glyphs, and auto-detection asks the actual console font via GDI, so a conhost set to Cascadia Mono keeps the fine set.</li>
+<li>A speed test no longer reads as the network failing. The Quality header is annotated while the test runs and while loaded samples remain in the stats window, and loss and latency findings the test&#39;s own load can fake are suppressed for that window. Bufferbloat and content-based findings still report.</li>
+<li>Session recordings log speed tests: a start event, then results as tidy metric rows.</li>
+<li>aws-lc-rs replaces ring as the rustls provider. Cloudflare Gateway&#39;s TLS-inspection intermediate signs ECDSA-SHA256 under a P-384 key, which ring refuses, killing every HTTPS check behind WARP.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.6.1</title>
+    <link>https://octomon.dev/changelog#v0.6.1</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.6.1</guid>
+    <pubDate>Wed, 19 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Latency colors judged relatively, locations gain a rename, and the OS trust store.</description>
+    <content:encoded><![CDATA[<p>Latency colors judged relatively, locations gain a rename, and the OS trust store.</p>
+<ul>
+<li>Latency colors judge against the path&#39;s own reference floor (the session minimum, lowered to the learned normal) with the old absolute thresholds as floors. A VPN exit on another continent is no longer red for being far away, and mid-path hops that never answer ICMP read dim rather than red.</li>
+<li>Locations: each entry shows its connection type, Enter renames the selected one, and the current network is listed as learning before its first healthy minute is written.</li>
+<li>TLS trusts the OS certificate store alongside the bundled roots. Behind a TLS-inspecting proxy every HTTPS check had failed while the browser, which trusts the root installed in the OS store, was fine. The public-IP error also names its cause now instead of &quot;error sending request&quot;.</li>
+<li>Bandwidth: each talkers table keeps and shows its own sort, and the column cursor only appears on the table holding the row cursor.</li>
+<li>A path monitor follows its target when the name re-resolves to a new address.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.6.0</title>
+    <link>https://octomon.dev/changelog#v0.6.0</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.6.0</guid>
+    <pubDate>Wed, 19 Aug 2026 00:00:00 GMT</pubDate>
+    <description>The analysis ladder reworked, and a batch of new diagnostics.</description>
+    <content:encoded><![CDATA[<p>The analysis ladder reworked, and a batch of new diagnostics.</p>
+<ul>
+<li>A bottom &quot;not connected&quot; rung (no route, self-assigned address, no gateway) that everything downstream is a symptom of, plus symptom-aware ranking so a dead gateway headlines over the DNS failure behind it.</li>
+<li>DNS is judged on a recent window, hop loss must persist downstream before it names the ISP, LAN targets are judged locally rather than as internet anchors, bufferbloat load is measured against the network&#39;s learned WAN capacity, and findings show how long they have been active.</li>
+<li>New diagnostics: system clock skew via SNTP with an HTTP Date fallback; a public reference resolver alongside the system ones, with a once-a-minute NXDOMAIN hijack check; CGNAT and double NAT read from the first hops; a path-MTU probe using DF-bit QUIC version-negotiation packets, with black-hole detection and an honest &quot;cannot measure here&quot; on macOS; IPv6 breakage localized (no v6 route, v6 DNS, or upstream) plus the IPv4 mirror; and system web proxy detection, with the HTTP check repeated through it.</li>
+<li>Outbound port scan overlay on <code>c</code>.</li>
+<li>A network history pane (joins, roams, address, route and VPN changes) in the full-screen Network panel, and persistent per-network incident history with a 7-day summary in doctor, locations and the analysis.</li>
+<li><code>--demo</code>: real measurements with a disguised identity, for screen recording.</li>
+<li>Also: control characters stripped from <code>--check</code> and <code>--doctor</code> output, RDAP bodies capped while streaming, and an events export on <code>x</code>.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.5.3</title>
+    <link>https://octomon.dev/changelog#v0.5.3</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.5.3</guid>
+    <pubDate>Tue, 18 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Session-total talkers, a pause that freezes the display, a build stamp.</description>
+    <content:encoded><![CDATA[<p>Session-total talkers, a pause that freezes the display, a build stamp.</p>
+<ul>
+<li>Session-total talkers with scrolling side-by-side tables.</li>
+<li>A pause that freezes the display.</li>
+<li>A build stamp in the version string.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.5.2</title>
+    <link>https://octomon.dev/changelog#v0.5.2</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.5.2</guid>
+    <pubDate>Tue, 18 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Utilization by remote address, and a whois overlay for any address.</description>
+    <content:encoded><![CDATA[<p>Utilization by remote address, and a whois overlay for any address.</p>
+<ul>
+<li>Utilization by remote address in the bandwidth panel.</li>
+<li>Ability to query whois and ASN for any address.</li>
+<li>Path monitor fixes from the field: anycast double-destination, unreached destinations, scroll cues.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.5.1</title>
+    <link>https://octomon.dev/changelog#v0.5.1</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.5.1</guid>
+    <pubDate>Mon, 17 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Field-test fixes: calmer thresholds, local DNS proxies handled.</description>
+    <content:encoded><![CDATA[<p>Field-test fixes: calmer thresholds, local DNS proxies handled.</p>
+<ul>
+<li>Calmer latency-inflation and loss thresholds.</li>
+<li>Local DNS-proxy resolvers handled properly on Windows: mapped-v6 unmapping, deduplication and honest naming.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.5.0</title>
+    <link>https://octomon.dev/changelog#v0.5.0</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.5.0</guid>
+    <pubDate>Mon, 17 Aug 2026 00:00:00 GMT</pubDate>
+    <description>octomon starts answering its own question: an analysis engine, per-network baselines, an event timeline and doctor mode.</description>
+    <content:encoded><![CDATA[<p>octomon starts answering its own question: an analysis engine, per-network baselines, an event timeline and doctor mode.</p>
+<ul>
+<li>A live analysis line in the footer synthesizes every collector into one headline, backed by a triage ladder on <code>y</code> showing each subsystem&#39;s status with its data, healthy rungs included, so the conclusion is auditable. Findings are ranked with hysteresis, simultaneous causes all show, and machine or VPN caveats never outrank network causes.</li>
+<li>Per-network baselines, fingerprinted by SSID and gateway MAC (SSID alone for gatewayless hotspots), learned only from healthy minutes, named with <code>N</code> and browsed with <code>L</code>. The analysis reads &quot;41ms vs ~9ms normal at Home&quot;.</li>
+<li>An event timeline on <code>e</code>: finding raises and clears with durations and severity escalations, network, SSID, DNS and VPN changes, link lost and restored with an automatic stat reset, and speed tests. All of it also drains into CSV recordings.</li>
+<li>An HTTP layer: an internet-level connectivity check with second-opinion verification and captive-portal, broken-IPv6 and filtered-web findings, plus per-target web probing with a TTFB strip for targets that demonstrably serve HTTP, with refused and filtered honestly distinguished from down.</li>
+<li>Hostname targets stay names: probed over HTTPS with SNI and re-resolved on network change, because CDNs answer per location, with a stats reset and a timeline entry when the answer moves.</li>
+<li>ICMPv6 with per-family ping clients, so v6-resolved targets work on v6-only carrier hotspots, and link-local resolvers are probed with the interface scope they require.</li>
+<li>Doctor mode: <code>octomon --doctor [--observe SECS] [--speedtest] [--json]</code> prints the analysis, this location&#39;s learned normal, measurements and events, redacted by default so it pastes safely into a ticket, with <code>--full</code> for local use. Exit codes are 0 healthy, 1 problems, 3 could not measure.</li>
+<li>A first-run welcome screen.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.4.1</title>
+    <link>https://octomon.dev/changelog#v0.4.1</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.4.1</guid>
+    <pubDate>Mon, 17 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Fixes from real Windows hardware.</description>
+    <content:encoded><![CDATA[<p>Fixes from real Windows hardware.</p>
+<ul>
+<li>The path monitor scrolls to follow the selection. It rendered from the first row with no offset, so moving the cursor past the last visible hop made the selection vanish instead of revealing the rest of the path.</li>
+<li>The overflow hint no longer tells people already in full screen to press <code>f</code> for full screen. The counts moved into the panel title, which also gives back the row the footer was using.</li>
+<li>Charts can be plotted with block glyphs instead of braille via <code>graph_marker</code>, for consoles whose font has no braille and draws every point as an empty box.</li>
+<li>The stats window is an ascending 1m / 5m / 15m ladder rather than 30 / 60 / 300 cycling out of order, and it no longer claims more history than a target keeps.</li>
+<li>The privilege reference moved from the README into PRIVILEGES.md, which gains a macOS section that was previously only implied.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.4.0</title>
+    <link>https://octomon.dev/changelog#v0.4.0</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.4.0</guid>
+    <pubDate>Sun, 16 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Windows support, with binaries for x86_64 and aarch64.</description>
+    <content:encoded><![CDATA[<p>Windows support, with binaries for x86_64 and aarch64.</p>
+<ul>
+<li>Wi-Fi via the Native Wifi API rather than parsing netsh, whose field names are translated on a non-English install and whose output arrives in the console&#39;s OEM codepage.</li>
+<li>Path discovery via the built-in tracert, with its own parser: the address comes last rather than second, and the timeout string is localized.</li>
+<li>Per-process bandwidth via an ETW session on the provider Task Manager reads. This is the only platform where that panel covers QUIC and HTTP/3, since ss and nettop are both TCP-only.</li>
+<li>Config in %APPDATA%, data in %LOCALAPPDATA%. The unix XDG layout is unchanged, so existing installs keep finding their files.</li>
+<li>Also fixes a latent bug: netdev names a Windows interface by adapter GUID while sysinfo keys its counters on the alias, so throughput would never have matched the default interface.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.3.0</title>
+    <link>https://octomon.dev/changelog#v0.3.0</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.3.0</guid>
+    <pubDate>Tue, 11 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Linux support, a restructured path monitor, and DNS responsiveness.</description>
+    <content:encoded><![CDATA[<p>Linux support, a restructured path monitor, and DNS responsiveness.</p>
+<ul>
+<li>Linux joins macOS: platform probes, <code>nmcli</code> preferred over <code>iw</code>, and a startup probe for the external tools each backend needs.</li>
+<li>Per-process bandwidth on Linux fixed. </li>
+<li>The support probe treated &quot;ran but found nothing&quot; as &quot;not supported&quot;, permanently disabling the feature on a machine that happened to have no open TCP sockets at launch.</li>
+<li>The path monitor is restructured into panels with sub-pane focus and DNS graphs, plus scrolling, overflow hints and per-sample bar color.</li>
+<li>DNS resolver responsiveness is measured, and Wi-Fi airspace congestion comes from the neighbour scan.</li>
+<li>Session recording to CSV on <code>l</code>.</li>
+<li>octomon reacts to network changes instead of trusting startup state, and Esc no longer quits.</li>
+<li>The help overlay is reworked into two columns with every binding, and fits 80x24.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.2.1</title>
+    <link>https://octomon.dev/changelog#v0.2.1</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.2.1</guid>
+    <pubDate>Mon, 10 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Split-tunnel VPNs detected, and identified from the tunnel itself.</description>
+    <content:encoded><![CDATA[<p>Split-tunnel VPNs detected, and identified from the tunnel itself.</p>
+<ul>
+<li>0.2.0 shipped tunnel detection that never fired for Cloudflare WARP and could name the wrong VPN when it did. Detection picked the default interface by routing to an RFC1918 address, which split-tunnel VPNs deliberately keep off the tunnel, and WARP compounds this by leaving <code>default</code> on the physical NIC while installing two half-internet routes that win on specificity. octomon now probes TEST-NET-1 to find the interface internet traffic actually leaves from, and describes the gateway as the real LAN gateway rather than the tunnel endpoint.</li>
+<li>Identification comes from the addresses the live tunnel carries (WARP, Tailscale, Mullvad, NordLynx, Proton), ordered most-specific first, because helper daemons stay resident whether or not a tunnel is up. The process scan remains a fallback and stays silent unless exactly one client matches: an unnamed tunnel beats a wrong name.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.2.0</title>
+    <link>https://octomon.dev/changelog#v0.2.0</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.2.0</guid>
+    <pubDate>Mon, 10 Aug 2026 00:00:00 GMT</pubDate>
+    <description>Connection type, tunnel detection, and a link graph that knows the medium.</description>
+    <content:encoded><![CDATA[<p>Connection type, tunnel detection, and a link graph that knows the medium.</p>
+<ul>
+<li>The Network panel classifies the default route&#39;s medium (Wi-Fi, Ethernet, cellular or tunnel) rather than echoing the OS&#39;s interface description, and uses that to decide what is worth showing.</li>
+<li>A tunnelled default route is detected and named. The gateway is annotated as the tunnel endpoint, and the traceroute view explains why the encapsulated hops never answer instead of leaving a red address and a wall of asterisks.</li>
+<li>The Wi-Fi signal graph is suppressed when the radio is associated but is not the primary route. Wired links get utilization against negotiated line rate instead, which is the &quot;is this link the limit?&quot; signal RSSI provides on a radio.</li>
+<li>Speed-test failures wrap to the panel width instead of being clipped at 48 characters.</li>
+<li>The help overlay is titled with the running version and sized to its content, since the fixed 22-row box had been cutting off the Bandwidth section.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.1.1</title>
+    <link>https://octomon.dev/changelog#v0.1.1</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.1.1</guid>
+    <pubDate>Mon, 10 Aug 2026 00:00:00 GMT</pubDate>
+    <description>The first pre-built binary, via cargo-dist.</description>
+    <content:encoded><![CDATA[<p>The first pre-built binary, via cargo-dist.</p>
+<ul>
+<li>Apple Silicon macOS only for now. Intel build compiles cleanly but was unverified on Intel hardware.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
+    <title>octomon 0.1.0</title>
+    <link>https://octomon.dev/changelog#v0.1.0</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.1.0</guid>
+    <pubDate>Mon, 10 Aug 2026 00:00:00 GMT</pubDate>
+    <description>The first release: one terminal based dashboard to monitor connectivity to the Internet</description>
+    <content:encoded><![CDATA[<p>The first release: one terminal based dashboard to monitor connectivity to the Internet</p>
+<ul>
+<li>Latency distribution stats, a bufferbloat indicator, staggered sends and windowing.</li>
+<li>Multi-provider speed tests (Cloudflare, M-Lab NDT7, LibreSpeed) with result history and a config file.</li>
+<li>Per-process bandwidth, the top talkers, on macOS.</li>
+<li>macOS Wi-Fi details and a live signal graph via CoreWLAN.</li>
+<li>Traceroute, hop discovery, and a sortable quality table.</li>
+<li>Keyboard-driven throughout: full screen, target select, help, pause and a live speed test.</li>
+<li>Shipped as a source-build Homebrew formula, dual MIT and Apache-2.0 licensed.</li>
+</ul>]]></content:encoded>
+  </item>
+</channel>
+</rss>

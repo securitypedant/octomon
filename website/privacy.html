@@ -7,6 +7,7 @@
 <meta name="description" content="What octomon sends, what we can see, and proof: the only dashboard we have is published on this page. Nothing about you is recorded.">
 <link rel="canonical" href="https://octomon.dev/privacy">
 <link rel="alternate" type="application/rss+xml" title="octomon blog" href="/blog/feed.xml">
+<link rel="alternate" type="application/rss+xml" title="octomon releases" href="/changelog.xml">
 <link rel="icon" type="image/png" sizes="32x32" href="/images/octomon-logo-32.png">
 <link rel="icon" type="image/png" sizes="512x512" href="/images/octomon-icon-tile.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/images/octomon-icon-tile.png">
@@ -105,8 +106,11 @@
   }
 
   /* the published dashboard */
+  /* The graph draws itself at whatever width it is given (see the script),
+     so it never needs the card to scroll sideways. overflow-x stays only as
+     a backstop for a browser that reports a width before layout settles. */
   .graph-card { overflow-x: auto; }
-  #edge-graph { width: 100%; min-width: 540px; height: 260px; display: block; }
+  #edge-graph { width: 100%; height: 260px; display: block; }
   .legend {
     display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 10px;
     font-family: var(--octo-mono); font-size: 0.85rem; color: var(--octo-muted);
@@ -134,11 +138,16 @@
       border-radius: var(--octo-radius-chip);
     }
     nav.links { display: none; }
-    /* air between the mark/burger row and the rule beneath it */
-    .nav { padding-bottom: 24px; }
+    /* the closed nav is one row: the mark left, the burger right, both
+       centred in a band with equal air above and below. The open menu gets
+       its bottom air from the checked links rule below instead. */
+    .nav { padding: 12px 0; }
+    /* the open menu lines up with the mark above it, which the tablet rule
+       has already nudged 12px in from the wrap's edge; without this the links
+       sit further left than the logo they hang under */
     .menu-toggle:checked ~ nav.links {
       display: flex; flex-basis: 100%; flex-direction: column;
-      gap: 12px; padding: 8px 2px 12px; font-size: 1rem;
+      gap: 12px; padding: 8px 2px 12px 12px; font-size: 1rem;
     }
     section { padding: 44px 0; }
     .pagehead { padding: 40px 0 32px; }
@@ -181,6 +190,7 @@
       <a href="/#features">features</a>
       <a href="/#video">video</a>
       <a href="/blog/">blog</a>
+      <a href="/changelog">changelog</a>
       <a href="/understand">faq</a>
       <a href="/understand#glossary">glossary</a>
       <a href="/privacy">privacy</a>
@@ -263,10 +273,11 @@
       <p>This graph is everything we can see: <strong>/edge requests per day,
       by octomon version</strong>, for the last 30 days. Day buckets keep it
       coarse in time, and the version (like <code>0.8.1</code>) names a
-      public software build, not a person. The line over the bars is the
-      fleet estimate: every running octomon refreshes /edge on a 15-minute
-      tick, so refresh calls ÷ 96 ≈ the average number running that day. An
-      estimate by design; you can recompute it from the same public data, <a href="/edge/stats"><code>octomon.dev/edge/stats</code></a>. There is no other dashboard, private or
+      public software build, not a person. The line over the bars is how much
+      octomon ran: every running copy refreshes /edge on a 15-minute tick, so
+      each refresh call stands for a quarter of an hour of runtime, and refresh
+      calls ÷ 4 ≈ the hours of octomon running that day. An estimate by design,
+      and one you can recompute from the same public data, <a href="/edge/stats"><code>octomon.dev/edge/stats</code></a>. There is no other dashboard, private or
       otherwise.</p>
       <div class="card graph-card">
         <h3>/edge requests · last 30 days</h3>
@@ -295,6 +306,7 @@
   <div class="wrap">
     <span>© 2025–2026 Simon Thorpe · MIT or Apache-2.0</span>
     <a href="/blog/">blog</a>
+    <a href="/changelog">changelog</a>
     <a href="/privacy">privacy</a>
     <a href="https://github.com/securitypedant/octomon">github.com/securitypedant/octomon</a>
     <a href="https://crates.io/crates/octomon">crates.io/crates/octomon</a>
@@ -334,51 +346,93 @@
   }
   const totals = days.map((d) => versions.reduce((s, v) => s + (byDay.get(d).get(v) ?? 0), 0));
   const peak = Math.max(...totals, 1);
-  // The fleet estimate: a running octomon refreshes every 15 minutes, so a
-  // full day of one instance is 96 refresh calls.
-  const est = days.map((d) => refreshByDay.get(d) / 96);
+  // How much octomon ran: a running copy refreshes every 15 minutes, so each
+  // refresh call stands for a quarter of an hour of runtime. Hours per day
+  // rather than "average instances alive", which divides by a whole 24-hour
+  // day and so reads as a fraction of a person for any real day of use.
+  const est = days.map((d) => refreshByDay.get(d) / 4);
   const estPeak = Math.max(...est, 0);
+  // The line gets a stated ceiling off a fixed ladder, not the peak itself,
+  // so its height means a number rather than "the best day so far".
+  const estTop = [1, 2, 3, 6, 12, 24].find((s) => estPeak <= s) ?? Math.ceil(estPeak / 24) * 24;
+  const hours = (h) => (h < 10 ? h.toFixed(1) : Math.round(h));
 
-  const W = Math.max(540, days.length * 26), H = 260, PAD = 34;
-  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  const bw = Math.min(18, (W - PAD * 2) / days.length - 6);
-  let out = "";
-  days.forEach((d, i) => {
-    const x = PAD + (i * (W - PAD * 2)) / days.length;
-    let y = H - 24;
-    versions.forEach((v, vi) => {
-      const calls = byDay.get(d).get(v) ?? 0;
-      if (!calls) return;
-      const h = ((H - 50) * calls) / peak;
-      y -= h;
-      out += `<rect x="${x}" y="${y}" width="${bw}" height="${h}" rx="2" fill="${colors[vi % colors.length]}"><title>${d.slice(0, 10)} · ${v}: ${calls}</title></rect>`;
+  // The graph is drawn at the width it actually has, so one SVG unit is one
+  // CSS pixel and the labels stay 10px whatever the screen. Scaling a fixed
+  // 540-wide drawing down instead would either shrink the text to nothing or,
+  // as it did, push the chart off the side of a phone and make you scroll it.
+  function draw() {
+    const W = Math.max(280, Math.round(svg.clientWidth) || 540);
+    const H = 260;
+    const narrow = W < 560;
+    const PAD = narrow ? 20 : 34;
+    // Narrow: the two header labels stack instead of colliding in the middle.
+    const headTop = 16;
+    const headSecond = narrow ? 30 : 16;
+    const plotTop = narrow ? 40 : 26;
+
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    const slot = (W - PAD * 2) / days.length;
+    const bw = Math.max(2, Math.min(18, slot - 6));
+    // Bars are centred in their slot, so a wide slot does not leave the row
+    // hugging the left edge.
+    const barX = (i) => PAD + i * slot + (slot - bw) / 2;
+    const barTop = H - 24 - plotTop;
+
+    let out = "";
+    days.forEach((d, i) => {
+      const x = barX(i);
+      let y = H - 24;
+      versions.forEach((v, vi) => {
+        const calls = byDay.get(d).get(v) ?? 0;
+        if (!calls) return;
+        const h = (barTop * calls) / peak;
+        y -= h;
+        out += `<rect x="${x}" y="${y}" width="${bw}" height="${h}" rx="2" fill="${colors[vi % colors.length]}"><title>${d.slice(0, 10)} · ${v}: ${calls}</title></rect>`;
+      });
     });
-    if (i % Math.ceil(days.length / 8) === 0) {
-      out += `<text x="${x + bw / 2}" y="${H - 8}" fill="#8A96A4" font-size="10" text-anchor="middle" font-family="monospace">${d.slice(5, 10)}</text>`;
+    // Date labels need ~34px each, so how many fit is a function of width.
+    const every = Math.ceil(days.length / Math.max(2, Math.floor((W - PAD * 2) / 40)));
+    days.forEach((d, i) => {
+      if (i % every) return;
+      out += `<text x="${barX(i) + bw / 2}" y="${H - 8}" fill="#8A96A4" font-size="10" text-anchor="middle" font-family="monospace">${d.slice(5, 10)}</text>`;
+    });
+
+    out += `<text x="${PAD - 6}" y="${headTop}" fill="#8A96A4" font-size="10" text-anchor="start" font-family="monospace">peak ${peak}/day</text>`;
+    if (estPeak > 0) {
+      // Its own scale over the bars, but a real one: zero is the baseline the
+      // bars stand on, and estTop is the top of the plot area.
+      const estY = (h) => H - 24 - (barTop * h) / estTop;
+      const xs = days.map((_, i) => barX(i) + bw / 2);
+      const pts = days.map((_, i) => `${xs[i]},${estY(est[i])}`).join(" ");
+      out += `<polyline points="${pts}" fill="none" stroke="#F4F7FA" stroke-width="1.5" stroke-dasharray="4 3"/>`;
+      // A hit target per day, so the line can be read exactly and not just
+      // eyeballed against its ceiling.
+      days.forEach((d, i) => {
+        out += `<circle cx="${xs[i]}" cy="${estY(est[i])}" r="5" fill="#F4F7FA" fill-opacity="0.001"><title>${d.slice(0, 10)} · octomon running ≈${hours(est[i])} h</title></circle>`;
+      });
+      const label = `octomon running, peak ≈${hours(estPeak)} h/day (scale 0–${estTop})`;
+      out += narrow
+        ? `<text x="${PAD - 6}" y="${headSecond}" fill="#F4F7FA" font-size="10" text-anchor="start" font-family="monospace">${label}</text>`
+        : `<text x="${W - PAD}" y="${headSecond}" fill="#F4F7FA" font-size="10" text-anchor="end" font-family="monospace">${label}</text>`;
     }
-  });
-  out += `<text x="${PAD - 6}" y="16" fill="#8A96A4" font-size="10" text-anchor="start" font-family="monospace">peak ${peak}/day</text>`;
-  let estNote = "";
-  if (estPeak > 0) {
-    // The estimate rides its own scale over the bars, as a dotted line.
-    const pts = days
-      .map((d, i) => {
-        const x = PAD + (i * (W - PAD * 2)) / days.length + bw / 2;
-        const y = H - 24 - ((H - 60) * est[i]) / estPeak;
-        return `${x},${y}`;
-      })
-      .join(" ");
-    out += `<polyline points="${pts}" fill="none" stroke="#F4F7FA" stroke-width="1.5" stroke-dasharray="4 3"><title>estimated octomons running (avg per day)</title></polyline>`;
-    out += `<text x="${W - PAD}" y="16" fill="#F4F7FA" font-size="10" text-anchor="end" font-family="monospace">est. running, peak ≈${estPeak < 10 ? estPeak.toFixed(1) : Math.round(estPeak)}</text>`;
-    estNote = "";
-  } else {
-    estNote = " · the fleet-estimate line appears once 0.8.2+ clients start reporting call reasons.";
+    svg.innerHTML = out;
   }
-  svg.innerHTML = out;
+
+  draw();
+  // The drawing depends on the width it was given, so it has to be redrawn
+  // when that changes: a rotated phone, a resized window.
+  let redraw;
+  addEventListener("resize", () => {
+    clearTimeout(redraw);
+    redraw = setTimeout(draw, 150);
+  });
+
   legend.innerHTML = versions
     .map((v, vi) => `<span class="key"><span class="swatch" style="background:${colors[vi % colors.length]}"></span>octomon ${v}</span>`)
-    .join("") + '<span class="key"><span class="swatch" style="background:#F4F7FA"></span>est. running (avg)</span>';
-  note.textContent = "updated hourly · day buckets · version, reason and count only, by design, so nobody can be traced through it." + estNote;
+    .join("") + (estPeak > 0 ? '<span class="key"><span class="swatch" style="background:#F4F7FA"></span>octomon running (h/day)</span>' : "");
+  note.textContent = "updated hourly · day buckets · version, reason and count only, by design, so nobody can be traced through it."
+    + (estPeak > 0 ? "" : " · the running-hours line appears once 0.8.2+ clients start reporting call reasons.");
 })();
 </script>
 
