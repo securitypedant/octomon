@@ -63,7 +63,7 @@ and I couldn't find an existing tool. So I started to create one. (Oh and also u
 I wanted to focus on two goals.
 
 - Quickly display a summary of my Internet connectivity
-- Triage the data collected into a simple summary, and maybe even a single opinion
+- Triage the data collected and maybe generate a single opinion
 
 ## One screen instead of four
 
@@ -73,8 +73,7 @@ own layer, with the analysis sitting on top and composing them into one answer. 
 my 30 years of working in the technology industry, I've been a passionate UX designer (My first real job was designing game interfaces, anyone ever play [Championship Manager](https://en.wikipedia.org/wiki/Championship_Manager)?).
 So I wanted the dashboard to look good and be easy to read. Note, when I say "easy
 to read" I mean by a network or IT admin. octomon is built for people who already
-know what a gateway, a resolver and a p95 are, and it does not slow down to
-explain them.
+know what a gateway, a resolver and a p95 are.
 
 <figure>
   <img src="united-wifi.png" alt="The octomon dashboard on United WiFi, four panels at once. Connection quality shows every anchor sitting around 650ms with 0 to 13% loss and the gateway at 100%; the path table has more unresponsive hops than answering ones; the network panel names the ISP as ViaSat and the nearest Cloudflare PoP as Newark; bandwidth and machine graphs run down the right. The status line reads connection healthy, performance poor">
