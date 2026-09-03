@@ -9,8 +9,14 @@
 //! listening, which still proves the port is not filtered), or timed out
 //! (filtered, or the host is down).
 //!
-//! On demand only, and a TCP handshake or a single UDP datagram per row —
-//! nothing is sent beyond what the protocol needs to get an answer.
+//! A TCP handshake or a single UDP datagram per row — nothing is sent beyond
+//! what the protocol needs to get an answer. The scan is on demand. Its
+//! smaller sibling, the *monitor* ([`monitor`]), is automatic but gated hard:
+//! it starts only when pings, the TCP :443 probes and the web check are all
+//! failing at once — the state that reads as a dead internet — and probes a
+//! five-row list every 5 s to tell a filtered network from a dead one, then
+//! stops when the web answers again. It announces itself on the timeline
+//! and in the analysis, and `egress_monitor = false` turns it off.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -179,6 +185,296 @@ impl Scan {
     }
 }
 
+/// The monitor's list: one reference host per protocol a web filter treats
+/// differently. Short on purpose — it runs every 5 s while the web is dark,
+/// and each row is a connection to somebody else's server. Every host here
+/// is built to take connections at scale; a handshake every 5 s from one
+/// machine during its own outage is noise to them.
+pub fn default_monitor_checks() -> Vec<EgressCheck> {
+    vec![
+        EgressCheck::new(
+            "HTTP",
+            "cloudflare.com",
+            80,
+            "tcp",
+            "plain http — open while HTTPS is blocked means a filter that only allows what it can inspect",
+        ),
+        EgressCheck::new(
+            "QUIC",
+            "1.1.1.1",
+            443,
+            "quic",
+            "UDP 443 — the other way the web gets out",
+        ),
+        EgressCheck::new(
+            "SSH",
+            "github.com",
+            22,
+            "tcp",
+            "git over ssh, remote shells",
+        ),
+        EgressCheck::new("NTP", "time.cloudflare.com", 123, "ntp", "clock sync"),
+        EgressCheck::new(
+            "DNS",
+            "1.1.1.1",
+            53,
+            "dns",
+            "resolvers of your own choosing",
+        ),
+    ]
+}
+
+/// How often the monitor probes its rows while it runs.
+pub const MONITOR_INTERVAL: Duration = Duration::from_secs(5);
+/// The web must have been dark this many consecutive seconds before the
+/// monitor starts — past the analysis's own raise hysteresis, so a blip
+/// that never became a finding never becomes a scan either.
+const MONITOR_START_AFTER_SECS: u32 = 10;
+/// And clear this long before it stops: a single web check squeaking
+/// through does not end the episode.
+const MONITOR_STOP_AFTER_SECS: u32 = 10;
+
+/// One monitored port: the check, where it resolved to, and its round trips
+/// as a series — the same last / avg / p95 / jitter / loss machinery the
+/// quality table's other families use.
+#[derive(Clone)]
+pub struct MonitorRow {
+    pub check: EgressCheck,
+    pub addr: Option<SocketAddr>,
+    pub series: crate::app::Series,
+    /// The latest round's outcome, kept because a series records only
+    /// "answered or not": refused (reached, reset) and blocked (silence)
+    /// are the same loss to the series and a different story to a person.
+    pub last: Outcome,
+}
+
+impl MonitorRow {
+    pub fn open(&self) -> bool {
+        matches!(self.last, Outcome::Open(_))
+    }
+
+    /// "github.com:22" — the address column.
+    pub fn target(&self) -> String {
+        format!("{}:{}", self.check.host, self.check.port)
+    }
+
+    /// The latest outcome as evidence reads it.
+    pub fn describe(&self) -> String {
+        match &self.last {
+            Outcome::Pending => "no round yet".to_string(),
+            Outcome::Open(ms) => format!("open {ms:.0}ms"),
+            Outcome::Refused => {
+                "refused — the host was reached and something reset the connection: a filter that answers rather than drops".to_string()
+            }
+            Outcome::Blocked => "no answer (blocked)".to_string(),
+            Outcome::Error(e) => format!("error: {e}"),
+        }
+    }
+}
+
+/// The automatic monitor's state, held in [`AppState`]. Kept after it
+/// stops, so the analysis can still say what it found.
+#[derive(Clone)]
+pub struct Monitor {
+    pub rows: Vec<MonitorRow>,
+    pub started: Instant,
+    pub active: bool,
+    pub stopped: Option<Instant>,
+    /// Completed probe rounds; zero means nothing has been learned yet.
+    pub rounds: u32,
+}
+
+impl Monitor {
+    pub fn has_data(&self) -> bool {
+        self.rounds > 0
+    }
+
+    /// Rows whose latest round got through.
+    pub fn open(&self) -> Vec<&MonitorRow> {
+        self.rows.iter().filter(|r| r.open()).collect()
+    }
+
+    /// Rows whose latest round did not — only once a round has run.
+    pub fn blocked(&self) -> Vec<&MonitorRow> {
+        if !self.has_data() {
+            return Vec::new();
+        }
+        self.rows.iter().filter(|r| !r.open()).collect()
+    }
+
+    /// "SSH, NTP and DNS" — the rows by name, as a sentence lists them.
+    pub fn list(rows: &[&MonitorRow]) -> String {
+        let names: Vec<&str> = rows.iter().map(|r| r.check.name.as_str()).collect();
+        match names.len() {
+            0 => String::new(),
+            1 => names[0].to_string(),
+            n => format!("{} and {}", names[..n - 1].join(", "), names[n - 1]),
+        }
+    }
+}
+
+/// The automatic monitor task. Watches for the web going dark (see
+/// [`crate::verdict::web_dark`]), runs the rows every [`MONITOR_INTERVAL`]
+/// while it stays dark, stops when it clears — and says so both ways on the
+/// timeline, because probing third-party ports is something a person
+/// should be able to see octomon doing.
+pub async fn monitor(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
+    if !cfg.egress_monitor || cfg.egress_monitor_checks.is_empty() {
+        return;
+    }
+    let checks = cfg.egress_monitor_checks.clone();
+    // Resolve the names now, while the network presumably works: a filter
+    // that takes DNS with it would otherwise leave every named row
+    // unresolvable at exactly the moment the rows matter. Refreshed at each
+    // start when the resolver still answers.
+    let mut cached = resolve_all(&checks).await;
+    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut dark_for: u32 = 0;
+    let mut clear_for: u32 = 0;
+    let mut last_round: Option<Instant> = None;
+    loop {
+        ticker.tick().await;
+        let (dark, active) = {
+            let s = state.lock().unwrap();
+            (
+                crate::verdict::web_dark(&s),
+                s.egress_monitor.as_ref().is_some_and(|m| m.active),
+            )
+        };
+        if dark {
+            dark_for += 1;
+            clear_for = 0;
+        } else {
+            clear_for += 1;
+            dark_for = 0;
+        }
+
+        if !active && dark_for >= MONITOR_START_AFTER_SECS {
+            let fresh = resolve_all(&checks).await;
+            for (c, f) in cached.iter_mut().zip(fresh) {
+                if f.is_some() {
+                    *c = f;
+                }
+            }
+            let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+            let mut s = state.lock().unwrap();
+            s.egress_monitor = Some(Monitor {
+                rows: checks
+                    .iter()
+                    .zip(cached.iter())
+                    .map(|(c, a)| MonitorRow {
+                        check: c.clone(),
+                        addr: *a,
+                        series: crate::app::Series::default(),
+                        last: Outcome::Pending,
+                    })
+                    .collect(),
+                started: Instant::now(),
+                active: true,
+                stopped: None,
+                rounds: 0,
+            });
+            s.push_event(
+                crate::verdict::Severity::Info,
+                crate::app::EventCategory::Network,
+                format!(
+                    "egress monitor started — pings, tcp :443 and the web check all failing; probing {} every {}s to tell a filter from an outage",
+                    names.join(", "),
+                    MONITOR_INTERVAL.as_secs()
+                ),
+            );
+            last_round = None;
+            continue;
+        }
+
+        if active && clear_for >= MONITOR_STOP_AFTER_SECS {
+            let mut s = state.lock().unwrap();
+            let why = if matches!(s.http.v4, crate::app::FamilyProbe::Ok(_))
+                || matches!(s.http.v6, crate::app::FamilyProbe::Ok(_))
+            {
+                "the web answers again"
+            } else if s.link_lost || s.netinfo.iface.is_empty() {
+                "the link went down"
+            } else {
+                "tcp :443 answers again"
+            };
+            let summary = if let Some(m) = s.egress_monitor.as_mut() {
+                m.active = false;
+                m.stopped = Some(Instant::now());
+                format!(
+                    "{} of {} ports were getting out",
+                    m.open().len(),
+                    m.rows.len()
+                )
+            } else {
+                String::new()
+            };
+            s.push_event(
+                crate::verdict::Severity::Info,
+                crate::app::EventCategory::Network,
+                format!("egress monitor stopped — {why} · {summary}"),
+            );
+            continue;
+        }
+
+        if active && last_round.is_none_or(|t| t.elapsed() >= MONITOR_INTERVAL) {
+            last_round = Some(Instant::now());
+            // Snapshot the rows under the lock, probe without it.
+            let (started, rows) = {
+                let s = state.lock().unwrap();
+                match s.egress_monitor.as_ref() {
+                    Some(m) => (
+                        Some(m.started),
+                        m.rows
+                            .iter()
+                            .enumerate()
+                            .map(|(i, r)| (i, r.check.clone(), r.addr))
+                            .collect::<Vec<_>>(),
+                    ),
+                    None => (None, Vec::new()),
+                }
+            };
+            let probes = rows.into_iter().map(|(i, c, addr)| async move {
+                let outcome = match addr {
+                    Some(a) => probe(&c, a).await,
+                    None => match resolve(&c.host, c.port).await {
+                        Ok(a) => probe(&c, a).await,
+                        Err(e) => Outcome::Error(e),
+                    },
+                };
+                (i, outcome)
+            });
+            let results = futures_util::future::join_all(probes).await;
+            let mut s = state.lock().unwrap();
+            if let Some(m) = s.egress_monitor.as_mut()
+                && Some(m.started) == started
+                && m.active
+            {
+                for (i, outcome) in results {
+                    if let Some(r) = m.rows.get_mut(i) {
+                        match &outcome {
+                            Outcome::Open(ms) => r.series.record_reply(*ms),
+                            _ => r.series.record_loss(),
+                        }
+                        r.last = outcome;
+                    }
+                }
+                m.rounds += 1;
+            }
+        }
+    }
+}
+
+async fn resolve_all(checks: &[EgressCheck]) -> Vec<Option<SocketAddr>> {
+    futures_util::future::join_all(
+        checks
+            .iter()
+            .map(|c| async move { resolve(&c.host, c.port).await.ok() }),
+    )
+    .await
+}
+
 /// Start (or restart) a scan of `checks`; each row updates as it completes.
 pub fn start(state: Arc<Mutex<AppState>>, checks: Vec<EgressCheck>) {
     {
@@ -243,6 +539,11 @@ async fn run_check(c: &EgressCheck) -> Outcome {
         Ok(a) => a,
         Err(e) => return Outcome::Error(e),
     };
+    probe(c, addr).await
+}
+
+/// One check against an already-resolved address.
+async fn probe(c: &EgressCheck, addr: SocketAddr) -> Outcome {
     let start = Instant::now();
     let ms = |start: Instant| start.elapsed().as_secs_f64() * 1000.0;
     match c.proto.as_str() {
@@ -252,7 +553,9 @@ async fn run_check(c: &EgressCheck) -> Outcome {
             Ok(Err(e)) => Outcome::Error(short(&e)),
             Err(_) => Outcome::Blocked,
         },
-        "ntp" => match crate::collectors::clock::query(&c.host).await {
+        // By address, not name: the monitor caches addresses for exactly
+        // the case where the name no longer resolves.
+        "ntp" => match crate::collectors::clock::query(&addr.ip().to_string()).await {
             Ok(r) => Outcome::Open(r.rtt_ms),
             Err(e) if e == "timeout" => Outcome::Blocked,
             Err(e) => Outcome::Error(e),
@@ -361,6 +664,29 @@ mod tests {
             d.iter()
                 .all(|c| matches!(c.proto.as_str(), "tcp" | "dns" | "ntp" | "quic"))
         );
+    }
+
+    /// The monitor's list is the five protocols a web filter treats
+    /// differently, one host each, and reads as a sentence.
+    #[test]
+    fn the_monitor_list_is_five_rows_and_lists_itself_as_a_sentence() {
+        let d = default_monitor_checks();
+        let names: Vec<&str> = d.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["HTTP", "QUIC", "SSH", "NTP", "DNS"]);
+        let rows: Vec<MonitorRow> = d
+            .iter()
+            .map(|c| MonitorRow {
+                check: c.clone(),
+                addr: None,
+                series: crate::app::Series::default(),
+                last: Outcome::Pending,
+            })
+            .collect();
+        let refs: Vec<&MonitorRow> = rows.iter().collect();
+        assert_eq!(Monitor::list(&refs[..1]), "HTTP");
+        assert_eq!(Monitor::list(&refs[..2]), "HTTP and QUIC");
+        assert_eq!(Monitor::list(&refs[2..]), "SSH, NTP and DNS");
+        assert_eq!(rows[2].target(), "github.com:22");
     }
 
     #[test]

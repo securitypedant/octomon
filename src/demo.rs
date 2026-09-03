@@ -333,6 +333,14 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
             r.check.host = d.text(&r.check.host);
         }
     }
+    if let Some(m) = v.egress_monitor.as_mut() {
+        for r in m.rows.iter_mut() {
+            r.check.host = d.text(&r.check.host);
+            r.addr = r
+                .addr
+                .map(|a| std::net::SocketAddr::new(d.ip(a.ip()), a.port()));
+        }
+    }
 
     // Locations: labels that were SSIDs or gateways; user-given names stay.
     if let Some(b) = v.baseline.as_mut() {

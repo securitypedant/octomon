@@ -145,6 +145,11 @@ pub enum Cause {
     Ipv6Broken,
     /// Full-size packets vanish and nothing says why: a path-MTU black hole.
     PathMtu,
+    /// The web is dark — no handshake on 443, the web check failing — while
+    /// something else provably crosses the internet: a reference resolver
+    /// over UDP 53, or the egress monitor getting SSH, NTP or DNS out. A
+    /// filter, not an outage, named port by port.
+    WebFiltered,
     HttpBlocked,
     WebTarget,
     SingleDestination,
@@ -178,6 +183,7 @@ impl Cause {
             Cause::WideInternet => "internet",
             Cause::Ipv6Broken => "ipv6",
             Cause::PathMtu => "path-mtu",
+            Cause::WebFiltered => "web-filtered",
             Cause::HttpBlocked => "http-blocked",
             Cause::WebTarget => "web-target",
             Cause::SingleDestination => "destination",
@@ -693,6 +699,53 @@ pub fn icmp_blackholed(s: &AppState) -> bool {
     sampled > 0
 }
 
+/// The web has gone dark on a link that is up: the web check fails and the
+/// TCP :443 series to every sampled anchor is lost as well. What pings do is
+/// beside the point — a filter that blocks 443 blocks the web whether or not
+/// it also drops ICMP. A captive portal is its own story and does not count.
+/// This is what starts the egress monitor, and what the "filtered, not down"
+/// reading below rests on.
+pub fn web_dark(s: &AppState) -> bool {
+    use crate::app::FamilyProbe as FP;
+    if link_state(s) != LinkState::Up {
+        return false;
+    }
+    let web_failing =
+        matches!(s.http.v4, FP::Fail(_)) && !matches!(s.http.v6, FP::Ok(_) | FP::Captive(_));
+    if !web_failing {
+        return false;
+    }
+    let mut sampled = 0;
+    for t in s
+        .targets
+        .iter()
+        .filter(|t| !t.discovered && !s.is_lan_addr(t.addr))
+    {
+        if t.tcp.window.len() < th::MIN_SAMPLES {
+            continue;
+        }
+        sampled += 1;
+        if t.tcp.recent_loss_pct(th::RECENT) < th::LOSS_DOWN_PCT {
+            return false;
+        }
+    }
+    sampled > 0
+}
+
+/// Which probe family the quality table shows unless the user picked one:
+/// ICMP, or TCP where the network blackholes ICMP, or the egress monitor's
+/// rows while it is running — the numbers that still mean something.
+pub fn auto_family(s: &AppState) -> crate::app::ProbeFamily {
+    use crate::app::ProbeFamily as F;
+    if s.egress_monitor.as_ref().is_some_and(|m| m.active) {
+        F::Egress
+    } else if icmp_blackholed(s) {
+        F::Tcp
+    } else {
+        F::Icmp
+    }
+}
+
 /// The bottom rung, before any probe is consulted: is there a link with an
 /// address and a way out at all? Every failure further up is a symptom of this.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1126,13 +1179,24 @@ pub fn evaluate(s: &AppState) -> Triage {
         .iter()
         .filter(|p| !p.reference && p.recent_len() >= th::DNS_MIN_SAMPLES)
         .collect();
-    let reference = s
+    let references: Vec<&crate::app::DnsProbe> = s
         .dns
         .iter()
-        .find(|p| p.reference && p.recent_len() >= th::DNS_MIN_SAMPLES);
+        .filter(|p| p.reference && p.recent_len() >= th::DNS_MIN_SAMPLES)
+        .collect();
     let failing = |p: &crate::app::DnsProbe| p.failing(th::DNS_FAIL_PCT);
-    let reference_ok = reference.is_some_and(|r| !failing(r));
-    let reference_dead = reference.is_some_and(failing);
+    // Any one reference answering proves outside DNS gets out (and, further
+    // down, that the internet path is up at all); only all of them failing
+    // is the filter — one provider having a bad day is not a network fact.
+    let reference_ok = references.iter().any(|r| !failing(r));
+    let reference_dead = !references.is_empty() && references.iter().all(|r| failing(r));
+    let reference_name = || {
+        references
+            .iter()
+            .find(|r| !failing(r))
+            .map(|r| r.server.to_string())
+            .unwrap_or_default()
+    };
     if !probes.is_empty() {
         let slow =
             |p: &crate::app::DnsProbe| p.recent_mean_ms().is_some_and(|m| m > th::DNS_BAD_MS);
@@ -1210,12 +1274,12 @@ pub fn evaluate(s: &AppState) -> Triage {
             let (summary, confidence) = if reference_ok {
                 evidence.push(format!(
                     "reference resolver {} answers fine — the configured resolvers are the problem",
-                    reference.map(|r| r.server.to_string()).unwrap_or_default()
+                    reference_name()
                 ));
                 (
                     format!(
                         "your DNS resolvers not answering — {} works: switch DNS to it",
-                        reference.map(|r| r.server.to_string()).unwrap_or_default()
+                        reference_name()
                     ),
                     judge(fine >= 2, true, dns_symptom),
                 )
@@ -1325,20 +1389,31 @@ pub fn evaluate(s: &AppState) -> Triage {
     // network worth knowing (apps with their own resolver settings will fail).
     let system_ok = !probes.is_empty() && probes.iter().all(|p| !failing(p));
     if reference_dead && system_ok && !no_link {
-        let r = reference.unwrap();
+        let names: Vec<String> = references.iter().map(|r| r.server.to_string()).collect();
+        let mut evidence: Vec<String> = references
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}: {:.0}% of recent queries failed ({})",
+                    r.server,
+                    r.fail_pct(),
+                    r.status
+                )
+            })
+            .collect();
+        evidence.push(
+            "port 53 to the internet is filtered; anything configured to use its own DNS will fail here"
+                .to_string(),
+        );
         findings.push(Finding {
             cause: Cause::Dns,
             severity: Severity::Info,
-            confidence: judge(true, false, false),
+            confidence: judge(true, names.len() >= 2, false),
             summary: format!(
                 "outside resolvers blocked — {} unreachable while this network's DNS works",
-                r.server
+                names.join(" and ")
             ),
-            evidence: vec![
-                format!("{}: {:.0}% of recent queries failed ({})", r.server, r.fail_pct(), r.status),
-                "port 53 to the internet is filtered; anything configured to use its own DNS will fail here"
-                    .to_string(),
-            ],
+            evidence,
             subject: "reference".to_string(),
             symptom: false,
             since: None,
@@ -1352,7 +1427,7 @@ pub fn evaluate(s: &AppState) -> Triage {
         let names: Vec<String> = hijackers.iter().map(|p| p.server.to_string()).collect();
         // Corroboration: the reference resolver, asked the same, said NXDOMAIN
         // — so it is these resolvers, not the network, doing it.
-        let reference_honest = reference.is_some_and(|r| r.hijack == Some(false));
+        let reference_honest = references.iter().any(|r| r.hijack == Some(false));
         let all_hijack = s.dns.iter().all(|p| p.hijack != Some(false));
         findings.push(Finding {
             cause: Cause::DnsHijack,
@@ -1587,6 +1662,7 @@ pub fn evaluate(s: &AppState) -> Triage {
             let v6_dns_dead =
                 !v6_dns.is_empty() && v6_dns.iter().all(|p| p.failing(th::DNS_FAIL_PCT));
             let mut evidence = vec![format!("v6 probe: {reason} · v4 probe: ok {v4_ms:.0}ms")];
+            let through_tunnel = s.netinfo.tunnel_label().is_some();
             let (where_, corroborated) = if let Some(vpn) = s.netinfo.tunnel_label() {
                 // Point-to-point tunnels have no router and no v6 gateway by
                 // design — "at the router" would send the user to a box that
@@ -1622,9 +1698,22 @@ pub fn evaluate(s: &AppState) -> Triage {
             evidence.push(
                 "browsers try v6 first and fall back, adding delay to every request".to_string(),
             );
+            // Through a tunnel this is a note, not a degradation: a tunnel
+            // that carries only v4 is how that tunnel is configured, the
+            // same working-as-built state as a v4-only LAN (which raises
+            // nothing at all — the v6 probe is simply not applicable there).
+            // The only difference is that the tunnel handed out a v6
+            // address it then does not route. Note-class keeps the footer
+            // and the session bar green while the finding still stands in
+            // the analysis; a router or ISP that breaks v6 is a fault worth
+            // the yellow.
             findings.push(Finding {
                 cause: Cause::Ipv6Broken,
-                severity: Severity::Degraded,
+                severity: if through_tunnel {
+                    Severity::Info
+                } else {
+                    Severity::Degraded
+                },
                 confidence: judge(true, corroborated, false),
                 summary: format!("IPv6 broken while IPv4 works — {where_}"),
                 evidence,
@@ -2005,28 +2094,146 @@ pub fn evaluate(s: &AppState) -> Triage {
         b.anchor_loss_pct.unwrap_or(0.0) < th::LOSS_BAD_PCT
             && b.gateway_loss_pct.unwrap_or(0.0) < th::LOSS_BAD_PCT
     });
+    // Every ping unanswered — not most — is a different network from the
+    // plane's: ICMP dropped as policy (Azure VMs, locked-down offices), and
+    // the loss numbers measure the policy, not the connection. "Degraded but
+    // usable" would promise slow pages and stalls the TCP connect series
+    // shows no sign of. The ping-driven claims are simply void here: the web
+    // check, DNS and the TCP series carry the judgement (the performance
+    // grade already reads them), and the ICMP check row names the condition.
+    let blackholed = icmp_blackholed(s);
     let mut usable = false;
     if let Some(ms) = web_ok_ms
         && !no_link
         && !normally_clean
         && findings.iter().any(&demotable)
     {
-        usable = true;
-        let mut evidence = vec![format!(
-            "web check ok ({ms:.0}ms) — names resolve and pages load over this link"
-        )];
-        for f in findings.iter().filter(|f| demotable(f)) {
-            evidence.push(format!("the ICMP view read: {}", f.summary));
+        if blackholed {
+            findings.retain(|f| !demotable(f));
+        } else {
+            usable = true;
+            let mut evidence = vec![format!(
+                "web check ok ({ms:.0}ms) — names resolve and pages load over this link"
+            )];
+            for f in findings.iter().filter(|f| demotable(f)) {
+                evidence.push(format!("the ICMP view read: {}", f.summary));
+            }
+            evidence.push("expect slow pages and stalling calls, not an outage".to_string());
+            findings.retain(|f| !demotable(f));
+            findings.push(Finding {
+                cause: Cause::UsableDegraded,
+                severity: Severity::Info,
+                // Contrast: ping says down, the web demonstrably works.
+                // Corroboration: the web check exercises DNS and TCP end to end.
+                confidence: judge(true, true, false),
+                summary: "connection degraded but usable — heavy packet loss, web traffic still getting through".to_string(),
+                evidence,
+                subject: String::new(),
+                symptom: false,
+                since: None,
+            });
         }
-        evidence.push("expect slow pages and stalling calls, not an outage".to_string());
-        findings.retain(|f| !demotable(f));
+    }
+
+    // --- the web is dark but the path is up: a filter, not an outage ---
+    // Pings, tcp :443 and the web check all failing read, above, as the
+    // internet being unreachable. A reference resolver still answering over
+    // UDP 53, or the egress monitor getting a handshake out on any port, is
+    // a packet crossing the internet and back — so the outage story is wrong,
+    // and what is left is a network that lets some traffic out and not the
+    // web. Yellow, in its own words, with the port-by-port evidence.
+    let dark = web_dark(s);
+    let monitor = s
+        .egress_monitor
+        .as_ref()
+        .filter(|m| m.active && m.has_data());
+    let open: Vec<&crate::collectors::egress::MonitorRow> =
+        monitor.map(|m| m.open()).unwrap_or_default();
+    let mut filtered = false;
+    if dark && !no_link && (reference_ok || !open.is_empty()) {
+        use crate::app::FamilyProbe as FP;
+        filtered = true;
+        // The ping- and web-driven outage claims are contradicted; the
+        // per-site web failures are this one story told many times.
+        findings.retain(|f| {
+            !(demotable(f) || matches!(f.cause, Cause::HttpBlocked | Cause::WebTarget))
+        });
+        let reason = match &s.http.v4 {
+            FP::Fail(r) => r.clone(),
+            _ => String::new(),
+        };
+        let n443 = s
+            .targets
+            .iter()
+            .filter(|t| !t.discovered && t.tcp.window.len() >= th::MIN_SAMPLES)
+            .count();
+        let mut evidence = vec![format!(
+            "web check: {reason} · tcp :443 to {n443} anchor{}: no handshakes",
+            if n443 == 1 { "" } else { "s" }
+        )];
+        if !with_data.is_empty() && bad.len() == with_data.len() {
+            evidence.push("every ping lost as well".to_string());
+        } else if fine >= 2 {
+            evidence.push(format!(
+                "{fine} anchors still answer pings — only the web is filtered"
+            ));
+        }
+        if reference_ok {
+            evidence.push(format!(
+                "reference DNS {} answers over UDP 53 — the internet path is up",
+                reference_name()
+            ));
+        }
+        match monitor {
+            Some(m) => {
+                for r in &m.rows {
+                    evidence.push(format!(
+                        "{} {} — {}",
+                        r.check.name,
+                        r.target(),
+                        r.describe()
+                    ));
+                }
+            }
+            None if s.egress_monitor.as_ref().is_some_and(|m| m.active) => {
+                evidence.push("egress monitor starting — port-by-port results follow".to_string());
+            }
+            None => {}
+        }
+        let summary = if let Some(m) = monitor.filter(|_| !open.is_empty()) {
+            // Port 80 open with 443 dead is the signature of a filter that
+            // only allows what it can inspect; worth its own word.
+            let https_only = open
+                .iter()
+                .any(|r| r.check.port == 80 && r.check.proto == "tcp");
+            let blocked = m.blocked();
+            format!(
+                "{} blocked on this network — {} get{} out{}",
+                if https_only { "HTTPS" } else { "web" },
+                crate::collectors::egress::Monitor::list(&open),
+                if open.len() == 1 { "s" } else { "" },
+                if blocked.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; {} blocked",
+                        crate::collectors::egress::Monitor::list(&blocked)
+                    )
+                }
+            )
+        } else {
+            format!(
+                "web unreachable while the internet path is up — DNS to {} answers",
+                reference_name()
+            )
+        };
         findings.push(Finding {
-            cause: Cause::UsableDegraded,
-            severity: Severity::Info,
-            // Contrast: ping says down, the web demonstrably works.
-            // Corroboration: the web check exercises DNS and TCP end to end.
-            confidence: judge(true, true, false),
-            summary: "connection degraded but usable — heavy packet loss, web traffic still getting through".to_string(),
+            cause: Cause::WebFiltered,
+            severity: Severity::Degraded,
+            // Contrast: the web fails while something else crosses the
+            // internet. Corroboration: the monitor has named the ports.
+            confidence: judge(true, !open.is_empty(), false),
+            summary,
             evidence,
             subject: String::new(),
             symptom: false,
@@ -2076,6 +2283,8 @@ pub fn evaluate(s: &AppState) -> Triage {
         self_load,
         anchor_norm,
         usable,
+        blackholed,
+        filtered,
     );
     let checks = checks(s);
     let performance = performance(s, &with_data);
@@ -2110,7 +2319,30 @@ fn performance(s: &AppState, with_data: &[&TargetStat]) -> Option<Performance> {
     // 100% loss the analysis itself calls policy: the TCP connect series
     // carries the judgement instead, and the detail says so.
     let via_tcp = icmp_blackholed(s);
-    let (latencies, jitters, losses): (Vec<f64>, Vec<f64>, Vec<f64>) = if via_tcp {
+    // And when even 443 is dark, the egress monitor's rows are the only
+    // round trips that describe the path at all.
+    let egress = s
+        .egress_monitor
+        .as_ref()
+        .filter(|m| !via_tcp && web_dark(s) && m.active && m.has_data());
+    let (latencies, jitters, losses): (Vec<f64>, Vec<f64>, Vec<f64>) = if let Some(m) = egress {
+        (
+            m.rows
+                .iter()
+                .filter_map(|r| r.series.stats(th::RECENT).mean)
+                .collect(),
+            m.rows
+                .iter()
+                .map(|r| r.series.jitter_ms)
+                .filter(|j| *j > 0.0)
+                .collect(),
+            m.rows
+                .iter()
+                .filter(|r| !r.series.window.is_empty())
+                .map(|r| r.series.recent_loss_pct(th::RECENT))
+                .collect(),
+        )
+    } else if via_tcp {
         let anchors: Vec<&TargetStat> = s
             .targets
             .iter()
@@ -2153,7 +2385,13 @@ fn performance(s: &AppState, with_data: &[&TargetStat]) -> Option<Performance> {
         format!(
             "latency {}{}",
             fmt_ms(Some(latency)),
-            if via_tcp { " (tcp)" } else { "" }
+            if egress.is_some() {
+                " (egress)"
+            } else if via_tcp {
+                " (tcp)"
+            } else {
+                ""
+            }
         ),
         grade(latency, th::PERF_LATENCY_STEPS_MS),
     )];
@@ -2211,6 +2449,8 @@ fn build_rungs(
     self_load: bool,
     anchor_norm: Option<f64>,
     usable: bool,
+    blackholed: bool,
+    filtered: bool,
 ) -> Vec<Rung> {
     let mut rungs = Vec::with_capacity(7);
     let health_status = |h: Health| match h {
@@ -2341,6 +2581,23 @@ fn build_rungs(
             }
             let status = if gw_drops_icmp {
                 RungStatus::Ok
+            } else if (blackholed || filtered) && gw_health == Health::Bad {
+                // Nothing on this network answers pings, so "100% loss" is
+                // the policy, not the gateway: not measured, which is not
+                // the same as fine — and the traffic that does get out
+                // proves it forwards.
+                detail = if blackholed {
+                    format!(
+                        "{} · no ICMP answer — blocked on this network · web traffic crosses it",
+                        g.addr
+                    )
+                } else {
+                    format!(
+                        "{} · no ICMP answer — not measurable here · other traffic crosses it",
+                        g.addr
+                    )
+                };
+                RungStatus::Unknown
             } else if usable && gw_health == Health::Bad {
                 // The web check proves traffic crosses it; red would say
                 // "outage" about a link the user is browsing over.
@@ -2404,11 +2661,33 @@ fn build_rungs(
         let local_fail = probes
             .iter()
             .find(|p| p.failing(th::DNS_FAIL_PCT) && s.is_lan_addr(p.server));
+        // The references are probed too but are contrast, not the rung:
+        // said in a clause, so "3 resolvers" does not read as a miscount
+        // to someone who can see five being probed.
+        let refs: Vec<&crate::app::DnsProbe> = s
+            .dns
+            .iter()
+            .filter(|p| p.reference && p.recent_len() >= th::DNS_MIN_SAMPLES)
+            .collect();
+        let refs_up = refs.iter().filter(|r| !r.failing(th::DNS_FAIL_PCT)).count();
+        let references = match (refs.len(), refs_up) {
+            (0, _) => String::new(),
+            (n, up) if up == n => format!(
+                " · {n} reference resolver{} answer{}",
+                if n == 1 { "" } else { "s" },
+                if n == 1 { "s" } else { "" }
+            ),
+            (n, 0) => format!(
+                " · {n} reference resolver{} unreachable",
+                if n == 1 { "" } else { "s" }
+            ),
+            (n, up) => format!(" · {up} of {n} reference resolvers answer"),
+        };
         Rung {
             area: Area::Dns,
             status,
             detail: format!(
-                "{} resolver{} · worst mean {worst_mean:.0}ms{}",
+                "{} resolver{} from this network · worst mean {worst_mean:.0}ms{}{references}",
                 probes.len(),
                 if probes.len() == 1 { "" } else { "s" },
                 match (local_fail, n_fail) {
@@ -2531,6 +2810,72 @@ fn build_rungs(
             status: RungStatus::Unknown,
             detail: "no data yet".to_string(),
         }
+    } else if filtered {
+        // Neither pings nor 443 say anything about the path; the egress
+        // monitor's rows do, and the finding above has the port-by-port
+        // story. Warn, never red: something is getting out.
+        let detail = match s
+            .egress_monitor
+            .as_ref()
+            .filter(|m| m.active && m.has_data())
+        {
+            Some(m) => {
+                let open = m.open();
+                format!(
+                    "web blocked · {} of {} egress ports answer{}",
+                    open.len(),
+                    m.rows.len(),
+                    if open.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", crate::collectors::egress::Monitor::list(&open))
+                    }
+                )
+            }
+            None => "web blocked · reference DNS answers · probing other ports".to_string(),
+        };
+        Rung {
+            area: Area::Internet,
+            status: RungStatus::Warn,
+            detail,
+        }
+    } else if blackholed {
+        // Pings measure nothing here; the TCP connect series to the same
+        // anchors does — the same numbers the performance grade reads.
+        let tcp: Vec<&TargetStat> = with_data
+            .iter()
+            .copied()
+            .filter(|t| t.tcp.window.len() >= th::MIN_SAMPLES)
+            .collect();
+        if tcp.is_empty() {
+            Rung {
+                area: Area::Internet,
+                status: RungStatus::Unknown,
+                detail: "pings unanswered here — tcp :443 probes collecting…".to_string(),
+            }
+        } else {
+            let worst_loss = tcp
+                .iter()
+                .map(|t| t.tcp.recent_loss_pct(th::RECENT))
+                .fold(0.0_f64, f64::max);
+            let worst_p95 = tcp
+                .iter()
+                .filter_map(|t| t.tcp.stats(th::RECENT).p95)
+                .fold(0.0_f64, f64::max);
+            Rung {
+                area: Area::Internet,
+                status: if loss_grade(worst_loss, None) == RttGrade::Good {
+                    RungStatus::Ok
+                } else {
+                    RungStatus::Warn
+                },
+                detail: format!(
+                    "{} anchor{} · tcp :443 · worst p95 {worst_p95:.0}ms · worst loss {worst_loss:.0}% · pings unanswered here",
+                    tcp.len(),
+                    if tcp.len() == 1 { "" } else { "s" }
+                ),
+            }
+        }
     } else {
         let worst_loss = with_data
             .iter()
@@ -2635,7 +2980,48 @@ fn build_rungs(
         } else {
             ""
         };
-        if !bad.is_empty() && fine >= 2 && bad.len() * 2 < with_data.len() {
+        if filtered {
+            Rung {
+                area: Area::Destinations,
+                status: RungStatus::Warn,
+                detail: "pings and tcp :443 lost — the web is blocked here; the egress rows show what gets out".to_string(),
+            }
+        } else if blackholed {
+            // The odd ones out are read off the TCP connect series: every
+            // ping is lost here by policy, so ICMP cannot single anyone out.
+            let measured = with_data
+                .iter()
+                .filter(|t| t.tcp.window.len() >= th::MIN_SAMPLES)
+                .count();
+            let names: Vec<&str> = with_data
+                .iter()
+                .filter(|t| {
+                    t.tcp.window.len() >= th::MIN_SAMPLES
+                        && loss_grade(t.tcp.recent_loss_pct(th::RECENT), None) == RttGrade::Bad
+                })
+                .map(|t| t.label.as_str())
+                .collect();
+            if measured == 0 {
+                Rung {
+                    area: Area::Destinations,
+                    status: RungStatus::Unknown,
+                    detail: "pings unanswered here — tcp :443 probes collecting…".to_string(),
+                }
+            } else if names.is_empty() {
+                Rung {
+                    area: Area::Destinations,
+                    status: RungStatus::Ok,
+                    detail: "all targets reachable over tcp :443 — pings unanswered here"
+                        .to_string(),
+                }
+            } else {
+                Rung {
+                    area: Area::Destinations,
+                    status: RungStatus::Warn,
+                    detail: format!("struggling over tcp :443: {}{load}", list(&names)),
+                }
+            }
+        } else if !bad.is_empty() && fine >= 2 && bad.len() * 2 < with_data.len() {
             let names: Vec<&str> = bad.iter().map(|t| t.label.as_str()).collect();
             // Red only for a destination that has gone entirely; loss to one
             // far end while the rest answer is a caution about that place.
@@ -2732,9 +3118,72 @@ pub fn checks(s: &AppState) -> Vec<Check> {
         push(
             "ICMP",
             RungStatus::Warn,
-            "blocked on this network — every ping goes unanswered while the web answers, so the latency/loss columns cannot measure here; web and DNS carry the judgement"
+            "blocked on this network — every ping goes unanswered while the web answers, so the ICMP latency/loss columns cannot measure here; web, DNS and the tcp :443 probes carry the judgement"
                 .to_string(),
         );
+    }
+
+    // The egress monitor: what it is doing, or what it found. A person
+    // should always be able to see that octomon is probing other ports and
+    // why — this row is where, once the timeline entry has scrolled away.
+    if let Some(m) = &s.egress_monitor {
+        let open = m.open();
+        let total = m.rows.len();
+        let describe = |rows: &[&crate::collectors::egress::MonitorRow]| -> String {
+            rows.iter()
+                .map(|r| match r.last {
+                    crate::collectors::egress::Outcome::Open(ms) => {
+                        format!("{} {ms:.0}ms", r.check.name)
+                    }
+                    _ => r.check.name.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let blocked: Vec<String> = m.blocked().iter().map(|r| r.check.name.clone()).collect();
+        let (status, detail) = if m.active && !m.has_data() {
+            (
+                RungStatus::Unknown,
+                format!(
+                    "started {} ago — pings, tcp :443 and the web check all failing · first round in progress",
+                    fmt_duration(m.started.elapsed())
+                ),
+            )
+        } else if m.active {
+            (
+                if open.is_empty() {
+                    RungStatus::Warn
+                } else {
+                    RungStatus::Ok
+                },
+                format!(
+                    "probing every {}s for {} — {} of {total} get out{}{}",
+                    crate::collectors::egress::MONITOR_INTERVAL.as_secs(),
+                    fmt_duration(m.started.elapsed()),
+                    open.len(),
+                    if open.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", describe(&open))
+                    },
+                    if blocked.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · blocked: {}", blocked.join(", "))
+                    }
+                ),
+            )
+        } else {
+            (
+                RungStatus::Ok,
+                format!(
+                    "stopped {} ago — the web answers again · last round: {} of {total} got out",
+                    fmt_duration(m.stopped.map(|t| t.elapsed()).unwrap_or_default()),
+                    open.len()
+                ),
+            )
+        };
+        push("egress", status, detail);
     }
 
     // Path discovery + public IP.
@@ -2919,23 +3368,37 @@ pub fn checks(s: &AppState) -> Vec<Check> {
             );
         }
     }
-    if let Some(r) = s.dns.iter().find(|p| p.reference) {
-        let (status, detail) = if r.recent_len() < th::DNS_MIN_SAMPLES {
-            (RungStatus::Unknown, format!("{} — probing", r.server))
-        } else if r.failing(th::DNS_FAIL_PCT) {
-            (
-                RungStatus::Warn,
-                format!(
-                    "{} unreachable ({}) — outside DNS filtered here",
-                    r.server, r.status
-                ),
-            )
+    // One row for all the references: any answering is the good news, all
+    // failing is the filter, and each is named with its own reading.
+    let refs: Vec<&crate::app::DnsProbe> = s.dns.iter().filter(|p| p.reference).collect();
+    if !refs.is_empty() {
+        let judged: Vec<&&crate::app::DnsProbe> = refs
+            .iter()
+            .filter(|r| r.recent_len() >= th::DNS_MIN_SAMPLES)
+            .collect();
+        let status = if judged.is_empty() {
+            RungStatus::Unknown
+        } else if judged.iter().any(|r| !r.failing(th::DNS_FAIL_PCT)) {
+            RungStatus::Ok
         } else {
-            (
-                RungStatus::Ok,
-                format!("{} answers ({})", r.server, fmt_ms(r.recent_mean_ms())),
-            )
+            RungStatus::Warn
         };
+        let mut detail = refs
+            .iter()
+            .map(|r| {
+                if r.recent_len() < th::DNS_MIN_SAMPLES {
+                    format!("{} probing", r.server)
+                } else if r.failing(th::DNS_FAIL_PCT) {
+                    format!("{} unreachable ({})", r.server, r.status)
+                } else {
+                    format!("{} answers ({})", r.server, fmt_ms(r.recent_mean_ms()))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        if status == RungStatus::Warn {
+            detail.push_str(" — outside DNS filtered here");
+        }
         push("reference DNS", status, detail);
     }
     out
@@ -5229,10 +5692,298 @@ mod tests {
         );
     }
 
+    /// The plane: every target loses a lot of pings but not all of them.
+    fn lossy_wall() -> AppState {
+        let mut s = healthy_state();
+        for t in &mut s.targets {
+            for i in 0..20 {
+                if i % 5 < 3 {
+                    t.record_loss();
+                } else {
+                    t.record_reply(120.0);
+                }
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn an_icmp_blackhole_with_a_working_web_check_is_not_degraded() {
+        // Azure: every ping unanswered, the web fine. That is ICMP policy,
+        // not heavy loss — "degraded but usable" would promise stalls the
+        // TCP series shows no sign of, and paint the session bar yellow for
+        // the machine's whole life. The ping-driven claims are void here.
+        let mut s = healthy_state();
+        for t in &mut s.targets {
+            for _ in 0..th::RECENT {
+                t.record_loss();
+            }
+        }
+        s.http.v4 = crate::app::FamilyProbe::Ok(2.0);
+        assert!(icmp_blackholed(&s));
+        let t = evaluate(&s);
+        assert!(t.findings.is_empty(), "got: {:?}", causes(&t));
+        // The ladder says "not measurable", never red, under a healthy
+        // headline — and not "web traffic still flows" either, which is the
+        // partial-loss wording.
+        let rung = |a: Area| t.rungs.iter().find(|r| r.area == a).unwrap();
+        assert_eq!(rung(Area::Gateway).status, RungStatus::Unknown);
+        assert!(
+            rung(Area::Gateway)
+                .detail
+                .contains("blocked on this network")
+        );
+        assert_eq!(rung(Area::Internet).status, RungStatus::Unknown);
+        assert_eq!(rung(Area::Destinations).status, RungStatus::Unknown);
+
+        // Once the TCP connect series has samples it carries the judgement.
+        for t in s.targets.iter_mut().filter(|t| !t.discovered) {
+            for _ in 0..20 {
+                t.tcp.record_reply(12.0);
+            }
+        }
+        let t = evaluate(&s);
+        assert!(t.findings.is_empty());
+        let rung = |a: Area| t.rungs.iter().find(|r| r.area == a).unwrap();
+        assert_eq!(rung(Area::Internet).status, RungStatus::Ok);
+        assert!(rung(Area::Internet).detail.contains("tcp :443"));
+        assert_eq!(rung(Area::Destinations).status, RungStatus::Ok);
+
+        // One anchor failing its handshakes is the odd one out, over TCP.
+        let q = s.targets.iter_mut().find(|t| t.label == "Quad9").unwrap();
+        for _ in 0..6 {
+            q.tcp.record_loss();
+        }
+        let t = evaluate(&s);
+        let rung = |a: Area| t.rungs.iter().find(|r| r.area == a).unwrap();
+        assert_eq!(rung(Area::Destinations).status, RungStatus::Warn);
+        assert!(rung(Area::Destinations).detail.contains("Quad9"));
+    }
+
+    /// Everything the web needs failing at once: the web check, tcp :443 to
+    /// every anchor, and pings too — the state that reads as a dead internet.
+    fn dark_web() -> AppState {
+        let mut s = healthy_state();
+        for t in &mut s.targets {
+            for _ in 0..th::RECENT {
+                t.record_loss();
+                if !t.discovered {
+                    t.tcp.record_loss();
+                }
+            }
+        }
+        s.http.v4 = crate::app::FamilyProbe::Fail("connect failed".into());
+        s.http.v6 = crate::app::FamilyProbe::NotApplicable;
+        s
+    }
+
+    /// An egress monitor that has run, with the named rows getting through.
+    fn monitor_with(open: &[&str]) -> crate::collectors::egress::Monitor {
+        use crate::collectors::egress::{Monitor, MonitorRow, Outcome, default_monitor_checks};
+        let rows = default_monitor_checks()
+            .into_iter()
+            .map(|c| {
+                let is_open = open.contains(&c.name.as_str());
+                let mut series = crate::app::Series::default();
+                for _ in 0..4 {
+                    if is_open {
+                        series.record_reply(40.0);
+                    } else {
+                        series.record_loss();
+                    }
+                }
+                MonitorRow {
+                    check: c,
+                    addr: None,
+                    series,
+                    last: if is_open {
+                        Outcome::Open(40.0)
+                    } else {
+                        Outcome::Blocked
+                    },
+                }
+            })
+            .collect();
+        Monitor {
+            rows,
+            started: Instant::now(),
+            active: true,
+            stopped: None,
+            rounds: 4,
+        }
+    }
+
+    #[test]
+    fn a_dark_web_is_an_outage_until_something_proves_the_path_up() {
+        use crate::app::FamilyProbe;
+        let s = dark_web();
+        assert!(web_dark(&s));
+        let t = evaluate(&s);
+        assert!(!causes(&t).contains(&Cause::WebFiltered));
+        assert!(
+            t.findings.iter().any(|f| f.severity == Severity::Down),
+            "{:?}",
+            causes(&t)
+        );
+        // The web check answering ends the dark; so does a sign-in page,
+        // which is its own finding.
+        let mut ok = dark_web();
+        ok.http.v4 = FamilyProbe::Ok(30.0);
+        assert!(!web_dark(&ok));
+        let mut captive = dark_web();
+        captive.http.v4 = FamilyProbe::Captive(None);
+        assert!(!web_dark(&captive));
+        // And 443 answering somewhere is not dark either.
+        let mut tcp_ok = dark_web();
+        for _ in 0..th::RECENT {
+            tcp_ok.targets[0].tcp.record_reply(20.0);
+        }
+        assert!(!web_dark(&tcp_ok));
+    }
+
+    #[test]
+    fn a_reference_resolver_answering_turns_a_dark_web_into_a_filter() {
+        let mut s = dark_web();
+        // One reference dead, one answering: one is enough — a provider's
+        // bad day is not a network fact, and the path is provably up.
+        let mut dead = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
+        dead.reference = true;
+        let mut alive = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
+        alive.reference = true;
+        for _ in 0..5 {
+            dead.record(None);
+            alive.record(Some(12.0));
+        }
+        s.dns.push(dead);
+        s.dns.push(alive);
+        let t = evaluate(&s);
+        let f = &t.findings[0];
+        assert_eq!(f.cause, Cause::WebFiltered, "{:?}", causes(&t));
+        assert_eq!(f.severity, Severity::Degraded);
+        assert!(f.summary.contains("8.8.8.8"), "got: {}", f.summary);
+        assert!(
+            t.findings.iter().all(|f| f.severity < Severity::Down),
+            "outage claims survived: {:?}",
+            causes(&t)
+        );
+        let rung = |a: Area| t.rungs.iter().find(|r| r.area == a).unwrap();
+        assert_eq!(rung(Area::Internet).status, RungStatus::Warn);
+        assert!(rung(Area::Internet).detail.contains("probing other ports"));
+        assert_eq!(rung(Area::Gateway).status, RungStatus::Unknown);
+        assert_eq!(
+            session_state(&Verdict::Problems(t.findings.clone())),
+            crate::session::SessionState::Degraded
+        );
+        // Both references dead: nothing proves the path, the outage stands.
+        for p in s.dns.iter_mut() {
+            for _ in 0..5 {
+                p.record(None);
+            }
+        }
+        let t = evaluate(&s);
+        assert!(!causes(&t).contains(&Cause::WebFiltered));
+    }
+
+    #[test]
+    fn the_egress_monitor_names_what_gets_out() {
+        let mut s = dark_web();
+        s.egress_monitor = Some(monitor_with(&["SSH", "NTP", "DNS"]));
+        let t = evaluate(&s);
+        let f = &t.findings[0];
+        assert_eq!(f.cause, Cause::WebFiltered, "{:?}", causes(&t));
+        assert_eq!(
+            f.summary,
+            "web blocked on this network — SSH, NTP and DNS get out; HTTP and QUIC blocked"
+        );
+        assert_eq!(f.confidence, Confidence::Strong);
+        assert!(
+            f.evidence
+                .iter()
+                .any(|e| e.contains("github.com:22") && e.contains("open 40ms")),
+            "{:?}",
+            f.evidence
+        );
+        let rung = |a: Area| t.rungs.iter().find(|r| r.area == a).unwrap();
+        assert_eq!(rung(Area::Internet).status, RungStatus::Warn);
+        assert!(rung(Area::Internet).detail.contains("3 of 5"));
+        let egress = t
+            .checks
+            .iter()
+            .find(|c| c.name == "egress")
+            .expect("egress row");
+        assert_eq!(egress.status, RungStatus::Ok);
+        assert!(
+            egress.detail.contains("3 of 5 get out"),
+            "{}",
+            egress.detail
+        );
+        let p = t.performance.expect("graded on the egress series");
+        assert!(p.detail.contains("(egress)"), "{}", p.detail);
+
+        // Port 80 open with 443 dead is the inspecting filter's signature.
+        s.egress_monitor = Some(monitor_with(&["HTTP", "DNS"]));
+        let t = evaluate(&s);
+        assert!(
+            t.findings[0].summary.starts_with("HTTPS blocked"),
+            "{}",
+            t.findings[0].summary
+        );
+
+        // Nothing gets out and no reference answers: a real outage.
+        s.egress_monitor = Some(monitor_with(&[]));
+        let t = evaluate(&s);
+        assert!(!causes(&t).contains(&Cause::WebFiltered));
+        assert!(t.findings.iter().any(|f| f.severity == Severity::Down));
+        let egress = t.checks.iter().find(|c| c.name == "egress").unwrap();
+        assert_eq!(egress.status, RungStatus::Warn);
+
+        // While the monitor runs, the quality table opens on its rows.
+        assert_eq!(auto_family(&s), crate::app::ProbeFamily::Egress);
+    }
+
+    #[test]
+    fn broken_v6_through_a_tunnel_is_a_note_not_a_degradation() {
+        use crate::app::FamilyProbe;
+        // A tunnel that carries only v4 is how it is built, not a fault
+        // the LAN can fix: the finding stands, but the footer and the
+        // session bar stay green — as they do on a v4-only LAN.
+        let mut s = healthy_state();
+        s.netinfo.tunnel = Some("Cloudflare WARP".into());
+        s.netinfo.tunnel_iface = "utun0".into();
+        s.http.v4 = FamilyProbe::Ok(53.0);
+        s.http.v6 = FamilyProbe::Fail("connect failed".into());
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::Ipv6Broken)
+            .expect("still named");
+        assert_eq!(f.severity, Severity::Info);
+        assert!(f.summary.contains("tunnel"), "got: {}", f.summary);
+        assert_eq!(
+            session_state(&Verdict::Problems(t.findings.clone())),
+            crate::session::SessionState::Healthy
+        );
+
+        // The same break behind a router is the router's or the ISP's
+        // fault, and keeps its yellow.
+        let mut s = healthy_state();
+        s.http.v4 = FamilyProbe::Ok(53.0);
+        s.http.v6 = FamilyProbe::Fail("connect failed".into());
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::Ipv6Broken)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Degraded);
+    }
+
     #[test]
     fn an_icmp_wall_with_a_working_web_check_is_degraded_but_usable() {
-        let mut s = icmp_wall();
+        let mut s = lossy_wall();
         s.http.v4 = crate::app::FamilyProbe::Ok(1578.0);
+        assert!(!icmp_blackholed(&s), "partial loss is not a blackhole");
         let t = evaluate(&s);
         // The ping-derived outage claims are folded into one note-class
         // finding: the user is browsing over this "unreachable" link.

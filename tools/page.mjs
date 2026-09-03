@@ -125,6 +125,7 @@ const NAV = `<header>
       <a href="/#video">video</a>
       <a href="/blog/">blog</a>
       <a href="/changelog">changelog</a>
+      <a href="/howto">how to</a>
       <a href="/understand">faq</a>
       <a href="/understand#glossary">glossary</a>
       <a href="/privacy">privacy</a>

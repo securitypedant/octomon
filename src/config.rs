@@ -68,10 +68,17 @@ pub struct Config {
     /// Once a minute a random name *under* it is also queried; an address back
     /// for a name that cannot exist means the resolver redirects misses.
     pub dns_probe_name: String,
-    /// A public resolver probed alongside the system ones for contrast: yours
-    /// failing while it works means "change DNS"; it failing while yours work
-    /// means this network forces its own DNS. Set to "" to disable.
-    pub dns_reference_resolver: String,
+    /// Public resolvers probed alongside the system ones for contrast: yours
+    /// failing while one of these works means "change DNS"; all of these
+    /// failing while yours work means this network forces its own DNS. Two
+    /// by default so that a network handing out 1.1.1.1 as *its* resolver
+    /// still leaves an independent one — and so one provider's outage is
+    /// not read as the path being down. Set to [] to disable.
+    pub dns_reference_resolvers: Vec<String>,
+    /// The pre-0.11 single-resolver key. Folded into the list on load and
+    /// not written back; "" (the old way to disable) still disables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_reference_resolver: Option<String>,
     /// HTTP connectivity-check endpoint: "auto" uses this OS's own (Apple /
     /// Microsoft / Ubuntu — the machine already polls it, so octomon adds no
     /// new party learning it is online); or name one of "apple", "microsoft",
@@ -92,6 +99,17 @@ pub struct Config {
     /// that reliably answers. Edit to add your own (a VPN endpoint, a work
     /// server); `proto` is "tcp", or "dns" / "ntp" / "quic" for a UDP exchange.
     pub egress_checks: Vec<crate::collectors::egress::EgressCheck>,
+    /// The automatic egress monitor: when pings, the TCP :443 probes and the
+    /// web check are *all* failing, octomon starts probing a short list of
+    /// other ports every 5 s to tell a filtered network from a dead one, and
+    /// stops when the web answers again. It announces itself on the
+    /// timeline and in the analysis. Set to false to never do this.
+    #[serde(default = "default_true")]
+    pub egress_monitor: bool,
+    /// What the monitor probes: one reference host per protocol. Swap in
+    /// your own SSH or NTP server if you would rather it contacted those.
+    #[serde(default = "crate::collectors::egress::default_monitor_checks")]
+    pub egress_monitor_checks: Vec<crate::collectors::egress::EgressCheck>,
     /// Whether the first-run explainer has been shown (set automatically).
     pub explainer_seen: bool,
     /// Glyphs used to plot chart lines: "auto", "braille", "halfblock" or
@@ -354,12 +372,15 @@ impl Default for Config {
             dns_interval_ms: 5000,
             dns_timeout_ms: 2000,
             dns_probe_name: "example.com".to_string(),
-            dns_reference_resolver: "1.1.1.1".to_string(),
+            dns_reference_resolvers: default_reference_resolvers(),
+            dns_reference_resolver: None,
             http_probe_provider: "auto".to_string(),
             http_probe_interval_ms: 12_000,
             ntp_server: "time.cloudflare.com".to_string(),
             pmtu_probe_host: "1.1.1.1".to_string(),
             egress_checks: crate::collectors::egress::default_checks(),
+            egress_monitor: true,
+            egress_monitor_checks: crate::collectors::egress::default_monitor_checks(),
             explainer_seen: false,
             graph_marker: "auto".to_string(),
             bar_glyphs: "auto".to_string(),
@@ -370,6 +391,25 @@ impl Default for Config {
             alert: AlertConfig::default(),
         }
     }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_reference_resolvers() -> Vec<String> {
+    vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()]
+}
+
+/// The built-in anchor resolvers the default target list starts with. The
+/// egress view of the quality table stands its own rows in for these —
+/// they are the anchors octomon chose, not ones the user did.
+pub const BUILTIN_ANCHORS: [&str; 3] = ["1.1.1.1", "8.8.8.8", "9.9.9.9"];
+
+pub fn is_builtin_anchor(addr: std::net::IpAddr) -> bool {
+    BUILTIN_ANCHORS
+        .iter()
+        .any(|a| a.parse::<std::net::IpAddr>().ok() == Some(addr))
 }
 
 /// Parse a CLI target string: `"LABEL=IP"` or bare `"IP"` (label = the IP).
@@ -406,6 +446,35 @@ impl Config {
     }
     pub fn http_probe_interval(&self) -> Duration {
         Duration::from_millis(self.http_probe_interval_ms.max(2000))
+    }
+
+    /// The reference resolvers as addresses, unparsable entries dropped.
+    pub fn reference_resolvers(&self) -> Vec<std::net::IpAddr> {
+        let mut out: Vec<std::net::IpAddr> = Vec::new();
+        for r in &self.dns_reference_resolvers {
+            if let Ok(ip) = r.trim().parse::<std::net::IpAddr>()
+                && !out.contains(&ip)
+            {
+                out.push(ip);
+            }
+        }
+        out
+    }
+
+    /// Fold the pre-0.11 `dns_reference_resolver` key into the list, so a
+    /// config written by an older octomon keeps the resolver it named
+    /// (ahead of the defaults) and one that disabled it with "" stays
+    /// disabled. The old key is dropped, so the next save writes the list.
+    pub fn migrated(mut self) -> Self {
+        if let Some(old) = self.dns_reference_resolver.take() {
+            let old = old.trim().to_string();
+            if old.is_empty() {
+                self.dns_reference_resolvers.clear();
+            } else if !self.dns_reference_resolvers.contains(&old) {
+                self.dns_reference_resolvers.insert(0, old);
+            }
+        }
+        self
     }
 
     /// Chart marker, falling back to auto for an unrecognised value rather
@@ -500,9 +569,9 @@ impl Config {
     /// is how you start a second profile.
     pub fn load_named(path: &std::path::Path) -> Result<Self, String> {
         match std::fs::read_to_string(path) {
-            Ok(text) => {
-                toml::from_str::<Config>(&text).map_err(|e| format!("{}: {e}", path.display()))
-            }
+            Ok(text) => toml::from_str::<Config>(&text)
+                .map(Config::migrated)
+                .map_err(|e| format!("{}: {e}", path.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let cfg = Config::default();
                 cfg.write_to(path)
@@ -516,7 +585,7 @@ impl Config {
     fn load_from(path: &std::path::Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(text) => match toml::from_str::<Config>(&text) {
-                Ok(cfg) => cfg,
+                Ok(cfg) => cfg.migrated(),
                 Err(e) => {
                     tracing::warn!("failed to parse {}: {e}; using defaults", path.display());
                     // Every setting silently reverting is a big, invisible
@@ -705,6 +774,67 @@ mod path_tests {
         // A typo in a cosmetic setting must not stop octomon starting.
         assert_eq!(with("brailel").marker(), auto);
         assert_eq!(with("").marker(), auto);
+    }
+
+    /// The reference resolver became a list: the old single key is folded
+    /// in ahead of the defaults, "" still disables, and the list itself
+    /// round-trips without the old key coming back.
+    #[test]
+    fn reference_resolver_key_migrates_into_the_list() {
+        let fresh = toml::from_str::<Config>("").unwrap().migrated();
+        assert_eq!(
+            fresh.reference_resolvers(),
+            vec![
+                "1.1.1.1".parse::<std::net::IpAddr>().unwrap(),
+                "8.8.8.8".parse().unwrap()
+            ]
+        );
+
+        let custom = toml::from_str::<Config>("dns_reference_resolver = \"9.9.9.9\"\n")
+            .unwrap()
+            .migrated();
+        let list: Vec<String> = custom
+            .reference_resolvers()
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        assert_eq!(list, vec!["9.9.9.9", "1.1.1.1", "8.8.8.8"]);
+        assert!(custom.dns_reference_resolver.is_none(), "old key dropped");
+        let text = toml::to_string_pretty(&custom).unwrap();
+        assert!(!text.contains("dns_reference_resolver ="));
+        assert!(text.contains("dns_reference_resolvers"));
+
+        let old_default = toml::from_str::<Config>("dns_reference_resolver = \"1.1.1.1\"\n")
+            .unwrap()
+            .migrated();
+        assert_eq!(old_default.reference_resolvers().len(), 2, "no duplicate");
+
+        let off = toml::from_str::<Config>("dns_reference_resolver = \"\"\n")
+            .unwrap()
+            .migrated();
+        assert!(off.reference_resolvers().is_empty(), "\"\" still disables");
+
+        let explicit =
+            toml::from_str::<Config>("dns_reference_resolvers = [\"9.9.9.9\", \"junk\"]\n")
+                .unwrap()
+                .migrated();
+        assert_eq!(explicit.reference_resolvers().len(), 1, "junk dropped");
+    }
+
+    /// The egress monitor is on by default with the five-row list, and a
+    /// config from before it existed loads the same way.
+    #[test]
+    fn egress_monitor_defaults_on_with_the_short_list() {
+        let legacy: Config = toml::from_str("").unwrap();
+        assert!(legacy.egress_monitor);
+        let ports: Vec<u16> = legacy
+            .egress_monitor_checks
+            .iter()
+            .map(|c| c.port)
+            .collect();
+        assert_eq!(ports, vec![80, 443, 22, 123, 53]);
+        let off: Config = toml::from_str("egress_monitor = false\n").unwrap();
+        assert!(!off.egress_monitor);
     }
 
     /// Saved name-targets keep their hostname across a config round-trip,

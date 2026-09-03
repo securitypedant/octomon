@@ -11,11 +11,16 @@
 //! Two things beyond latency, because "the resolver answers" is not the same as
 //! "the resolver is honest":
 //!
-//! - **Reference resolver.** A public resolver (`dns_reference_resolver`,
-//!   default 1.1.1.1) is probed alongside the system ones. When yours fail and
-//!   it works, the fix is "change DNS"; when it fails and yours work, this
-//!   network is forcing its own DNS (port 53 to the outside is filtered) —
-//!   two different situations that plain resolver latency cannot tell apart.
+//! - **Reference resolvers.** Public resolvers (`dns_reference_resolvers`,
+//!   default 1.1.1.1 and 8.8.8.8) are probed alongside the system ones. When
+//!   yours fail and one of them works, the fix is "change DNS"; when they all
+//!   fail and yours work, this network is forcing its own DNS (port 53 to the
+//!   outside is filtered) — two different situations that plain resolver
+//!   latency cannot tell apart. Two, so that a network handing out 1.1.1.1
+//!   as its own resolver still leaves an independent reference, and so one
+//!   provider's bad day is not mistaken for the path being down: a reference
+//!   answering is also the analysis's proof that the internet path is up
+//!   when pings and the web are not.
 //! - **Hijack check.** Once a minute each resolver is asked for a name that
 //!   cannot exist (`<random>.<probe name>`). The honest answer is NXDOMAIN; an
 //!   IP address back means the resolver is redirecting misses to a search or
@@ -39,7 +44,7 @@ const HIJACK_EVERY: u32 = 12;
 pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
     let mut ticker = tokio::time::interval(cfg.dns_interval());
     let name = sanitise_name(&cfg.dns_probe_name);
-    let reference = cfg.dns_reference_resolver.trim().parse::<IpAddr>().ok();
+    let references: Vec<IpAddr> = cfg.reference_resolvers();
     let mut id: u16 = 0;
     let mut tick: u32 = 0;
 
@@ -63,10 +68,10 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         // 1.1.1.1 has 1.1.1.1 as *its* resolver, and marking it "reference"
         // would make every "this network's resolvers" count come up short.
         let system = servers.clone();
-        if let Some(r) = reference
-            && !servers.contains(&r)
-        {
-            servers.push(r);
+        for r in &references {
+            if !servers.contains(r) {
+                servers.push(*r);
+            }
         }
 
         for server in servers.iter().copied() {
@@ -106,7 +111,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
             // Re-judged every tick, not just at creation: a resolver-set
             // change (DHCP renewal, VPN) can move the reference address in
             // or out of the system list while the probe lives on.
-            probe.reference = reference == Some(server) && !system.contains(&server);
+            probe.reference = references.contains(&server) && !system.contains(&server);
             match outcome {
                 Ok(answers) => {
                     probe.record(Some(elapsed));
@@ -136,9 +141,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         // Forget resolvers that dropped out of the configuration.
         let mut s = state.lock().unwrap();
         let mut live = canonical_servers(&s.netinfo.dns);
-        if let Some(r) = reference {
-            live.push(r);
-        }
+        live.extend(references.iter().copied());
         s.dns.retain(|p| live.contains(&p.server));
     }
 }

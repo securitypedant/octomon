@@ -224,6 +224,7 @@
       <a href="/#video">video</a>
       <a href="/blog/">blog</a>
       <a href="/changelog">changelog</a>
+      <a href="/howto">how to</a>
       <a href="/understand">faq</a>
       <a href="/understand#glossary">glossary</a>
       <a href="/privacy">privacy</a>
@@ -365,6 +366,40 @@
             direct evidence no amount of ICMP loss outweighs, so instead of
             crying outage the verdict says: expect slow pages and stalling
             calls, not a dead connection.</p>
+            <p>A network where <em>every</em> ping goes unanswered is a
+            different case: that is ICMP dropped as policy (Azure VMs and
+            some office networks do this), and the loss columns are measuring
+            the policy, not the connection. octomon then says so in the
+            analysis ("no ICMP here") and judges on the web check, DNS and its
+            TCP connect probes instead, which can read perfectly healthy.</p>
+          </div>
+        </details>
+
+        <details>
+          <summary>What happens when pings and the web both fail?</summary>
+          <div class="a">
+            <p>That is the state that reads as a dead internet, and on a
+            filtered network it is wrong: an office or guest network that
+            blocks port 443 takes out pings, the TCP connect probes and the
+            web check at once while SSH, NTP or DNS still get out fine.</p>
+            <p>So when all three are failing at the same time, octomon looks
+            for proof the path is up. Its reference resolvers (1.1.1.1 and
+            8.8.8.8 by default, over UDP 53) are already being probed; one of
+            them answering is a packet crossing the internet and back. It
+            also starts an egress monitor: a five-row list (HTTP on port 80,
+            QUIC, SSH, NTP, DNS, each against a host that reliably answers)
+            probed every 5 seconds until the web comes back. The monitor
+            announces itself on the timeline, has its own row in the
+            analysis, and can be turned off with
+            <code>egress_monitor = false</code>; the hosts are yours to
+            change in <code>egress_monitor_checks</code>.</p>
+            <p>With that evidence the analysis says "web blocked on this
+            network, SSH, NTP and DNS get out" instead of "internet
+            unreachable", the session bar shows amber rather than red, and
+            the Connection Quality table switches to the monitor's rows so
+            there is still a live view of what the connection can do. Port
+            80 open while 443 is dead gets its own wording: that is the
+            signature of a filter that only allows what it can inspect.</p>
           </div>
         </details>
 

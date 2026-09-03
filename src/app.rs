@@ -640,7 +640,7 @@ pub enum NetSlot {
     GatewayV6,
     Public,
     Dns(usize),
-    RefDns,
+    RefDns(usize),
 }
 
 impl NetSlot {
@@ -653,7 +653,7 @@ impl NetSlot {
             NetSlot::V6(_) => 2,
             NetSlot::Gateway | NetSlot::GatewayV6 => 3,
             NetSlot::Public => 4,
-            NetSlot::Dns(_) | NetSlot::RefDns => 5,
+            NetSlot::Dns(_) | NetSlot::RefDns(_) => 5,
         }
     }
 }
@@ -2173,6 +2173,10 @@ pub enum Panel {
 pub enum ProbeFamily {
     Icmp,
     Tcp,
+    /// The automatic egress monitor's rows (HTTP, QUIC, SSH, NTP, DNS to
+    /// reference hosts): what still gets out when pings, tcp :443 and the
+    /// web check are all failing. Only offered once a monitor exists.
+    Egress,
 }
 
 /// What the Cloudflare edge reported about this connection (`/edge` on
@@ -2390,6 +2394,9 @@ pub struct AppState {
     pub proxy: Option<ProxyConfig>,
     /// The [c] egress scan, once one has been run this session.
     pub egress: Option<crate::collectors::egress::Scan>,
+    /// The automatic egress monitor, once the web has gone dark this
+    /// session: kept after it stops so the analysis can say what it found.
+    pub egress_monitor: Option<crate::collectors::egress::Monitor>,
     /// How this machine's attachment to the network has changed this session,
     /// newest last. Shown in the full-screen Network panel.
     pub net_history: VecDeque<NetChange>,
@@ -2710,6 +2717,7 @@ impl AppState {
             public_ip_error: None,
             proxy: None,
             egress: None,
+            egress_monitor: None,
             net_history: VecDeque::new(),
             net_history_sel: 0,
             net_detail_expanded: false,
@@ -3093,9 +3101,9 @@ impl AppState {
         for (i, d) in self.netinfo.dns.iter().enumerate() {
             push(NetSlot::Dns(i), d);
         }
-        if let Some(r) = self.dns.iter().find(|p| p.reference) {
+        for (i, r) in self.dns.iter().filter(|p| p.reference).enumerate() {
             let token = r.server.to_string();
-            push(NetSlot::RefDns, &token);
+            push(NetSlot::RefDns(i), &token);
         }
         out
     }

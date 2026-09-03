@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>octomon: how to use it</title>
+<meta name="description" content="The three ways to use octomon: learn your everyday networks, diagnose the connection you are on, and keep watch on a network you do not trust.">
+<link rel="canonical" href="https://octomon.dev/howto">
+<link rel="alternate" type="application/rss+xml" title="octomon blog" href="/blog/feed.xml">
+<link rel="alternate" type="application/rss+xml" title="octomon releases" href="/changelog.xml">
+<link rel="icon" type="image/png" sizes="32x32" href="/images/octomon-logo-32.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/images/octomon-icon-tile.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/images/octomon-icon-tile.png">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://octomon.dev/howto">
+<meta property="og:title" content="octomon: how to use it">
+<meta property="og:description" content="Learn your networks, diagnose the one you are on, keep watch on the one you do not trust.">
+<meta property="og:image" content="https://octomon.dev/images/octomon-og-card.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="/tokens.css">
+<style>
+  /* Every colour on this page is a token from tokens.css, no hex here. */
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+  }
+  body {
+    margin: 0;
+    background: var(--octo-ink);
+    color: var(--octo-white);
+    font-family: var(--octo-body);
+    font-size: 17px;
+    line-height: 1.6;
+    /* wide content must scroll inside its own container, never the page */
+    overflow-x: clip;
+  }
+  a { color: var(--octo-green); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  :focus-visible {
+    outline: 2px solid var(--octo-green);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  h1, h2 {
+    font-family: var(--octo-display);
+    text-transform: uppercase;
+    letter-spacing: -0.01em;
+    font-weight: 400;
+    line-height: 1.05;
+    margin: 0 0 0.4em;
+  }
+  kbd {
+    font-family: var(--octo-mono);
+    font-size: 0.85em;
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    padding: 0.1em 0.45em;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  header {
+    border-bottom: 1px solid var(--octo-line);
+    background: var(--octo-ink);
+  }
+  .nav {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+    padding: 14px 0;
+  }
+  .mark { display: flex; align-items: center; gap: 12px; color: var(--octo-white); }
+  .mark:hover { text-decoration: none; }
+  .mark svg { width: 34px; height: 34px; display: block; }
+  .wordmark {
+    font-family: var(--octo-mono);
+    font-weight: 800;
+    font-size: 1.35rem;
+    letter-spacing: 0.023em;
+  }
+  nav.links { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px 22px; font-family: var(--octo-mono); font-size: 0.95rem; }
+  /* mobile hamburger: pure CSS (checkbox), desktop never sees it */
+  .menu-btn { display: none; }
+
+  section { padding: 64px 0; }
+  section + section { border-top: 1px solid var(--octo-line); }
+  h1 { font-size: clamp(2rem, 4.5vw, 3.4rem); }
+  h2 { font-size: clamp(1.6rem, 3vw, 2.4rem); }
+  .lede { color: var(--octo-muted); max-width: 56em; margin-top: 0; }
+
+  /* the page head: no hero art, just the title over a magenta rule */
+  .pagehead { padding: 56px 0 40px; border-bottom: 2px solid var(--octo-magenta); }
+
+  /* FAQ: native accordions, styled to the card language */
+  .faq { margin-top: 28px; display: grid; gap: 12px; }
+  details {
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-chip);
+  }
+  details[open] { border-color: var(--octo-green); }
+  summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 16px 20px;
+    font-family: var(--octo-mono);
+    font-weight: 700;
+    font-size: 1rem;
+    color: var(--octo-white);
+    display: flex; gap: 14px; align-items: baseline;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::before {
+    content: "+";
+    color: var(--octo-green);
+    font-weight: 800;
+    flex: none;
+  }
+  details[open] summary::before { content: "–"; }
+  details .a {
+    padding: 0 20px 18px 20px;
+    color: var(--octo-muted);
+    font-size: 0.97rem;
+  }
+  details .a p { margin: 0 0 0.8em; }
+  details .a p:last-child { margin-bottom: 0; }
+  details .a code { font-family: var(--octo-mono); color: var(--octo-white); font-size: 0.9em; }
+
+  /* glossary: term cards, two columns with room to breathe */
+  .terms { margin-top: 28px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+  .term {
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+    padding: 20px 22px;
+  }
+  .term h3 {
+    margin: 0 0 8px;
+    font-family: var(--octo-mono); font-weight: 700; font-size: 1.05rem;
+    color: var(--octo-green);
+  }
+  .term p { margin: 0 0 0.7em; color: var(--octo-muted); font-size: 0.95rem; }
+  .term .more { font-family: var(--octo-mono); font-size: 0.85rem; }
+
+  footer {
+    border-top: 2px solid var(--octo-magenta); /* decorative rule */
+    padding: 28px 0 40px;
+    color: var(--octo-muted);
+    font-size: 0.9rem;
+  }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; }
+
+  @media (max-width: 860px) {
+    /* minmax(0, …), never bare 1fr; see index.html's install grid. */
+    .terms { grid-template-columns: minmax(0, 1fr); }
+  }
+  /* phones */
+  @media (max-width: 600px) {
+    .wrap { padding: 0 16px; }
+    /* the nav becomes two deliberate rows: the mark, then all links on one
+       line, better than a ragged wrap with one link orphaned below. */
+    /* hamburger: the mark keeps the left edge; links drop into a column
+       only when the burger is checked */
+    .menu-btn {
+      display: block; margin-left: auto; cursor: pointer;
+      font-size: 1.5rem; line-height: 1; color: var(--octo-white);
+      padding: 4px 8px; border: 1px solid var(--octo-line);
+      border-radius: var(--octo-radius-chip);
+    }
+    nav.links { display: none; }
+    /* the closed nav is one row: the mark left, the burger right, both
+       centred in a band with equal air above and below. The open menu gets
+       its bottom air from the checked links rule below instead. */
+    .nav { padding: 12px 0; }
+    /* the open menu lines up with the mark above it, which the tablet rule
+       has already nudged 12px in from the wrap's edge; without this the links
+       sit further left than the logo they hang under */
+    .menu-toggle:checked ~ nav.links {
+      display: flex; flex-basis: 100%; flex-direction: column;
+      gap: 12px; padding: 8px 2px 12px 12px; font-size: 1rem;
+    }
+    section { padding: 44px 0; }
+    .pagehead { padding: 40px 0 32px; }
+    summary { padding: 14px 16px; }
+    details .a { padding: 0 16px 16px; }
+    .term { padding: 16px; }
+    footer .wrap { flex-direction: column; align-items: flex-start; gap: 6px; }
+  }
+  @media (max-width: 480px) {
+    .wordmark { font-size: 1.15rem; }
+  }
+
+  /* the three uses: numbered cards, one per row, the number as a display glyph */
+  .steps { margin-top: 8px; display: grid; gap: 20px; }
+  .step {
+    display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 18px;
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+    padding: 24px 26px;
+  }
+  .step .num { font-family: var(--octo-display); font-size: 2.4rem; line-height: 1; color: var(--octo-green); }
+  .step h2 { font-size: clamp(1.3rem, 2.4vw, 1.8rem); }
+  .step p { margin: 0 0 0.8em; color: var(--octo-muted); }
+  .step p:last-child { margin-bottom: 0; }
+  .step .tip { border-left: 2px solid var(--octo-magenta); padding-left: 12px; font-size: 0.95rem; }
+  .step code { font-family: var(--octo-mono); color: var(--octo-white); font-size: 0.9em; }
+  .step .ok { font-family: var(--octo-mono); color: var(--octo-green); }
+  .step .warn { font-family: var(--octo-mono); color: var(--octo-amber); }
+  @media (max-width: 600px) {
+    .step { grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 18px; }
+    .step .num { font-size: 1.8rem; }
+  }
+</style>
+<!-- Cloudflare Web Analytics -->
+<script type='module' src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "0ebdfd53d18b49d39f76f9d08b3499c9"}'></script>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <a class="mark" href="/" aria-label="octomon home">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-hidden="true">
+        <g fill="var(--octo-green)">
+          <g transform="rotate(-14 22 64)"><rect x="18" y="60" width="8" height="44" rx="4"/></g>
+          <g transform="rotate(-7 34 64)"><rect x="30" y="60" width="8" height="58" rx="4"/></g>
+          <rect x="42" y="60" width="8" height="40" rx="4"/>
+          <rect x="54" y="60" width="8" height="54" rx="4"/>
+          <rect x="66" y="60" width="8" height="42" rx="4"/>
+          <rect x="78" y="60" width="8" height="58" rx="4" fill="var(--octo-amber)"/>
+          <g transform="rotate(7 94 64)"><rect x="90" y="60" width="8" height="46" rx="4"/></g>
+          <g transform="rotate(14 106 64)"><rect x="102" y="60" width="8" height="60" rx="4"/></g>
+        </g>
+        <path d="M22 70 C22 42 38 18 64 18 C90 18 106 42 106 70 Z" fill="var(--octo-green)"/>
+        <rect x="44" y="38" width="11" height="18" rx="1.5" fill="var(--octo-red)"/>
+        <rect x="73" y="38" width="11" height="18" rx="1.5" fill="var(--octo-red)"/>
+      </svg>
+      <span class="wordmark">octomon</span>
+    </a>
+    <input type="checkbox" id="menu" class="menu-toggle" hidden>
+    <label for="menu" class="menu-btn" aria-label="menu">&#9776;</label>
+    <nav class="links" aria-label="site">
+      <a href="/#install">install</a>
+      <a href="/#features">features</a>
+      <a href="/#video">video</a>
+      <a href="/blog/">blog</a>
+      <a href="/changelog">changelog</a>
+      <a href="/howto">how to</a>
+      <a href="/understand">faq</a>
+      <a href="/understand#glossary">glossary</a>
+      <a href="/privacy">privacy</a>
+      <a href="https://github.com/securitypedant/octomon">github</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="pagehead">
+    <div class="wrap">
+      <h1>How to use octomon</h1>
+      <p class="lede">octomon is a terminal dashboard for your Internet connection. Use it in three ways, and each one builds on the last.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <div class="steps">
+
+        <article class="step">
+          <div class="num">1</div>
+          <div>
+            <h2>Learn your everyday networks</h2>
+            <p>Run octomon on the networks you use most: home, the office, the
+            café you work from. Leave it up for a while. After five healthy
+            minutes it has a baseline for that network, what latency, loss,
+            DNS timing, Wi-Fi signal and speed normally look like there. Then
+            quit. The baseline is saved.</p>
+            <p>The next time that network feels wrong, run octomon again. It
+            recognises the network and grades what it sees against that
+            normal, so the answer is "worse than usual here" rather than a
+            threshold somebody else set. Press <kbd>L</kbd> to see every
+            network it has learned, and <kbd>N</kbd> to give one a name.</p>
+            <p class="tip">A minute with a fault in it never teaches the
+            baseline, so it is safe to learn while things are going wrong; it
+            just learns more slowly.</p>
+          </div>
+        </article>
+
+        <article class="step">
+          <div class="num">2</div>
+          <div>
+            <h2>Diagnose the connection you are on</h2>
+            <p>Baseline or not, octomon judges the connection you are on right
+            now. The footer is the one-line answer:
+            <span class="ok">● connection healthy</span> or
+            <span class="warn">▲ gateway unresponsive</span>. Press
+            <kbd>y</kbd> for the full analysis: a ladder from your machine to
+            the Internet, each rung with its evidence, and the findings
+            ranked with the cause first and its symptoms after.</p>
+            <p>From there, <kbd>t</kbd> traces the path, <kbd>m</kbd> monitors
+            every hop, <kbd>c</kbd> checks which ports this network lets out,
+            <kbd>W</kbd> asks who owns an address and <kbd>s</kbd> runs a
+            speed test. <kbd>e</kbd> opens the timeline of everything that
+            changed this session.</p>
+            <p class="tip">Need to send the picture to somebody?
+            <code>octomon --doctor</code> prints a redacted text report of the
+            same analysis, and <kbd>D</kbd> writes a support bundle.</p>
+          </div>
+        </article>
+
+        <article class="step">
+          <div class="num">3</div>
+          <div>
+            <h2>Keep watch on a network you do not trust</h2>
+            <p>On a flight, in a hotel, at a conference: start octomon the
+            moment you join the Wi-Fi. The session bar along the bottom grades
+            every second, so when the call drops at minute forty you can walk
+            back to it (<kbd>b</kbd>, then Enter) and see what was happening
+            and what changed just before.</p>
+            <p>octomon knows a plane is not a desk. Heavy ping loss with the
+            web still getting through reads as "degraded but usable", not as
+            an outage, and a network that blocks pings, or even the web
+            itself, is measured over whatever still gets out rather than
+            declared dead.</p>
+            <p class="tip">Not going to be watching?
+            <code>octomon --watch --alert</code> runs headless and notifies
+            you when a finding raises or clears.</p>
+          </div>
+        </article>
+
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>Then read the analysis</h2>
+      <p class="lede">The <a href="/understand">FAQ</a> explains how octomon
+      judges (baselines, colours, why the analysis changes its mind more
+      slowly than the graphs), and the <a href="/understand#glossary">glossary</a>
+      covers the terms on screen. Installing is one command on the
+      <a href="/#install">front page</a>.</p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2025–2026 Simon Thorpe · MIT or Apache-2.0</span>
+    <a href="/blog/">blog</a>
+    <a href="/changelog">changelog</a>
+    <a href="/privacy">privacy</a>
+    <a href="https://github.com/securitypedant/octomon">github.com/securitypedant/octomon</a>
+    <a href="https://crates.io/crates/octomon">crates.io/crates/octomon</a>
+    <a href="https://www.youtube.com/watch?v=sHPd2LeYvaw">intro video</a>
+  </div>
+</footer>
+
+</body>
+</html>
+

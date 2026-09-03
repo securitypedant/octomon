@@ -946,6 +946,21 @@ fn column_lines(
         .collect()
 }
 
+/// Wash one rendered row in the cursor-row background out to `width`
+/// columns. A line's style only covers its own text, so the row is padded
+/// with a styled run of spaces to carry the wash to the panel's edge.
+fn highlight_row(row: &mut Line<'static>, width: usize) {
+    let bg = theme::sel_bg();
+    for span in row.spans.iter_mut() {
+        span.style = span.style.bg(bg);
+    }
+    let pad = width.saturating_sub(row.width());
+    if pad > 0 {
+        row.spans
+            .push(Span::styled(" ".repeat(pad), Style::new().bg(bg)));
+    }
+}
+
 /// Every stored network location with its learned baseline: what "normal"
 /// means at each place this machine has been.
 fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
@@ -1317,19 +1332,21 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             severity_color(e.severity)
         };
         // Arrived from the session bar: the entries inside the stretch that
-        // was selected wear a bar down the left, so the answer to "why am I
-        // looking at this part of the list" is visible rather than implied by
-        // the scroll position.
+        // was selected are washed in the cursor-row background, edge to
+        // edge, with a solid block down the left — the same "these rows"
+        // cue the tables use, so the answer to "why am I looking at this
+        // part of the list" is unmissable rather than implied by the scroll
+        // position. (A hairline in the gutter alone was found to vanish.)
         let inside = s
             .events_focus
             .as_ref()
             .is_some_and(|f| e.at >= f.from && e.at <= f.to);
         let gutter = if inside {
-            Span::styled("▏", Style::new().fg(theme::accent()).bold())
+            Span::styled("▌", Style::new().fg(theme::accent()).bold())
         } else {
             Span::raw(" ")
         };
-        lines.extend(column_lines(
+        let mut rows = column_lines(
             vec![
                 gutter,
                 Span::styled(format!("{}  ", e.when()), Style::new().fg(theme::dim())),
@@ -1346,7 +1363,13 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             Style::new().fg(color),
             INDENT,
             text_w,
-        ));
+        );
+        if inside {
+            for row in rows.iter_mut() {
+                highlight_row(row, text_w);
+            }
+        }
+        lines.extend(rows);
         taken += 1;
     }
     // A heading for the stretch itself. The bar grades every second by the
@@ -1389,8 +1412,8 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                 // Every episode writes a raise entry, so none here means the
                 // timeline has aged them out — it is capped, the bar is not.
                 (0, true) => "  ·  its entries have aged out of the timeline".to_string(),
-                (1, _) => "  ·  1 entry, marked ▏".to_string(),
-                (n, _) => format!("  ·  {n} entries, marked ▏"),
+                (1, _) => "  ·  1 entry, highlighted below".to_string(),
+                (n, _) => format!("  ·  {n} entries, highlighted below"),
             },
             Style::new().fg(theme::dim()).italic(),
         ));
@@ -2417,7 +2440,7 @@ fn triage_lines(s: &AppState, text_w: usize) -> Vec<Line<'static>> {
             // evidence alone — say so, or the empty quality table and the
             // green verdict read as contradicting each other.
             let qualifier = if crate::verdict::icmp_blackholed(s) {
-                " (judged on web + DNS — this network blocks ICMP)"
+                " (judged on web, DNS and tcp :443 probes — this network blocks ICMP)"
             } else {
                 ""
             };
@@ -2579,6 +2602,33 @@ struct FamilyNums {
     probed: bool,
 }
 
+/// One egress-monitor row of the quality table: the check's name and host
+/// where a target's label and address go, its series through the same
+/// cells. Not selectable — it is a reference host, not one of the user's
+/// targets — so it wears no cursor and no graph marker.
+fn egress_row(s: &AppState, k: usize, n: usize, with_max: bool) -> Row<'static> {
+    let Some(r) = s.egress_monitor.as_ref().and_then(|m| m.rows.get(k)) else {
+        return Row::new(vec![Cell::from("")]);
+    };
+    let nums = FamilyNums {
+        last: r.series.last_ms,
+        jitter: r.series.jitter_ms,
+        st: r.series.stats(n),
+        loss: r.series.recent_loss_pct(n),
+        now_loss: r.series.recent_loss_pct(th::RECENT.min(n)),
+        stale: r.series.stats_stale(n),
+        rtt_ref: r.series.floor_ms(),
+        loss_ref: None,
+        excused: false,
+        probed: true,
+    };
+    let identity = latency_color(nums.last, nums.now_loss, nums.rtt_ref, nums.loss_ref);
+    let idc = |text: String| Cell::from(Span::styled(text, Style::new().fg(identity)));
+    let mut cells = vec![Cell::from(""), idc(r.check.name.clone()), idc(r.target())];
+    cells.extend(family_cells(&nums, false, with_max));
+    Row::new(cells)
+}
+
 /// The metric cells (`last avg p95 [max] jit loss`) for one family.
 fn family_cells(v: &FamilyNums, dim_all: bool, with_max: bool) -> Vec<Cell<'static>> {
     let cell = |text: String, color: Color| {
@@ -2716,15 +2766,19 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     // truth. It also flips the split view's default family to TCP, so such a
     // network opens onto numbers instead of dashes.
     let blackholed = crate::verdict::icmp_blackholed(s);
-    let family = s.quality_family.unwrap_or(if blackholed {
-        crate::app::ProbeFamily::Tcp
-    } else {
-        crate::app::ProbeFamily::Icmp
-    });
+    let family = s
+        .quality_family
+        .unwrap_or_else(|| crate::verdict::auto_family(s));
+    // The egress family: the monitor's rows (HTTP, QUIC, SSH, NTP, DNS) stand
+    // in for the built-in anchors, and the targets a person added keep their
+    // place below them with the tcp :443 numbers — a view of what still gets
+    // out when pings and the web do not.
+    let egress_family = family == crate::app::ProbeFamily::Egress;
     // Full screen fits both families side by side; the max columns are the
     // least diagnostic (p95 already tells the tail story) and yield first on
-    // narrower fullscreens — TCP's before ICMP's.
-    let dual = s.fullscreen;
+    // narrower fullscreens — TCP's before ICMP's. The egress view is its
+    // own table and never pairs.
+    let dual = s.fullscreen && !egress_family;
     let icmp_max = !dual || area.width >= 140;
     let tcp_max = dual && area.width >= 150;
     // Sortable header: highlight the column cursor, mark the active sort ▲/▼.
@@ -2788,19 +2842,49 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let header = Row::new(header_cells);
 
     let order = s.quality_order();
+    enum Entry {
+        Egress(usize),
+        Target(usize),
+    }
+    let entries: Vec<Entry> = if egress_family {
+        let n_eg = s.egress_monitor.as_ref().map_or(0, |m| m.rows.len());
+        (0..n_eg)
+            .map(Entry::Egress)
+            .chain(
+                order
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        let t = &s.targets[i];
+                        !t.discovered && !crate::config::is_builtin_anchor(t.addr)
+                    })
+                    .map(Entry::Target),
+            )
+            .collect()
+    } else {
+        order.iter().copied().map(Entry::Target).collect()
+    };
     // Scroll so the cursor stays visible: with a path monitor open below, the
     // target list gets few rows and the selection would otherwise fall off it.
     let rows_avail = (parts[0].height.saturating_sub(1)) as usize;
-    let cursor = order.iter().position(|&i| i == s.selected).unwrap_or(0);
+    let cursor = entries
+        .iter()
+        .position(|e| matches!(e, Entry::Target(i) if *i == s.selected))
+        .unwrap_or(0);
     let first = if rows_avail == 0 {
         0
     } else {
         cursor.saturating_sub(rows_avail - 1)
     };
     let hidden_above = first;
-    let hidden_below = order.len().saturating_sub(first + rows_avail);
+    let hidden_below = entries.len().saturating_sub(first + rows_avail);
 
-    let rows = order.iter().skip(first).take(rows_avail).map(|&i| {
+    // The monitor probes every 5 s, so its rows' window is the same *time*
+    // as the others' rather than the same number of samples.
+    let n_egress = (s.window_secs as usize
+        / crate::collectors::egress::MONITOR_INTERVAL.as_secs() as usize)
+        .max(2);
+    let target_row = |i: usize| -> Row<'static> {
         let t = &s.targets[i];
         let icmp_loss = t.recent_loss_pct(n);
         // A mid-path router that never answers ICMP is not a fault — the
@@ -2839,7 +2923,11 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         };
         // The identity columns wear the shown family's *current* condition —
         // last reply and fresh loss — not the windowed history beside them.
-        let id_nums = if !dual && family == crate::app::ProbeFamily::Tcp {
+        let id_nums = if !dual
+            && matches!(
+                family,
+                crate::app::ProbeFamily::Tcp | crate::app::ProbeFamily::Egress
+            ) {
             &tcp
         } else {
             &icmp
@@ -2879,13 +2967,24 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
             cells.extend(family_cells(&icmp, dim_hop, icmp_max));
             cells.push(Cell::from(Span::styled("│", Style::new().fg(theme::dim()))));
             cells.extend(family_cells(&tcp, dim_hop, tcp_max));
-        } else if family == crate::app::ProbeFamily::Tcp {
+        } else if matches!(
+            family,
+            crate::app::ProbeFamily::Tcp | crate::app::ProbeFamily::Egress
+        ) {
             cells.extend(family_cells(&tcp, dim_hop, icmp_max));
         } else {
             cells.extend(family_cells(&icmp, dim_hop, icmp_max));
         }
         Row::new(cells).style(row_style)
-    });
+    };
+    let rows = entries
+        .iter()
+        .skip(first)
+        .take(rows_avail)
+        .map(|e| match e {
+            Entry::Egress(k) => egress_row(s, *k, n_egress, icmp_max),
+            Entry::Target(i) => target_row(*i),
+        });
     // The metric columns are fixed; the name and address split whatever the
     // panel has left, so a long hostname is not clipped at 13 characters while
     // the right-hand side of the panel sits empty.
@@ -2943,10 +3042,10 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     // Which family the split-view metric columns describe ([i] toggles);
     // full screen shows both, labelled by the │icmp and │tcp dividers.
     if !dual {
-        title.push_str(if family == crate::app::ProbeFamily::Tcp {
-            " · tcp :443"
-        } else {
-            " · icmp"
+        title.push_str(match family {
+            crate::app::ProbeFamily::Tcp => " · tcp :443",
+            crate::app::ProbeFamily::Egress => " · egress — web dark here",
+            crate::app::ProbeFamily::Icmp => " · icmp",
         });
     }
     if let Some(t) = s.targets.get(s.graph_target) {
@@ -4622,7 +4721,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             head("Connection Quality"),
             row("a", "add target (remembered)"),
             row("d / Del", "delete + forget target"),
-            row("i", "stats: icmp ↔ tcp :443"),
+            row("i", "stats: icmp ↔ tcp :443 ↔ egress"),
             row("g", "graph selected target"),
             row("t", "traceroute once"),
             row("m", "monitor every hop (MTR)"),
@@ -5537,8 +5636,8 @@ fn dns_lines(s: &AppState, width: usize, sel: Option<crate::app::NetSlot>) -> Ve
         }
         groups.push(g);
     }
-    // The public reference resolver, for contrast — dimmed, it isn't ours.
-    if let Some(r) = s.dns.iter().find(|p| p.reference) {
+    // The public reference resolvers, for contrast — dimmed, they aren't ours.
+    for (i, r) in s.dns.iter().filter(|p| p.reference).enumerate() {
         let reading = match r.last_ms {
             Some(ms) => format!("{ms:.0}ms"),
             None if !r.status.is_empty() => r.status.clone(),
@@ -5551,8 +5650,8 @@ fn dns_lines(s: &AppState, width: usize, sel: Option<crate::app::NetSlot>) -> Ve
         };
         // The server as its own span, so the address cursor can land on it.
         let mut g = vec![
-            Span::styled("ref ", Style::new().fg(color)),
-            if sel == Some(NetSlot::RefDns) {
+            Span::styled(if i == 0 { "ref " } else { "" }, Style::new().fg(color)),
+            if sel == Some(NetSlot::RefDns(i)) {
                 Span::styled(
                     r.server.to_string(),
                     Style::new().fg(Color::Black).bg(Color::Cyan),
@@ -7003,7 +7102,7 @@ mod tests {
         let plain = draw(&s, w, h);
         assert!(plain.contains("events (3 this session"));
         assert!(!plain.contains("from the session bar"));
-        assert!(!plain.contains('▏'), "nothing is singled out");
+        assert!(!plain.contains('▌'), "nothing is singled out");
 
         // Opened from the bar: the title carries the span, and only the
         // entry inside it wears the gutter.
@@ -7025,11 +7124,11 @@ mod tests {
             out.contains(&clock_hms(now - 330)),
             "the stretch's own times"
         );
-        // A marked entry is a gutter immediately followed by its timestamp;
-        // the heading's own "marked ▏" legend is not one.
+        // A highlighted entry is a gutter block immediately followed by its
+        // timestamp.
         let gutter_rows: Vec<String> = out
             .as_str()
-            .split('▏')
+            .split('▌')
             .skip(1)
             .filter(|tail| tail.starts_with(|c: char| c.is_ascii_digit()))
             .map(|tail| tail.chars().take(60).collect())
@@ -7040,6 +7139,26 @@ mod tests {
             "the marked entry: {:?}",
             gutter_rows[0]
         );
+        // The highlight is a wash across the whole row, not a hairline: the
+        // marked entry's row carries the cursor-row background from the
+        // gutter to the panel's edge, and no other row does.
+        {
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            t.draw(|f| render(f, &s)).unwrap();
+            let buf = t.backend().buffer();
+            let washed_rows: Vec<u16> = (0..h)
+                .filter(|y| {
+                    (0..w)
+                        .filter(|x| buf[(*x, *y)].bg == theme::sel_bg())
+                        .count()
+                        >= (w as usize) * 3 / 4
+                })
+                .collect();
+            assert_eq!(washed_rows.len(), 1, "one row washed: {washed_rows:?}");
+            let y = washed_rows[0];
+            let row: String = (0..w).map(|x| buf[(x, y)].symbol()).collect();
+            assert!(row.contains("inside the stretch"), "got: {row:?}");
+        }
 
         // The stretch's own heading leads the list: times, how the bar read
         // it, and what to expect below.
@@ -7048,7 +7167,7 @@ mod tests {
             out.contains("gateway unresponsive (100% loss)"),
             "and the finding behind it, in its own words"
         );
-        assert!(out.contains("1 entry, marked"), "how many are inside");
+        assert!(out.contains("1 entry, highlighted"), "how many are inside");
 
         // A yellow stretch with no entries in it is the case that started
         // this: the finding raised before it and cleared after, so the list
@@ -8223,7 +8342,7 @@ mod tests {
         s.verdict.current = crate::verdict::Verdict::Healthy;
         let out = draw(&s, 170, 45);
         assert!(
-            out.contains("judged on web + DNS"),
+            out.contains("judged on web, DNS and tcp :443 probes"),
             "healthy line must admit it is judging without ICMP"
         );
 
@@ -8293,6 +8412,86 @@ mod tests {
             "colo city in the Network panel"
         );
         assert!(out.contains("Charter Communications"), "isp row present");
+    }
+
+    /// The quality table's third family: while the egress monitor runs, its
+    /// rows stand in for the built-in anchors, the user's own targets keep
+    /// their place with the tcp :443 numbers, and the title says why.
+    #[test]
+    fn quality_table_shows_the_egress_family() {
+        use crate::app::{FamilyProbe, ProbeFamily, TargetStat};
+        use crate::collectors::egress::{Monitor, MonitorRow, Outcome, default_monitor_checks};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let mut s = AppState::new(vec![
+            TargetStat::new("Anchor".into(), IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+            TargetStat::new(
+                "octomon.dev".into(),
+                IpAddr::V4(Ipv4Addr::new(104, 21, 5, 170)),
+            ),
+        ]);
+        for t in &mut s.targets {
+            for _ in 0..20 {
+                t.record_loss();
+                t.tcp.record_loss();
+            }
+        }
+        s.http.v4 = FamilyProbe::Fail("connect failed".into());
+        let rows = default_monitor_checks()
+            .into_iter()
+            .map(|c| {
+                let mut series = crate::app::Series::default();
+                let open = c.name == "SSH";
+                for _ in 0..3 {
+                    if open {
+                        series.record_reply(40.0);
+                    } else {
+                        series.record_loss();
+                    }
+                }
+                MonitorRow {
+                    check: c,
+                    addr: None,
+                    series,
+                    last: if open {
+                        Outcome::Open(40.0)
+                    } else {
+                        Outcome::Blocked
+                    },
+                }
+            })
+            .collect();
+        s.egress_monitor = Some(Monitor {
+            rows,
+            started: std::time::Instant::now(),
+            active: true,
+            stopped: None,
+            rounds: 3,
+        });
+
+        // Automatic: the monitor running is the default family.
+        let out = draw(&s, 170, 40);
+        assert!(
+            out.contains("egress — web dark here"),
+            "title names the family"
+        );
+        assert!(out.contains("github.com:22"), "the monitor's rows");
+        assert!(out.contains("40.0ms"));
+        assert!(out.contains("octomon.dev"), "the user's target stays");
+        // The label also titles the latency graph, so count rather than
+        // look: the ICMP view has one more "Anchor" — its table row.
+        let egress_mentions = out.matches("Anchor").count();
+
+        // [i] still reaches the other families.
+        s.quality_family = Some(ProbeFamily::Icmp);
+        let out = draw(&s, 170, 40);
+        assert!(out.contains("· icmp"));
+        assert!(!out.contains("github.com:22"));
+        assert_eq!(
+            out.matches("Anchor").count(),
+            egress_mentions + 1,
+            "the built-in anchor yields its row in the egress view"
+        );
     }
 
     /// The quality table's second family: [i] flips the split view to the

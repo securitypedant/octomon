@@ -539,6 +539,7 @@ async fn main() -> Result<()> {
     tokio::spawn(collectors::procbw::run(state.clone()));
     tokio::spawn(collectors::web::run(state.clone()));
     tokio::spawn(collectors::tcp::run(state.clone(), cfg.clone()));
+    tokio::spawn(collectors::egress::monitor(state.clone(), cfg.clone()));
     tokio::spawn(collectors::edge::run(
         state.clone(),
         cfg.clone(),
@@ -2175,20 +2176,19 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     side = Side::Rediscover;
                 }
                 KeyCode::Char('w') => s.cycle_window(),
-                // 'i' flips the quality table between its probe families
-                // (ICMP ↔ TCP connect). The split view shows one at a time —
-                // full screen already shows both side by side. The automatic
-                // default is ICMP, or TCP where the network blackholes ICMP,
-                // so the flip is computed from what is showing now.
+                // 'i' cycles the quality table through its probe families
+                // (ICMP → TCP connect → egress, the last only once the
+                // monitor has run). The split view shows one at a time —
+                // full screen already shows ICMP and TCP side by side. The
+                // automatic default depends on the network's state, so the
+                // step is computed from what is showing now.
                 KeyCode::Char('i') => {
-                    let auto = if verdict::icmp_blackholed(&s) {
-                        app::ProbeFamily::Tcp
-                    } else {
-                        app::ProbeFamily::Icmp
-                    };
+                    let auto = verdict::auto_family(&s);
+                    let has_monitor = s.egress_monitor.is_some();
                     s.quality_family = Some(match s.quality_family.unwrap_or(auto) {
                         app::ProbeFamily::Icmp => app::ProbeFamily::Tcp,
-                        app::ProbeFamily::Tcp => app::ProbeFamily::Icmp,
+                        app::ProbeFamily::Tcp if has_monitor => app::ProbeFamily::Egress,
+                        app::ProbeFamily::Tcp | app::ProbeFamily::Egress => app::ProbeFamily::Icmp,
                     });
                 }
                 // 'l' toggles session recording; the logger task acts on this
