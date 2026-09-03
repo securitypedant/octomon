@@ -197,13 +197,15 @@ fn probe(target: std::net::Ipv4Addr, iface_mtu: Option<u32>) -> Result<PmtuResul
     if matches!(send(lo)?, Outcome::Reply) {
         best = Some(lo);
     } else {
-        // Not even the floor gets through: the path is broken in a way this
-        // probe cannot size. Report what is known.
+        // Not even the floor gets through: nothing about *size* has been
+        // learned. The probe's port (QUIC, UDP 443) may simply be filtered
+        // here, and a "black hole" verdict would send the user chasing an
+        // MTU that is not the problem. Report what is known and no more.
         return Ok(PmtuResult {
             target: IpAddr::V4(target),
             iface_mtu,
             path_mtu: None,
-            blackhole,
+            blackhole: false,
             pmtud_works,
         });
     }
@@ -362,6 +364,9 @@ pub fn is_version_negotiation(b: &[u8]) -> bool {
 
 /// One line for the Network panel / doctor: "path 1492 (iface 1500)".
 pub fn describe(r: &PmtuResult) -> String {
+    if r.path_mtu.is_none() && !r.blackhole {
+        return "no answer at any size — not judged".to_string();
+    }
     let path = r
         .path_mtu
         .map(|m| m.to_string())

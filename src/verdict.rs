@@ -699,20 +699,20 @@ pub fn icmp_blackholed(s: &AppState) -> bool {
     sampled > 0
 }
 
-/// The web has gone dark on a link that is up: the web check fails and the
-/// TCP :443 series to every sampled anchor is lost as well. What pings do is
-/// beside the point — a filter that blocks 443 blocks the web whether or not
-/// it also drops ICMP. A captive portal is its own story and does not count.
-/// This is what starts the egress monitor, and what the "filtered, not down"
-/// reading below rests on.
-pub fn web_dark(s: &AppState) -> bool {
+/// HTTPS has gone dark on a link that is up: the TCP :443 series to every
+/// sampled anchor is lost. What pings do is beside the point, and so is the
+/// connectivity check, which is plain HTTP on port 80 — a filter that blocks
+/// 443 blocks the web people actually use whether or not it also drops ICMP
+/// or lets port 80 through (found in the field: a 443-only rule left every
+/// rung green). A captive portal is its own story and does not count. This
+/// starts the egress monitor, and is what the "filtered, not down" reading
+/// rests on.
+pub fn https_dark(s: &AppState) -> bool {
     use crate::app::FamilyProbe as FP;
     if link_state(s) != LinkState::Up {
         return false;
     }
-    let web_failing =
-        matches!(s.http.v4, FP::Fail(_)) && !matches!(s.http.v6, FP::Ok(_) | FP::Captive(_));
-    if !web_failing {
+    if matches!(s.http.v4, FP::Captive(_)) || matches!(s.http.v6, FP::Captive(_)) {
         return false;
     }
     let mut sampled = 0;
@@ -730,6 +730,13 @@ pub fn web_dark(s: &AppState) -> bool {
         }
     }
     sampled > 0
+}
+
+/// The whole web dark: HTTPS dark *and* the plain-HTTP connectivity check
+/// failing too — the state that reads as a dead internet.
+pub fn web_dark(s: &AppState) -> bool {
+    use crate::app::FamilyProbe as FP;
+    https_dark(s) && matches!(s.http.v4, FP::Fail(_)) && !matches!(s.http.v6, FP::Ok(_))
 }
 
 /// Which probe family the quality table shows unless the user picked one:
@@ -2142,7 +2149,8 @@ pub fn evaluate(s: &AppState) -> Triage {
     // a packet crossing the internet and back — so the outage story is wrong,
     // and what is left is a network that lets some traffic out and not the
     // web. Yellow, in its own words, with the port-by-port evidence.
-    let dark = web_dark(s);
+    let https_down = https_dark(s);
+    let web_ok = web_ok_ms.is_some();
     let monitor = s
         .egress_monitor
         .as_ref()
@@ -2150,7 +2158,7 @@ pub fn evaluate(s: &AppState) -> Triage {
     let open: Vec<&crate::collectors::egress::MonitorRow> =
         monitor.map(|m| m.open()).unwrap_or_default();
     let mut filtered = false;
-    if dark && !no_link && (reference_ok || !open.is_empty()) {
+    if https_down && !no_link && (web_ok || reference_ok || !open.is_empty()) {
         use crate::app::FamilyProbe as FP;
         filtered = true;
         // The ping- and web-driven outage claims are contradicted; the
@@ -2158,19 +2166,22 @@ pub fn evaluate(s: &AppState) -> Triage {
         findings.retain(|f| {
             !(demotable(f) || matches!(f.cause, Cause::HttpBlocked | Cause::WebTarget))
         });
-        let reason = match &s.http.v4 {
-            FP::Fail(r) => r.clone(),
-            _ => String::new(),
-        };
         let n443 = s
             .targets
             .iter()
             .filter(|t| !t.discovered && t.tcp.window.len() >= th::MIN_SAMPLES)
             .count();
         let mut evidence = vec![format!(
-            "web check: {reason} · tcp :443 to {n443} anchor{}: no handshakes",
+            "tcp :443 to {n443} anchor{}: no handshakes",
             if n443 == 1 { "" } else { "s" }
         )];
+        match &s.http.v4 {
+            FP::Ok(ms) => evidence.push(format!(
+                "the connectivity check is plain HTTP and still answers ({ms:.0}ms) — port 80 is open, port 443 is not"
+            )),
+            FP::Fail(r) => evidence.push(format!("web check: {r}")),
+            _ => {}
+        }
         if !with_data.is_empty() && bad.len() == with_data.len() {
             evidence.push("every ping lost as well".to_string());
         } else if fine >= 2 {
@@ -2203,9 +2214,10 @@ pub fn evaluate(s: &AppState) -> Triage {
         let summary = if let Some(m) = monitor.filter(|_| !open.is_empty()) {
             // Port 80 open with 443 dead is the signature of a filter that
             // only allows what it can inspect; worth its own word.
-            let https_only = open
-                .iter()
-                .any(|r| r.check.port == 80 && r.check.proto == "tcp");
+            let https_only = web_ok
+                || open
+                    .iter()
+                    .any(|r| r.check.port == 80 && r.check.proto == "tcp");
             let blocked = m.blocked();
             format!(
                 "{} blocked on this network — {} get{} out{}",
@@ -2221,6 +2233,8 @@ pub fn evaluate(s: &AppState) -> Triage {
                     )
                 }
             )
+        } else if web_ok {
+            "HTTPS blocked on this network — port 80 still answers, port 443 does not".to_string()
         } else {
             format!(
                 "web unreachable while the internet path is up — DNS to {} answers",
@@ -2232,7 +2246,7 @@ pub fn evaluate(s: &AppState) -> Triage {
             severity: Severity::Degraded,
             // Contrast: the web fails while something else crosses the
             // internet. Corroboration: the monitor has named the ports.
-            confidence: judge(true, !open.is_empty(), false),
+            confidence: judge(true, !open.is_empty() || web_ok, false),
             summary,
             evidence,
             subject: String::new(),
@@ -2285,6 +2299,7 @@ pub fn evaluate(s: &AppState) -> Triage {
         usable,
         blackholed,
         filtered,
+        https_down,
     );
     let checks = checks(s);
     let performance = performance(s, &with_data);
@@ -2318,13 +2333,14 @@ fn performance(s: &AppState, with_data: &[&TargetStat]) -> Option<Performance> {
     // On an ICMP-blackholed network the grade would otherwise sit at Poor on
     // 100% loss the analysis itself calls policy: the TCP connect series
     // carries the judgement instead, and the detail says so.
-    let via_tcp = icmp_blackholed(s);
-    // And when even 443 is dark, the egress monitor's rows are the only
-    // round trips that describe the path at all.
+    // And when 443 itself is dark, the TCP series describes the filter, not
+    // the path: the egress monitor's rows are the round trips that do.
+    let https_down = https_dark(s);
+    let via_tcp = icmp_blackholed(s) && !https_down;
     let egress = s
         .egress_monitor
         .as_ref()
-        .filter(|m| !via_tcp && web_dark(s) && m.active && m.has_data());
+        .filter(|m| https_down && m.active && m.has_data());
     let (latencies, jitters, losses): (Vec<f64>, Vec<f64>, Vec<f64>) = if let Some(m) = egress {
         (
             m.rows
@@ -2451,6 +2467,7 @@ fn build_rungs(
     usable: bool,
     blackholed: bool,
     filtered: bool,
+    https_down: bool,
 ) -> Vec<Rung> {
     let mut rungs = Vec::with_capacity(7);
     let health_status = |h: Health| match h {
@@ -2810,10 +2827,12 @@ fn build_rungs(
             status: RungStatus::Unknown,
             detail: "no data yet".to_string(),
         }
-    } else if filtered {
+    } else if filtered && bad.len() == with_data.len() {
         // Neither pings nor 443 say anything about the path; the egress
         // monitor's rows do, and the finding above has the port-by-port
-        // story. Warn, never red: something is getting out.
+        // story. Warn, never red: something is getting out. (With pings
+        // still answering, the ICMP numbers below are the truth about the
+        // path and the web rung carries the 443 story.)
         let detail = match s
             .egress_monitor
             .as_ref()
@@ -2934,7 +2953,7 @@ fn build_rungs(
             FP::Captive(_) => format!("{name} CAPTIVE PORTAL"),
             FP::Fail(r) => format!("{name} failed ({r})"),
         };
-        let status = match (&s.http.v4, &s.http.v6) {
+        let mut status = match (&s.http.v4, &s.http.v6) {
             (FP::Captive(_), _) | (_, FP::Captive(_)) => RungStatus::Bad,
             (FP::Fail(_), FP::Ok(_)) | (FP::Ok(_), FP::Fail(_)) => RungStatus::Warn,
             (FP::Fail(_), _) => RungStatus::Bad,
@@ -2949,6 +2968,14 @@ fn build_rungs(
         );
         if let Some(note) = &s.http.note {
             detail.push_str(&format!(" · {note}"));
+        }
+        // The check itself is plain HTTP; the web as browsers use it is
+        // port 443, and this rung must not read green when that is dead.
+        if https_down {
+            if status == RungStatus::Ok {
+                status = RungStatus::Warn;
+            }
+            detail.push_str(" · tcp :443: no handshakes to any anchor");
         }
         Rung {
             area: Area::Http,
@@ -2980,11 +3007,23 @@ fn build_rungs(
         } else {
             ""
         };
-        if filtered {
+        if filtered && bad.len() == with_data.len() {
             Rung {
                 area: Area::Destinations,
                 status: RungStatus::Warn,
                 detail: "pings and tcp :443 lost — the web is blocked here; the egress rows show what gets out".to_string(),
+            }
+        } else if https_down && !blackholed {
+            // Pings reach them; HTTPS does not. "All targets reachable"
+            // would be true of ICMP and a lie about the web.
+            Rung {
+                area: Area::Destinations,
+                status: RungStatus::Warn,
+                detail: format!(
+                    "{} target{} answer pings · none completes a tcp :443 handshake",
+                    fine,
+                    if fine == 1 { "" } else { "s" }
+                ),
             }
         } else if blackholed {
             // The odd ones out are read off the TCP connect series: every
@@ -3145,7 +3184,7 @@ pub fn checks(s: &AppState) -> Vec<Check> {
             (
                 RungStatus::Unknown,
                 format!(
-                    "started {} ago — pings, tcp :443 and the web check all failing · first round in progress",
+                    "started {} ago — tcp :443 failing to every anchor · first round in progress",
                     fmt_duration(m.started.elapsed())
                 ),
             )
@@ -3321,6 +3360,17 @@ pub fn checks(s: &AppState) -> Vec<Check> {
             "path MTU",
             RungStatus::Unknown,
             format!("not judged — {}", pmtu_gated(s).unwrap_or_default()),
+        ),
+        // Silence at every size is not a size problem: the probe speaks
+        // QUIC on UDP 443, and a network filtering that port answers none
+        // of it (found in the field behind a 443 block).
+        (Some(p), _) if p.path_mtu.is_none() && !p.blackhole => push(
+            "path MTU",
+            RungStatus::Unknown,
+            format!(
+                "not judged — nothing answered at any size; UDP 443 to {} may be filtered here",
+                p.target
+            ),
         ),
         (Some(p), _) => push(
             "path MTU",
@@ -5825,20 +5875,103 @@ mod tests {
             "{:?}",
             causes(&t)
         );
-        // The web check answering ends the dark; so does a sign-in page,
-        // which is its own finding.
+        // The web check answering ends the *whole-web* dark but not the
+        // HTTPS one: port 80 answering says nothing about 443. A sign-in
+        // page ends both, being its own finding.
         let mut ok = dark_web();
         ok.http.v4 = FamilyProbe::Ok(30.0);
         assert!(!web_dark(&ok));
+        assert!(https_dark(&ok));
         let mut captive = dark_web();
         captive.http.v4 = FamilyProbe::Captive(None);
         assert!(!web_dark(&captive));
+        assert!(!https_dark(&captive));
         // And 443 answering somewhere is not dark either.
         let mut tcp_ok = dark_web();
         for _ in 0..th::RECENT {
             tcp_ok.targets[0].tcp.record_reply(20.0);
         }
         assert!(!web_dark(&tcp_ok));
+    }
+
+    /// The field case that started this: a 443-only block. Pings answer,
+    /// the plain-HTTP connectivity check answers, every tcp :443 handshake
+    /// fails — and every rung used to read green.
+    #[test]
+    fn a_443_only_block_is_https_blocked_not_healthy() {
+        use crate::app::FamilyProbe;
+        let mut s = healthy_state();
+        for t in s.targets.iter_mut().filter(|t| !t.discovered) {
+            for _ in 0..th::RECENT {
+                t.tcp.record_loss();
+            }
+        }
+        s.http.v4 = FamilyProbe::Ok(146.0);
+        assert!(https_dark(&s));
+        assert!(!web_dark(&s));
+        let t = evaluate(&s);
+        let f = &t.findings[0];
+        assert_eq!(f.cause, Cause::WebFiltered, "{:?}", causes(&t));
+        assert_eq!(f.severity, Severity::Degraded);
+        assert_eq!(
+            f.summary,
+            "HTTPS blocked on this network — port 80 still answers, port 443 does not"
+        );
+        assert!(
+            f.evidence.iter().any(|e| e.contains("port 80 is open")),
+            "{:?}",
+            f.evidence
+        );
+        let rung = |a: Area| t.rungs.iter().find(|r| r.area == a).unwrap();
+        // Pings are fine and say so; the web rung carries the 443 story.
+        assert_eq!(rung(Area::Internet).status, RungStatus::Ok);
+        assert_eq!(rung(Area::Http).status, RungStatus::Warn);
+        assert!(rung(Area::Http).detail.contains("tcp :443"));
+        assert_eq!(rung(Area::Destinations).status, RungStatus::Warn);
+        assert!(rung(Area::Destinations).detail.contains("handshake"));
+
+        // With the monitor's port-80 row open the wording names the ports.
+        s.egress_monitor = Some(monitor_with(&["HTTP", "SSH", "NTP", "DNS"]));
+        let t = evaluate(&s);
+        assert_eq!(
+            t.findings[0].summary,
+            "HTTPS blocked on this network — HTTP, SSH, NTP and DNS get out; QUIC blocked"
+        );
+
+        // The same block on an ICMP-blackholed network is not "healthy,
+        // judged on web and DNS": 443 is dead and the finding stands.
+        for t in s.targets.iter_mut().filter(|t| !t.discovered) {
+            for _ in 0..th::RECENT {
+                t.record_loss();
+            }
+        }
+        assert!(icmp_blackholed(&s));
+        let t = evaluate(&s);
+        assert_eq!(t.findings[0].cause, Cause::WebFiltered, "{:?}", causes(&t));
+        assert_eq!(auto_family(&s), crate::app::ProbeFamily::Egress);
+    }
+
+    /// Silence at every size from the MTU probe is not a black hole: its
+    /// port may be filtered. Reads "not judged", never a finding.
+    #[test]
+    fn an_mtu_probe_answered_at_no_size_is_not_a_black_hole() {
+        let mut s = healthy_state();
+        s.pmtu = Some(crate::app::PmtuResult {
+            target: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            iface_mtu: Some(1500),
+            path_mtu: None,
+            blackhole: false,
+            pmtud_works: false,
+        });
+        let t = evaluate(&s);
+        assert!(!causes(&t).contains(&Cause::PathMtu));
+        let row = t.checks.iter().find(|c| c.name == "path MTU").unwrap();
+        assert_eq!(row.status, RungStatus::Unknown);
+        assert!(
+            row.detail.contains("nothing answered at any size"),
+            "{}",
+            row.detail
+        );
     }
 
     #[test]

@@ -99,11 +99,12 @@ pub struct Config {
     /// that reliably answers. Edit to add your own (a VPN endpoint, a work
     /// server); `proto` is "tcp", or "dns" / "ntp" / "quic" for a UDP exchange.
     pub egress_checks: Vec<crate::collectors::egress::EgressCheck>,
-    /// The automatic egress monitor: when pings, the TCP :443 probes and the
-    /// web check are *all* failing, octomon starts probing a short list of
-    /// other ports every 5 s to tell a filtered network from a dead one, and
-    /// stops when the web answers again. It announces itself on the
-    /// timeline and in the analysis. Set to false to never do this.
+    /// The automatic egress monitor: when the TCP :443 probes to every
+    /// anchor are failing (the web as browsers use it, whatever pings and
+    /// plain HTTP still do), octomon starts probing a short list of other
+    /// ports every 5 s to tell a filtered network from a dead one, and stops
+    /// when 443 answers again. It announces itself on the timeline and in
+    /// the analysis. Set to false to never do this.
     #[serde(default = "default_true")]
     pub egress_monitor: bool,
     /// What the monitor probes: one reference host per protocol. Swap in

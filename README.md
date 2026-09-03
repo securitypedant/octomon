@@ -31,9 +31,9 @@ The panels:
 - **Connection Quality** — ICMP latency to configurable targets (last / avg /
   p95 / max), jitter, loss and a bufferbloat grade, plus the same columns over
   TCP connects to port 443 (`i`), which keep working when ping is blackholed.
-  When pings, port 443 and the web check all fail at once, an egress monitor
-  probes HTTP, QUIC, SSH, NTP and DNS every 5 s and the table shows those
-  rows instead, so a filtered network reads as filtered, not dead.
+  When port 443 stops answering everywhere, an egress monitor probes HTTP,
+  QUIC, SSH, NTP and DNS every 5 s and the table shows those rows instead,
+  so a filtered network reads as filtered, not dead.
   Auto-discovers the gateway and next hops, traceroutes (`t`), monitors every
   hop MTR-style (`m`), and find out who owns an address (`W`).
 - **Bandwidth** — live throughput, an on-demand speed test (`s`), and
@@ -307,7 +307,7 @@ contacts, and why:
 | Your anchor targets, TCP port 443 | every second | connect-time latency/loss that works where ICMP is blocked (a handshake, closed immediately; no data sent) | a TCP handshake |
 | `octomon.dev/edge` (`edge_check_url`) | at startup, on network change, then every 15 min | how the Cloudflare edge sees this connection: serving PoP, your ISP's AS, the edge's own TCP RTT to you — plus the latest released version, so octomon can mention an update (it never updates itself) | a GET with octomon's User-Agent; the endpoint stores nothing about you — see [octomon.dev/privacy](https://octomon.dev/privacy) |
 | Your system's DNS resolvers, and the reference resolvers (`dns_reference_resolvers`, default 1.1.1.1 and 8.8.8.8) | every 5 s; once a minute a random non-existent name | resolver latency; hijack check; proof the internet path is up when pings and the web are not | one A query for `dns_probe_name` (default `example.com`) |
-| `cloudflare.com:80`, `1.1.1.1:443` (QUIC), `github.com:22`, `time.cloudflare.com:123`, `1.1.1.1:53` (`egress_monitor_checks`) | only while pings, TCP `:443` and the web check are *all* failing, every 5 s until the web answers again; announced on the timeline | is this a filtered network or a dead one — which ports still get out | a TCP handshake or one datagram; nothing further (`egress_monitor = false` turns it off) |
+| `cloudflare.com:80`, `1.1.1.1:443` (QUIC), `github.com:22`, `time.cloudflare.com:123`, `1.1.1.1:53` (`egress_monitor_checks`) | only while TCP `:443` to every anchor is failing, every 5 s until it answers again; announced on the timeline | is this a filtered network or a dead one — which ports still get out | a TCP handshake or one datagram; nothing further (`egress_monitor = false` turns it off) |
 | Your OS's own connectivity-check URL (`captive.apple.com`, `msftconnecttest.com` or `connectivity-check.ubuntu.com`), and through the system proxy when one is set | every 12 s | HTTP reachability, captive-portal detection, clock skew fallback | a GET |
 | `time.cloudflare.com` (`ntp_server`) | at startup, then every 15 min | is the system clock right | one NTP packet |
 | `1.1.1.1:443` (QUIC) | once after startup / network change | path-MTU probe (Linux) | padded QUIC version-negotiation packets |

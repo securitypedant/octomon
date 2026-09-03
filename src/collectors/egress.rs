@@ -12,11 +12,11 @@
 //! A TCP handshake or a single UDP datagram per row — nothing is sent beyond
 //! what the protocol needs to get an answer. The scan is on demand. Its
 //! smaller sibling, the *monitor* ([`monitor`]), is automatic but gated hard:
-//! it starts only when pings, the TCP :443 probes and the web check are all
-//! failing at once — the state that reads as a dead internet — and probes a
-//! five-row list every 5 s to tell a filtered network from a dead one, then
-//! stops when the web answers again. It announces itself on the timeline
-//! and in the analysis, and `egress_monitor = false` turns it off.
+//! it starts only when the TCP :443 probes to every anchor are failing — the
+//! web as people use it, gone — and probes a five-row list every 5 s to tell
+//! a filtered network from a dead one, then stops when 443 answers again. It
+//! announces itself on the timeline and in the analysis, and
+//! `egress_monitor = false` turns it off.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -338,7 +338,7 @@ pub async fn monitor(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
         let (dark, active) = {
             let s = state.lock().unwrap();
             (
-                crate::verdict::web_dark(&s),
+                crate::verdict::https_dark(&s),
                 s.egress_monitor.as_ref().is_some_and(|m| m.active),
             )
         };
@@ -359,6 +359,7 @@ pub async fn monitor(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
             }
             let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
             let mut s = state.lock().unwrap();
+            let web_too = crate::verdict::web_dark(&s);
             s.egress_monitor = Some(Monitor {
                 rows: checks
                     .iter()
@@ -379,7 +380,12 @@ pub async fn monitor(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
                 crate::verdict::Severity::Info,
                 crate::app::EventCategory::Network,
                 format!(
-                    "egress monitor started — pings, tcp :443 and the web check all failing; probing {} every {}s to tell a filter from an outage",
+                    "egress monitor started — tcp :443 failing to every anchor{}; probing {} every {}s to tell a filter from an outage",
+                    if web_too {
+                        " and the web check too"
+                    } else {
+                        ""
+                    },
                     names.join(", "),
                     MONITOR_INTERVAL.as_secs()
                 ),
@@ -390,12 +396,12 @@ pub async fn monitor(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
 
         if active && clear_for >= MONITOR_STOP_AFTER_SECS {
             let mut s = state.lock().unwrap();
-            let why = if matches!(s.http.v4, crate::app::FamilyProbe::Ok(_))
-                || matches!(s.http.v6, crate::app::FamilyProbe::Ok(_))
-            {
-                "the web answers again"
-            } else if s.link_lost || s.netinfo.iface.is_empty() {
+            let why = if s.link_lost || s.netinfo.iface.is_empty() {
                 "the link went down"
+            } else if matches!(s.http.v4, crate::app::FamilyProbe::Captive(_))
+                || matches!(s.http.v6, crate::app::FamilyProbe::Captive(_))
+            {
+                "a sign-in page appeared"
             } else {
                 "tcp :443 answers again"
             };
