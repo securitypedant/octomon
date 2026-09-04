@@ -98,7 +98,8 @@ async fn discover(
     dest: IpAddr,
     generation: u64,
 ) {
-    let child = Command::new(tr::PROGRAM)
+    let program = tr::program(&dest.to_string());
+    let child = Command::new(program)
         .args(tr::args(MAX_HOPS, &dest.to_string()))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -110,7 +111,7 @@ async fn discover(
         Err(e) => {
             crate::errlog::log(
                 "hopmon",
-                format!("could not run {} toward {dest}: {e}", tr::PROGRAM),
+                format!("could not run {program} toward {dest}: {e}"),
             );
             let mut s = state.lock().unwrap();
             if let Some(m) = s
@@ -123,10 +124,7 @@ async fn discover(
             s.notice_event(
                 crate::verdict::Severity::Info,
                 crate::app::EventCategory::Path,
-                format!(
-                    "{} could not be run — cannot discover the hops toward the target",
-                    tr::PROGRAM
-                ),
+                format!("{program} could not be run — cannot discover the hops toward the target"),
             );
             return;
         }

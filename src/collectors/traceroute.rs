@@ -27,7 +27,8 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr, label: String) {
             });
         }
 
-        let child = Command::new(tr::PROGRAM)
+        let program = tr::program(&addr.to_string());
+        let child = Command::new(program)
             .args(tr::args(MAX_HOPS, &addr.to_string()))
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -38,9 +39,9 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr, label: String) {
             Err(e) => {
                 crate::errlog::log(
                     "traceroute",
-                    format!("could not run {} toward {addr}: {e}", tr::PROGRAM),
+                    format!("could not run {program} toward {addr}: {e}"),
                 );
-                finish(&state, Some(format!("{} unavailable: {e}", tr::PROGRAM)));
+                finish(&state, Some(format!("{program} unavailable: {e}")));
                 return;
             }
         };

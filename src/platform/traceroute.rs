@@ -15,6 +15,18 @@ pub const PROGRAM: &str = "tracert";
 #[cfg(not(windows))]
 pub const PROGRAM: &str = "traceroute";
 
+/// The binary for this destination. macOS's `traceroute` is v4-only and
+/// refuses a v6 literal; `traceroute6` takes the same flags. Linux's
+/// `traceroute` and Windows's `tracert` infer the family from the address.
+pub fn program(dest: &str) -> &'static str {
+    #[cfg(target_os = "macos")]
+    if dest.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_ipv6()) {
+        return "traceroute6";
+    }
+    let _ = dest;
+    PROGRAM
+}
+
 /// Arguments for a numeric trace of at most `max_hops` hops toward `dest`.
 pub fn args(max_hops: usize, dest: &str) -> Vec<String> {
     #[cfg(windows)]
@@ -129,6 +141,16 @@ mod tests {
         let a = args(4, "1.1.1.1");
         assert_eq!(a.last().unwrap(), "1.1.1.1");
         assert!(a.contains(&"4".to_string()));
+        // A v6 destination: macOS needs the separate binary, the others infer.
+        assert_eq!(program("1.1.1.1"), PROGRAM);
+        assert_eq!(
+            program("2606:4700:4700::1111"),
+            if cfg!(target_os = "macos") {
+                "traceroute6"
+            } else {
+                PROGRAM
+            }
+        );
     }
 
     #[cfg(not(windows))]
