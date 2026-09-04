@@ -1313,9 +1313,27 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     // Entries vary in height once wrapped, so take rows until the panel is
     // full rather than a fixed count of events.
     let mut taken = 0usize;
+    // The episode's entries are contiguous in time, so a dashed rule above
+    // the first and below the last brackets the whole block: the eye finds
+    // the bracket before it finds a gutter or a background wash.
+    let rule = || {
+        Line::from(Span::styled(
+            "╌".repeat(text_w),
+            Style::new().fg(theme::accent()),
+        ))
+    };
+    let mut prev_inside = false;
     for e in s.events.iter().rev().skip(s.events_scroll) {
         if lines.len() >= visible {
             break;
+        }
+        let inside_now = s
+            .events_focus
+            .as_ref()
+            .is_some_and(|f| e.at >= f.from && e.at <= f.to);
+        if inside_now != prev_inside {
+            lines.push(rule());
+            prev_inside = inside_now;
         }
         // A cleared finding ("✓ … ended after …") is good news and reads as
         // such; a raise is a warning even when its class is only a note, so
@@ -1371,6 +1389,10 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
         }
         lines.extend(rows);
         taken += 1;
+    }
+    // The block ran to the end of what is shown: close the bracket.
+    if prev_inside && lines.len() < visible {
+        lines.push(rule());
     }
     // A heading for the stretch itself. The bar grades every second by the
     // state standing at the time; the timeline records only the moments that
@@ -7226,6 +7248,12 @@ mod tests {
             let y = washed_rows[0];
             let row: String = (0..w).map(|x| buf[(x, y)].symbol()).collect();
             assert!(row.contains("inside the stretch"), "got: {row:?}");
+            // And a dashed rule brackets the block: one directly above the
+            // entry, one directly below.
+            let rule_rows: Vec<u16> = (0..h)
+                .filter(|y| (0..w).filter(|x| buf[(*x, *y)].symbol() == "╌").count() > 20)
+                .collect();
+            assert_eq!(rule_rows, vec![y - 1, y + 1], "rules bracket the entry");
         }
 
         // The stretch's own heading leads the list: times, how the bar read
