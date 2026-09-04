@@ -60,6 +60,13 @@ pub struct Config {
     /// (api64 would otherwise quietly fall back to v4). Set to "" to disable.
     #[serde(default = "default_public_ip6_url")]
     pub public_ip6_url: String,
+    /// Everything octomon adds on a dual-stack link — the anchors' v6 twins,
+    /// the v6 router and path, the public v6 address, the v6 MTU and edge
+    /// checks, the v6 rows of the port scan. false keeps the table to the
+    /// v4 rows; the web check over v6 still runs, so "IPv6 broken" can
+    /// still be named.
+    #[serde(default = "default_true")]
+    pub probe_ipv6: bool,
     /// Address (or hostname) traced at startup to find the gateway and the next
     /// few hops toward the internet, which are added as targets. Pick something
     /// reliably reachable and beyond your ISP. Set to "" to disable discovery.
@@ -375,6 +382,7 @@ impl Default for Config {
                 .to_string(),
             public_ip_url: "https://api.ipify.org".to_string(),
             public_ip6_url: default_public_ip6_url(),
+            probe_ipv6: true,
             discovery_probe: "1.1.1.1".to_string(),
             dns_interval_ms: 5000,
             dns_timeout_ms: 2000,

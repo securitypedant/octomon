@@ -546,12 +546,12 @@ async fn resolve_all(checks: &[EgressCheck]) -> Vec<Option<SocketAddr>> {
 }
 
 /// Start (or restart) a scan of `checks`; each row updates as it completes.
-pub fn start(state: Arc<Mutex<AppState>>, mut checks: Vec<EgressCheck>) {
+pub fn start(state: Arc<Mutex<AppState>>, mut checks: Vec<EgressCheck>, with_v6: bool) {
     {
         let mut s = state.lock().unwrap();
         // The v6 rows ride along on a dual-stack link, skipping any the
         // user already listed themselves.
-        if crate::collectors::http::has_global_v6(&s.netinfo.ipv6) {
+        if with_v6 && crate::collectors::http::has_global_v6(&s.netinfo.ipv6) {
             for c in v6_checks() {
                 let dup = checks.iter().any(|k| {
                     k.host == c.host

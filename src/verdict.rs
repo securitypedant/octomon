@@ -3371,10 +3371,8 @@ pub fn checks(s: &AppState) -> Vec<Check> {
         .iter()
         .find(|t| t.discovered && t.label.contains("public") && t.addr.is_ipv4());
     let public6 = s
-        .targets
-        .iter()
-        .find(|t| t.discovered && t.label == "public IPv6")
-        .map(|t| format!(" · v6 {}", t.addr))
+        .public_ipv6
+        .map(|a| format!(" · v6 {a}"))
         .unwrap_or_default();
     push(
         "public IP",
@@ -6253,6 +6251,15 @@ mod tests {
         );
         gw6.discovered = true;
         assert!(gw6.is_v6_gateway() && !gw6.is_v6_anchor() && gw6.is_v6_twin());
+        // A v6 path hop is a twin (grouped under its v4 hop) but never an
+        // anchor: routers deprioritise ICMP and must not vote on v6 health.
+        let mut hop6 = TargetStat::new(
+            "hop 2→1.1.1.1 v6".into(),
+            IpAddr::V6("2001:db8:5::1".parse::<Ipv6Addr>().unwrap()),
+        );
+        hop6.discovered = true;
+        assert!(hop6.is_v6_twin() && hop6.is_path_hop() && !hop6.is_v6_anchor());
+        assert_eq!(hop6.hop_ttl(), Some(2));
         for _ in 0..20 {
             twin.record_loss();
             gw6.record_loss();

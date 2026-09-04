@@ -2678,7 +2678,11 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
             });
         }
         Side::EgressScan => {
-            collectors::egress::start(ctx.state.clone(), ctx.cfg.egress_checks.clone());
+            collectors::egress::start(
+                ctx.state.clone(),
+                ctx.cfg.egress_checks.clone(),
+                ctx.cfg.probe_ipv6,
+            );
         }
         Side::ExportEvents(events) => {
             let state = ctx.state.clone();

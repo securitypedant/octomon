@@ -70,8 +70,8 @@ pub async fn run(
             }
             Err(_) => (None, None),
         };
-        let v6_applicable =
-            crate::collectors::http::has_global_v6(&state.lock().unwrap().netinfo.ipv6);
+        let v6_applicable = cfg.probe_ipv6
+            && crate::collectors::http::has_global_v6(&state.lock().unwrap().netinfo.ipv6);
         let mut deferred = false;
         if available {
             for (target, v6) in [(target4, false), (target6.filter(|_| v6_applicable), true)] {

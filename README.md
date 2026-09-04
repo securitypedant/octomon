@@ -336,7 +336,9 @@ Notes:
 - Turn any of it off or point it elsewhere in `config.toml`: `public_ip_url`,
   `discovery_probe`, `dns_reference_resolvers`, `ntp_server` (`""` disables),
   `http_probe_provider`, `egress_checks`, `egress_monitor`,
-  `egress_monitor_checks`, `edge_check_url`.
+  `egress_monitor_checks`, `edge_check_url`, `public_ip6_url`; and
+  `probe_ipv6 = false` drops every IPv6 extra (twins, v6 router and path,
+  v6 MTU and edge checks, the scan's v6 rows) in one go.
 - Everything octomon writes about your network stays on your machine, readable
   only by you. The files listed under [Configuration](#configuration) —
   recordings, baselines, incident and network history, `whois.log`,

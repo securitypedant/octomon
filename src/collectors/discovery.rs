@@ -153,14 +153,16 @@ pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Confi
     add_v6_targets(&state, &clients, &cfg);
     // The v6 path: the same walk toward the probe's v6 twin, so the hop list
     // and the ISP-path reading exist for both families on a dual-stack link.
-    if let Some(p6) = probe
-        .parse::<IpAddr>()
-        .ok()
-        .and_then(crate::config::v6_twin)
+    if cfg.probe_ipv6
+        && let Some(p6) = probe
+            .parse::<IpAddr>()
+            .ok()
+            .and_then(crate::config::v6_twin)
         && clients.v6.is_some()
         && crate::collectors::http::has_global_v6(&state.lock().unwrap().netinfo.ipv6)
     {
-        walk_v6(&state, &clients, &cfg, p6).await;
+        walk_v6(&state, &clients, &cfg, p6, &probe).await;
+        add_v6_gateway_fallback(&state, &clients, &cfg);
     }
     // The walk covering only the gateway is the hotel case: hop 1 answered,
     // nothing beyond it did. Worth a retry once the portal is cleared.
@@ -240,24 +242,16 @@ async fn gateway_only(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: 
 /// the analysis judges them as a family, never as part of the v4 consensus.
 /// Nothing is added without a v6 ICMP socket to probe them with.
 fn add_v6_targets(state: &Arc<Mutex<AppState>>, clients: &ping::Clients, cfg: &Config) {
-    if clients.v6.is_none() {
+    if clients.v6.is_none() || !cfg.probe_ipv6 {
         return;
     }
-    let (gateway, twins, iface_index): (Option<IpAddr>, Vec<(String, IpAddr)>, u32) = {
+    let twins: Vec<(String, IpAddr)> = {
         let s = state.lock().unwrap();
         if !crate::collectors::http::has_global_v6(&s.netinfo.ipv6) {
             return;
         }
         let have = |a: IpAddr| s.targets.iter().any(|t| t.addr == a);
-        let gateway = s
-            .netinfo
-            .gateway_ipv6
-            .split('%')
-            .next()
-            .and_then(|g| g.parse::<IpAddr>().ok())
-            .filter(|g| g.is_ipv6() && !have(*g));
-        let twins = s
-            .targets
+        s.targets
             .iter()
             .filter(|t| !t.discovered)
             .filter_map(|t| {
@@ -265,37 +259,8 @@ fn add_v6_targets(state: &Arc<Mutex<AppState>>, clients: &ping::Clients, cfg: &C
                     .map(|v6| (format!("{}{}", t.label, crate::app::V6_ANCHOR_SUFFIX), v6))
             })
             .filter(|(_, v6)| !have(*v6))
-            .collect();
-        (gateway, twins, s.netinfo.iface_index)
+            .collect()
     };
-    // The router first: link-local, so through a socket bound to the
-    // interface — the plain v6 client has no scope to reach fe80:: with.
-    if let Some(addr) = gateway {
-        let link_local = matches!(addr, IpAddr::V6(a) if (a.segments()[0] & 0xffc0) == 0xfe80);
-        let client = if link_local {
-            ping::v6_client_on(iface_index)
-        } else {
-            clients.v6.clone()
-        };
-        if let Some(client) = client {
-            let id = {
-                let mut s = state.lock().unwrap();
-                let mut t = TargetStat::new(crate::app::V6_GATEWAY_LABEL.to_string(), addr);
-                t.discovered = true;
-                let id = t.id;
-                s.targets.push(t);
-                id
-            };
-            ping::spawn_with_client(
-                state.clone(),
-                clients.clone(),
-                client,
-                cfg.clone(),
-                id,
-                addr,
-            );
-        }
-    }
     for (label, addr) in twins {
         let id = {
             let mut s = state.lock().unwrap();
@@ -309,14 +274,62 @@ fn add_v6_targets(state: &Arc<Mutex<AppState>>, clients: &ping::Clients, cfg: &C
     }
 }
 
+/// The v6 router when the walk did not reach it: the routing table's
+/// address, almost always link-local, through a socket bound to the
+/// interface. A fallback only — the walk's TTL-1 answer is the router's
+/// global address, which the plain client pings without any scope games.
+fn add_v6_gateway_fallback(state: &Arc<Mutex<AppState>>, clients: &ping::Clients, cfg: &Config) {
+    let (addr, iface_index) = {
+        let s = state.lock().unwrap();
+        if s.targets.iter().any(|t| t.is_v6_gateway()) {
+            return;
+        }
+        let addr = s
+            .netinfo
+            .gateway_ipv6
+            .split('%')
+            .next()
+            .and_then(|g| g.parse::<IpAddr>().ok())
+            .filter(|g| g.is_ipv6() && !s.targets.iter().any(|t| t.addr == *g));
+        (addr, s.netinfo.iface_index)
+    };
+    let Some(addr) = addr else { return };
+    let link_local = matches!(addr, IpAddr::V6(a) if (a.segments()[0] & 0xffc0) == 0xfe80);
+    let client = if link_local {
+        ping::v6_client_on(iface_index)
+    } else {
+        clients.v6.clone()
+    };
+    let Some(client) = client else { return };
+    let id = {
+        let mut s = state.lock().unwrap();
+        let mut t = TargetStat::new(crate::app::V6_GATEWAY_LABEL.to_string(), addr);
+        t.discovered = true;
+        let id = t.id;
+        s.targets.push(t);
+        id
+    };
+    ping::spawn_with_client(
+        state.clone(),
+        clients.clone(),
+        client,
+        cfg.clone(),
+        id,
+        addr,
+    );
+}
+
 /// The v6 path: one walk toward `probe`, adding the hops that answered as
-/// "hop N→<probe>" targets the way the v4 walk does. TTL 1 on the LAN is the
-/// v6 router, named as such — never "gateway", which is the v4 row.
+/// "hop N→<v4 probe> v6" targets — the v6 twin of each v4 hop row, grouped
+/// under it. TTL 1 on the LAN is the v6 router, named as such — never
+/// "gateway", which is the v4 row — and it is the router's *global* address,
+/// which is why the walk runs before any link-local fallback.
 async fn walk_v6(
     state: &Arc<Mutex<AppState>>,
     clients: &ping::Clients,
     cfg: &Config,
     probe: IpAddr,
+    probe4: &str,
 ) {
     let dest = probe.to_string();
     let program = tr::program(&dest);
@@ -360,7 +373,7 @@ async fn walk_v6(
             let label = if on_lan {
                 crate::app::V6_GATEWAY_LABEL.to_string()
             } else {
-                format!("hop {ttl}→{dest}")
+                format!("hop {ttl}→{probe4}{}", crate::app::V6_ANCHOR_SUFFIX)
             };
             let have = s
                 .targets
@@ -384,12 +397,14 @@ async fn walk_v6(
 
 /// The public IPv6 address, from `public_ip6_url` over a client pinned to v6
 /// so the answer is a v6 address or nothing — a dual-stack endpoint asked
-/// unpinned would quietly answer over v4 when v6 does not get out. Added as
-/// the "public IPv6" row; a failure is logged, not alarmed: the v6 rows
-/// above already say whether v6 works.
-async fn public_ip6(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Config) {
+/// unpinned would quietly answer over v4 when v6 does not get out. Kept as a
+/// fact, not a target: the v4 public address is the router's WAN side and
+/// worth probing, but this one is the machine itself. A failure is logged,
+/// not alarmed: the v6 rows already say whether v6 works.
+async fn public_ip6(state: Arc<Mutex<AppState>>, cfg: Config) {
     let url = cfg.public_ip6_url.trim().to_string();
     if url.is_empty()
+        || !cfg.probe_ipv6
         || !crate::collectors::http::has_global_v6(&state.lock().unwrap().netinfo.ipv6)
     {
         return;
@@ -410,23 +425,8 @@ async fn public_ip6(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Co
             None
         }
     };
-    let Some(addr) = addr else {
-        return;
-    };
-    let (id, added) = {
-        let mut s = state.lock().unwrap();
-        if s.targets.iter().any(|t| t.addr == addr) {
-            (0, false)
-        } else {
-            let mut t = TargetStat::new("public IPv6".to_string(), addr);
-            t.discovered = true;
-            let id = t.id;
-            s.targets.push(t);
-            (id, true)
-        }
-    };
-    if added {
-        ping::spawn_for(state, clients, cfg, id, addr);
+    if let Some(addr) = addr {
+        state.lock().unwrap().public_ipv6 = Some(addr);
     }
 }
 
@@ -517,6 +517,7 @@ pub async fn refresh(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: C
 fn forget_discovered(state: &Arc<Mutex<AppState>>) {
     let mut s = state.lock().unwrap();
     s.targets.retain(|t| !t.discovered);
+    s.public_ipv6 = None;
     let last = s.targets.len().saturating_sub(1);
     s.selected = s.selected.min(last);
     s.graph_target = s.graph_target.min(last);
@@ -670,7 +671,7 @@ pub async fn public_ip(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg:
     };
     state.lock().unwrap().public_ip_error = None;
     // The v6 side rides along, on its own: it is never a reason to retry.
-    tokio::spawn(public_ip6(state.clone(), clients.clone(), cfg.clone()));
+    tokio::spawn(public_ip6(state.clone(), cfg.clone()));
 
     let (id, added) = {
         let mut s = state.lock().unwrap();

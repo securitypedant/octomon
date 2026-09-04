@@ -428,7 +428,7 @@ impl TargetStat {
     /// the link holds a global v6 address, judged as a family and never as
     /// part of the v4 consensus.
     pub fn is_v6_anchor(&self) -> bool {
-        self.is_v6_twin() && !self.is_v6_gateway()
+        self.is_v6_twin() && !self.is_v6_gateway() && !self.is_path_hop()
     }
 
     /// The v6 default router, probed through an interface-bound socket
@@ -2443,6 +2443,11 @@ pub struct AppState {
     /// The automatic egress monitor, once the web has gone dark this
     /// session: kept after it stops so the analysis can say what it found.
     pub egress_monitor: Option<crate::collectors::egress::Monitor>,
+    /// This machine's public IPv6 address as the outside sees it (from
+    /// `public_ip6_url`, over v6 only). A fact, not a target: unlike the v4
+    /// public address, which is the router's WAN side, this is the laptop
+    /// itself, and pinging yourself measures nothing.
+    pub public_ipv6: Option<IpAddr>,
     /// How this machine's attachment to the network has changed this session,
     /// newest last. Shown in the full-screen Network panel.
     pub net_history: VecDeque<NetChange>,
@@ -2770,6 +2775,7 @@ impl AppState {
             proxy: None,
             egress: None,
             egress_monitor: None,
+            public_ipv6: None,
             net_history: VecDeque::new(),
             net_history_sel: 0,
             net_detail_expanded: false,

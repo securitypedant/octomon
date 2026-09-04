@@ -77,8 +77,8 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config, changed: Arc<Notify>)
                 s.update_available = Some(latest);
             }
         }
-        let v6_applicable =
-            crate::collectors::http::has_global_v6(&state.lock().unwrap().netinfo.ipv6);
+        let v6_applicable = cfg.probe_ipv6
+            && crate::collectors::http::has_global_v6(&state.lock().unwrap().netinfo.ipv6);
         if let Some(c6) = client6.as_ref().filter(|_| v6_applicable) {
             let info6 = fetch(c6, &with_reason(&url, why))
                 .await

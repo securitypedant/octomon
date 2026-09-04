@@ -5285,13 +5285,9 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         ];
         // The v6 side, when the pinned fetch got one: dimmer, it is a fact
         // about the same machine rather than a second whois cursor stop.
-        if let Some(v6) = s
-            .targets
-            .iter()
-            .find(|t| t.discovered && t.label == "public IPv6")
-        {
+        if let Some(v6) = s.public_ipv6 {
             row.push(Span::styled(
-                format!("  v6 {}", v6.addr),
+                format!("  v6 {v6}"),
                 Style::new().fg(theme::dim()),
             ));
         }
