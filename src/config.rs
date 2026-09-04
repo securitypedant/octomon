@@ -413,6 +413,22 @@ pub fn is_builtin_anchor(addr: std::net::IpAddr) -> bool {
         .any(|a| a.parse::<std::net::IpAddr>().ok() == Some(addr))
 }
 
+/// Each built-in anchor operator's IPv6 resolver, pinged beside the v4 one
+/// while the link holds a global IPv6 address — the direct answer to "is v6
+/// configured here, and does the route carry it".
+pub const ANCHOR_V6_TWINS: [(&str, &str); 3] = [
+    ("1.1.1.1", "2606:4700:4700::1111"),
+    ("8.8.8.8", "2001:4860:4860::8888"),
+    ("9.9.9.9", "2620:fe::fe"),
+];
+
+pub fn v6_twin(addr: std::net::IpAddr) -> Option<std::net::IpAddr> {
+    ANCHOR_V6_TWINS
+        .iter()
+        .find(|(v4, _)| v4.parse::<std::net::IpAddr>().ok() == Some(addr))
+        .and_then(|(_, v6)| v6.parse().ok())
+}
+
 /// Parse a CLI target string: `"LABEL=IP"` or bare `"IP"` (label = the IP).
 pub fn parse_target(s: &str) -> Result<Target, String> {
     let (label, ip) = match s.split_once('=') {

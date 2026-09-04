@@ -148,7 +148,9 @@ pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Confi
         );
     }
 
-    let gw = gateway_only(state, clients, cfg).await;
+    let gw = gateway_only(state.clone(), clients.clone(), cfg.clone()).await;
+    // gateway_only has waited for netinfo, so the link's addresses are known.
+    add_v6_anchors(&state, &clients, &cfg);
     // The walk covering only the gateway is the hotel case: hop 1 answered,
     // nothing beyond it did. Worth a retry once the portal is cleared.
     match (hops_found, gw) {
@@ -217,6 +219,44 @@ async fn gateway_only(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: 
         "no gateway address from the routing table after 10s — gateway not probed",
     );
     Outcome::NothingFound
+}
+
+/// The IPv6 twins of the built-in anchors, added while this link holds a
+/// global IPv6 address. Pinging them answers "is v6 configured here, and does
+/// the route carry it" directly, which the v4 anchors and the web check
+/// cannot. Auto targets, so a network change drops them with the hops; the
+/// analysis judges them as a family, never as part of the v4 consensus.
+/// Nothing is added without a v6 ICMP socket to probe them with.
+fn add_v6_anchors(state: &Arc<Mutex<AppState>>, clients: &ping::Clients, cfg: &Config) {
+    if clients.v6.is_none() {
+        return;
+    }
+    let twins: Vec<(String, IpAddr)> = {
+        let s = state.lock().unwrap();
+        if !crate::collectors::http::has_global_v6(&s.netinfo.ipv6) {
+            return;
+        }
+        s.targets
+            .iter()
+            .filter(|t| !t.discovered)
+            .filter_map(|t| {
+                crate::config::v6_twin(t.addr)
+                    .map(|v6| (format!("{}{}", t.label, crate::app::V6_ANCHOR_SUFFIX), v6))
+            })
+            .filter(|(_, v6)| !s.targets.iter().any(|t| t.addr == *v6))
+            .collect()
+    };
+    for (label, addr) in twins {
+        let id = {
+            let mut s = state.lock().unwrap();
+            let mut t = TargetStat::new(label, addr);
+            t.discovered = true;
+            let id = t.id;
+            s.targets.push(t);
+            id
+        };
+        ping::spawn_for(state.clone(), clients.clone(), cfg.clone(), id, addr);
+    }
 }
 
 /// How long to wait before each further attempt when a pass came back short.

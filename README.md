@@ -303,6 +303,7 @@ contacts, and why:
 | Endpoint | When | Why | Data sent |
 |----------|------|-----|-----------|
 | Your ICMP targets (default 1.1.1.1, 8.8.8.8, 9.9.9.9, octomon.dev), plus the gateway and first hops found by a startup `traceroute` toward `discovery_probe` | continuously | latency/loss | ICMP echo |
+| The built-in anchors' IPv6 twins (`2606:4700:4700::1111`, `2001:4860:4860::8888`, `2620:fe::fe`) | continuously, only while the interface holds a global IPv6 address | does IPv6 work end to end here | ICMPv6 echo |
 | Your ICMP targets, over HTTPS | every 5 s | is the web service up (HEAD, no body, no redirects, certificate errors tolerated — a timing probe) | a `HEAD /` |
 | Your anchor targets, TCP port 443 | every second | connect-time latency/loss that works where ICMP is blocked (a handshake, closed immediately; no data sent) | a TCP handshake |
 | `octomon.dev/edge` (`edge_check_url`) | at startup, on network change, then every 15 min | how the Cloudflare edge sees this connection: serving PoP, your ISP's AS, the edge's own TCP RTT to you — plus the latest released version, so octomon can mention an update (it never updates itself) | a GET with octomon's User-Agent; the endpoint stores nothing about you — see [octomon.dev/privacy](https://octomon.dev/privacy) |

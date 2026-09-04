@@ -1638,6 +1638,38 @@ pub fn evaluate(s: &AppState) -> Triage {
             FP::Captive(loc) => Some(loc.clone()),
             _ => None,
         });
+        // Two witnesses to IPv6: the web check over v6, and pings to the
+        // anchors' v6 twins (present while the link holds a global v6
+        // address). Either failing while v4 works is the break. The web
+        // answering over v6 overrules dead pings: that is ICMPv6 filtered,
+        // not v6 broken.
+        let v6_anchors: Vec<&TargetStat> = s
+            .targets
+            .iter()
+            .filter(|t| t.is_v6_anchor() && t.window.len() >= th::MIN_SAMPLES)
+            .collect();
+        let v6_pings_dead = !v6_anchors.is_empty()
+            && v6_anchors
+                .iter()
+                .all(|t| t.recent_loss_pct(th::RECENT) >= th::LOSS_DOWN_PCT);
+        let v6_web_failed = matches!(http.v6, FP::Fail(_));
+        let v6_break: Option<String> = match (&http.v4, &http.v6) {
+            (FP::Ok(v4_ms), FP::Fail(reason)) => {
+                Some(format!("v6 probe: {reason} · v4 probe: ok {v4_ms:.0}ms"))
+            }
+            (_, FP::Ok(_)) => None,
+            _ if v6_pings_dead && fine >= 2 => Some(format!(
+                "pings to {} IPv6 anchor{} unanswered ({}) while {fine} v4 anchors answer",
+                v6_anchors.len(),
+                if v6_anchors.len() == 1 { "" } else { "s" },
+                v6_anchors
+                    .iter()
+                    .map(|t| t.addr.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            _ => None,
+        };
         if let Some(location) = captive {
             let mut evidence = vec![format!(
                 "{} connectivity check answered with a sign-in page",
@@ -1656,7 +1688,7 @@ pub fn evaluate(s: &AppState) -> Triage {
                 symptom: false,
                 since: None,
             });
-        } else if let (FP::Ok(v4_ms), FP::Fail(reason)) = (&http.v4, &http.v6) {
+        } else if let Some(first_evidence) = v6_break {
             // Where along the way v6 breaks — the fix differs at each point.
             let no_v6_gateway = s.netinfo.gateway_ipv6.is_empty();
             let v6_dns: Vec<&crate::app::DnsProbe> = s
@@ -1668,7 +1700,19 @@ pub fn evaluate(s: &AppState) -> Triage {
                 .collect();
             let v6_dns_dead =
                 !v6_dns.is_empty() && v6_dns.iter().all(|p| p.failing(th::DNS_FAIL_PCT));
-            let mut evidence = vec![format!("v6 probe: {reason} · v4 probe: ok {v4_ms:.0}ms")];
+            let mut evidence = vec![first_evidence];
+            if v6_web_failed && v6_pings_dead {
+                evidence.push(format!(
+                    "pings to {} IPv6 anchor{} unanswered as well ({})",
+                    v6_anchors.len(),
+                    if v6_anchors.len() == 1 { "" } else { "s" },
+                    v6_anchors
+                        .iter()
+                        .map(|t| t.addr.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
             let through_tunnel = s.netinfo.tunnel_label().is_some();
             let (where_, corroborated) = if let Some(vpn) = s.netinfo.tunnel_label() {
                 // Point-to-point tunnels have no router and no v6 gateway by
@@ -1721,7 +1765,12 @@ pub fn evaluate(s: &AppState) -> Triage {
                 } else {
                     Severity::Degraded
                 },
-                confidence: judge(true, corroborated, false),
+                // Both witnesses agreeing is corroboration in itself.
+                confidence: judge(
+                    true,
+                    corroborated || (v6_web_failed && v6_pings_dead),
+                    false,
+                ),
                 summary: format!("IPv6 broken while IPv4 works — {where_}"),
                 evidence,
                 subject: String::new(),
@@ -3450,6 +3499,67 @@ pub fn checks(s: &AppState) -> Vec<Check> {
             detail.push_str(" — outside DNS filtered here");
         }
         push("reference DNS", status, detail);
+    }
+    // IPv6: configured on this link, and carried by the route? Judged on
+    // the anchors' v6 twins, with the web check over v6 beside them.
+    {
+        let twins: Vec<&TargetStat> = s.targets.iter().filter(|t| t.is_v6_anchor()).collect();
+        let judged: Vec<&&TargetStat> = twins
+            .iter()
+            .filter(|t| t.window.len() >= th::MIN_SAMPLES)
+            .collect();
+        let up = judged
+            .iter()
+            .filter(|t| t.recent_loss_pct(th::RECENT) < th::LOSS_DOWN_PCT)
+            .count();
+        let web = match &s.http.v6 {
+            FP::Ok(ms) => format!(" · web v6 ok {ms:.0}ms"),
+            FP::Fail(r) => format!(" · web v6 failed ({r})"),
+            _ => String::new(),
+        };
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        let (status, detail) = if !crate::collectors::http::has_global_v6(&s.netinfo.ipv6) {
+            (
+                RungStatus::Ok,
+                "no global IPv6 address on this link — v4 only".to_string(),
+            )
+        } else if judged.is_empty() {
+            (
+                RungStatus::Unknown,
+                "global address on this link · pinging the anchors over v6…".to_string(),
+            )
+        } else if up == judged.len() {
+            (
+                RungStatus::Ok,
+                format!(
+                    "works end to end — {up} anchor{} answer{} over v6{web}",
+                    plural(up),
+                    if up == 1 { "s" } else { "" }
+                ),
+            )
+        } else if up == 0 && matches!(s.http.v6, FP::Ok(_)) {
+            (
+                RungStatus::Warn,
+                format!(
+                    "pings over v6 unanswered but the web works over v6 — ICMPv6 filtered{web}"
+                ),
+            )
+        } else if up == 0 {
+            (
+                RungStatus::Bad,
+                format!(
+                    "address but no route — none of {} v6 anchor{} answer{web}",
+                    judged.len(),
+                    plural(judged.len())
+                ),
+            )
+        } else {
+            (
+                RungStatus::Warn,
+                format!("{up} of {} v6 anchors answer{web}", judged.len()),
+            )
+        };
+        push("IPv6", status, detail);
     }
     out
 }
@@ -5949,6 +6059,82 @@ mod tests {
         let t = evaluate(&s);
         assert_eq!(t.findings[0].cause, Cause::WebFiltered, "{:?}", causes(&t));
         assert_eq!(auto_family(&s), crate::app::ProbeFamily::Egress);
+    }
+
+    /// The anchors' v6 twins are a second witness to IPv6: all of them dead
+    /// while v4 answers is the break even before the web check over v6 has
+    /// run; all answering is "works end to end"; and the web answering
+    /// over v6 overrules dead pings as ICMPv6 policy.
+    #[test]
+    fn the_anchors_v6_twins_judge_ipv6_end_to_end() {
+        use crate::app::FamilyProbe;
+        use std::net::Ipv6Addr;
+        let mut s = healthy_state();
+        s.netinfo.ipv6 = vec!["2001:db8:1::10/64".into()];
+        s.http.v4 = FamilyProbe::Ok(38.0);
+        s.http.v6 = FamilyProbe::NotRun;
+        for (label, v6) in [
+            ("Cloudflare v6", "2606:4700:4700::1111"),
+            ("Google v6", "2001:4860:4860::8888"),
+            ("Quad9 v6", "2620:fe::fe"),
+        ] {
+            let mut t = TargetStat::new(label.into(), IpAddr::V6(v6.parse::<Ipv6Addr>().unwrap()));
+            t.discovered = true;
+            assert!(t.is_v6_anchor());
+            for _ in 0..20 {
+                t.record_loss();
+            }
+            s.targets.push(t);
+        }
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::Ipv6Broken)
+            .expect("dead v6 pings alone name the break: {causes}");
+        assert!(
+            f.evidence[0].contains("IPv6 anchors unanswered"),
+            "{:?}",
+            f.evidence
+        );
+        let row = |t: &Triage| t.checks.iter().find(|c| c.name == "IPv6").unwrap().clone();
+        assert_eq!(row(&t).status, RungStatus::Bad);
+        assert!(row(&t).detail.contains("no route"), "{}", row(&t).detail);
+        // The v4 consensus never counts them: the internet rung stays green.
+        let internet = t.rungs.iter().find(|r| r.area == Area::Internet).unwrap();
+        assert_eq!(internet.status, RungStatus::Ok);
+        assert!(
+            internet.detail.starts_with("3 anchors"),
+            "{}",
+            internet.detail
+        );
+
+        // The web answering over v6 while pings do not: filtered, not broken.
+        s.http.v6 = FamilyProbe::Ok(41.0);
+        let t = evaluate(&s);
+        assert!(!causes(&t).contains(&Cause::Ipv6Broken));
+        assert_eq!(row(&t).status, RungStatus::Warn);
+        assert!(row(&t).detail.contains("ICMPv6 filtered"));
+
+        // Twins answering: works end to end.
+        for t in s.targets.iter_mut().filter(|t| t.is_v6_anchor()) {
+            for _ in 0..20 {
+                t.record_reply(22.0);
+            }
+        }
+        let t = evaluate(&s);
+        assert!(!causes(&t).contains(&Cause::Ipv6Broken));
+        assert_eq!(row(&t).status, RungStatus::Ok);
+        assert!(
+            row(&t).detail.starts_with("works end to end"),
+            "{}",
+            row(&t).detail
+        );
+
+        // No global address: v4 only, and nothing to judge.
+        s.netinfo.ipv6 = vec!["fe80::1/64".into()];
+        let t = evaluate(&s);
+        assert!(row(&t).detail.contains("v4 only"));
     }
 
     /// Silence at every size from the MTU probe is not a black hole: its

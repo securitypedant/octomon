@@ -173,6 +173,9 @@ pub struct TargetStat {
     pub settle_until: Option<Instant>,
 }
 
+/// Label suffix of an anchor's auto-added IPv6 twin ("Cloudflare v6").
+pub const V6_ANCHOR_SUFFIX: &str = " v6";
+
 /// How long after a stats reset losses stay attributed to the switchover.
 /// Comfortably past the 1 s probe timeout, and enough for a VPN to finish
 /// coming up; a path still failing beyond it is genuinely failing.
@@ -401,6 +404,13 @@ impl TargetStat {
     /// "checking…" forever.
     pub fn is_path_hop(&self) -> bool {
         self.discovered && self.label.starts_with("hop ")
+    }
+
+    /// The IPv6 twin of a built-in anchor (see discovery): auto-added while
+    /// the link holds a global v6 address, judged as a family and never as
+    /// part of the v4 consensus.
+    pub fn is_v6_anchor(&self) -> bool {
+        self.discovered && self.addr.is_ipv6() && self.label.ends_with(V6_ANCHOR_SUFFIX)
     }
 
     /// The hop's distance for a discovered path hop ("hop 3→1.1.1.1" → 3);
