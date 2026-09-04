@@ -29,25 +29,37 @@ pub fn program(dest: &str) -> &'static str {
 
 /// Arguments for a numeric trace of at most `max_hops` hops toward `dest`.
 pub fn args(max_hops: usize, dest: &str) -> Vec<String> {
+    // A literal v6 address already implies the family everywhere, but saying
+    // it (`-6`) leaves nothing to inference. macOS's traceroute6 has no such
+    // flag — the binary is the family there.
+    let v6 = dest.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_ipv6());
     #[cfg(windows)]
     {
         // `-d` is the unix `-n`, and `-h` bounds the ttl. `-w` is per *probe*
         // and in milliseconds, and there is no `-q`, so a dead hop costs three
         // timeouts rather than one — hence 800ms rather than the unix second,
-        // which keeps a stalled trace to about the same wall time. tracert
-        // infers the address family from a literal address, so no `-4`/`-6`.
-        vec![
+        // which keeps a stalled trace to about the same wall time.
+        let mut a = Vec::new();
+        if v6 {
+            a.push("-6".to_string());
+        }
+        a.extend([
             "-d".to_string(),
             "-h".to_string(),
             max_hops.to_string(),
             "-w".to_string(),
             "800".to_string(),
             dest.to_string(),
-        ]
+        ]);
+        a
     }
     #[cfg(not(windows))]
     {
-        vec![
+        let mut a = Vec::new();
+        if v6 && !cfg!(target_os = "macos") {
+            a.push("-6".to_string());
+        }
+        a.extend([
             "-n".to_string(),
             "-q".to_string(),
             "1".to_string(),
@@ -56,7 +68,8 @@ pub fn args(max_hops: usize, dest: &str) -> Vec<String> {
             "-m".to_string(),
             max_hops.to_string(),
             dest.to_string(),
-        ]
+        ]);
+        a
     }
 }
 
@@ -141,7 +154,13 @@ mod tests {
         let a = args(4, "1.1.1.1");
         assert_eq!(a.last().unwrap(), "1.1.1.1");
         assert!(a.contains(&"4".to_string()));
-        // A v6 destination: macOS needs the separate binary, the others infer.
+        // A v6 destination: macOS needs the separate binary (which has no
+        // -6 flag); the others get -6 said out loud.
+        assert!(!args(4, "1.1.1.1").contains(&"-6".to_string()));
+        assert_eq!(
+            args(4, "2606:4700:4700::1111").contains(&"-6".to_string()),
+            !cfg!(target_os = "macos")
+        );
         assert_eq!(program("1.1.1.1"), PROGRAM);
         assert_eq!(
             program("2606:4700:4700::1111"),
