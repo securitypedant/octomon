@@ -289,9 +289,19 @@ impl Series {
         take > 0 && !self.window.iter().rev().take(take).any(|ok| *ok)
     }
 
-    /// Distribution over the most recent `n` successful samples.
+    /// Distribution over the successes among the most recent `n` probes.
     pub fn stats(&self, n: usize) -> RttStats {
-        let mut v: Vec<f64> = self.history.successes().rev().take(n.max(1)).collect();
+        // The successes *among the last n probes*, not the last n successes:
+        // losses hold their slot in the history, so a window of n slots is
+        // n probes' worth of time. Taking n successes instead reached back
+        // minutes during heavy loss and froze avg/p95/max on old replies
+        // while the loss column climbed (Simon, Wi-Fi switched off).
+        let mut v: Vec<f64> = self
+            .history
+            .tail_slots(n.max(1))
+            .into_iter()
+            .flatten()
+            .collect();
         if v.is_empty() {
             return RttStats::default();
         }
@@ -475,9 +485,19 @@ impl TargetStat {
         take > 0 && !self.window.iter().rev().take(take).any(|ok| *ok)
     }
 
-    /// Distribution over the most recent `n` successful samples.
+    /// Distribution over the successes among the most recent `n` probes.
     pub fn stats(&self, n: usize) -> RttStats {
-        let mut v: Vec<f64> = self.history.successes().rev().take(n.max(1)).collect();
+        // The successes *among the last n probes*, not the last n successes:
+        // losses hold their slot in the history, so a window of n slots is
+        // n probes' worth of time. Taking n successes instead reached back
+        // minutes during heavy loss and froze avg/p95/max on old replies
+        // while the loss column climbed (Simon, Wi-Fi switched off).
+        let mut v: Vec<f64> = self
+            .history
+            .tail_slots(n.max(1))
+            .into_iter()
+            .flatten()
+            .collect();
         if v.is_empty() {
             return RttStats::default();
         }

@@ -3219,6 +3219,27 @@ enum HopRow<'a> {
 /// Collapse runs of unresponsive hops. A single silent hop between two
 /// responders is genuinely informative and stays; a run of six is just noise
 /// pushing the useful rows off the screen.
+/// A middle hop that answered the walk (so it has an address) but never
+/// answers a probe while a later hop or the destination does: a router that
+/// forwards fine and declines ICMP as policy — the same rule the ISP-path
+/// rung applies. "100% loss" and a red bar overstate it; it reads "silent".
+fn hop_silent(m: &crate::app::HopMonitor, h: &crate::app::MonitoredHop, n: usize) -> bool {
+    if h.addr == Some(m.dest) {
+        return false;
+    }
+    let Some(st) = &h.stat else { return false };
+    if st.window.len() < th::MIN_SAMPLES || st.recent_loss_pct(th::RECENT.min(n)) < 100.0 {
+        return false;
+    }
+    m.hops.iter().any(|o| {
+        o.ttl > h.ttl
+            && o.stat.as_ref().is_some_and(|s| {
+                s.window.len() >= th::MIN_SAMPLES
+                    && s.recent_loss_pct(th::RECENT) < th::LOSS_BAD_PCT
+            })
+    })
+}
+
 fn hop_rows(hops: &[crate::app::MonitoredHop]) -> Vec<HopRow<'_>> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -3366,6 +3387,19 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                 cells.extend((2..widths_u.len()).map(|_| Cell::from("—")));
                 return Row::new(cells).style(style);
             };
+            if hop_silent(m, h, n) {
+                let mut style = Style::new().fg(theme::dim());
+                if selected {
+                    style = style.bg(theme::sel_bg());
+                }
+                let mut cells = vec![
+                    Cell::from(hop_ttl(h)),
+                    Cell::from(h.addr.map(|a| a.to_string()).unwrap_or_default()),
+                ];
+                cells.extend((2..widths_u.len() - 1).map(|_| Cell::from("—")));
+                cells.push(Cell::from("silent"));
+                return Row::new(cells).style(style);
+            }
             let loss = stat.recent_loss_pct(n);
             // The same per-cell grading the target table uses, so the two
             // tables read with one rulebook: each stat colours itself, and
@@ -3449,6 +3483,11 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                     continue;
                 }
                 let Some(stat) = &h.stat else { continue };
+                // No bars for a silent hop: a full row of red would say
+                // "outage" about a router that is merely not answering.
+                if hop_silent(m, h, n) {
+                    continue;
+                }
                 let slots = stat.history.tail_slots(spark_w as usize);
                 let data: Vec<u64> = slots
                     .iter()
@@ -7890,6 +7929,10 @@ mod tests {
                 silent(6),
                 silent(7),
                 hop(8, 8, &[40.0], 0),
+                // Answered the walk, never answers a probe, while a later
+                // hop does: ICMP policy, read as silent rather than as loss.
+                hop(9, 9, &[], 8),
+                hop(10, 10, &[50.0, 51.0, 49.0, 50.0, 52.0], 0),
             ],
             discovering: false,
             generation: 1,
@@ -7897,6 +7940,9 @@ mod tests {
         });
 
         let out = draw(&s, 120, 40);
+        assert!(out.contains("silent"), "the policy hop reads silent");
+        assert!(!out.contains("100%"), "and never as 100% loss");
+        assert!(out.contains("10.0.0.9"), "its address is still shown");
         assert!(out.contains("Path ·"));
         assert!(out.contains("Cloudflare (1.1.1.1)"));
         assert!(out.contains("10.0.0.1"));

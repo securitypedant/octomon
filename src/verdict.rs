@@ -6035,6 +6035,37 @@ mod tests {
         }
     }
 
+    /// The windowed stats describe the window: during heavy loss the few
+    /// replies inside it are the distribution, not a reach back through
+    /// minutes of history for enough successes to fill the count.
+    #[test]
+    fn stats_are_windowed_by_probes_not_by_successes() {
+        let mut t = probe("x", [10, 0, 0, 1], 40, 0); // 40 replies at 10 ms
+        for i in 0..20 {
+            if i % 4 == 0 {
+                t.record_reply(100.0);
+                t.tcp.record_reply(100.0);
+            } else {
+                t.record_loss();
+                t.tcp.record_loss();
+            }
+        }
+        // 20-probe window: five replies at 100 ms and fifteen losses.
+        assert_eq!(t.stats(20).mean, Some(100.0));
+        assert_eq!(t.stats(20).max, Some(100.0));
+        assert_eq!(t.recent_loss_pct(20), 75.0);
+        // The TCP series mirrors it.
+        assert_eq!(t.tcp.stats(20).mean, Some(100.0));
+        // A wider window still reaches the old replies, as it should.
+        assert!(t.stats(60).mean.unwrap() < 30.0);
+        // No reply at all inside the window: nothing to describe.
+        for _ in 0..20 {
+            t.record_loss();
+        }
+        assert!(t.stats(20).mean.is_none());
+        assert!(t.stats_stale(20));
+    }
+
     #[test]
     fn a_dark_web_is_an_outage_until_something_proves_the_path_up() {
         use crate::app::FamilyProbe;
