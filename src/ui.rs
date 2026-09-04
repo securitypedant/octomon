@@ -3159,10 +3159,24 @@ fn web_graph(f: &mut Frame, s: &AppState, area: Rect) {
         return;
     }
     let detail = match t.web.status {
-        WebStatus::Web if t.web.fails > 0 => Span::styled(
-            format!("not answering ({} probes) — ping still fine", t.web.fails),
-            Style::new().fg(Color::Red).bold(),
-        ),
+        // Say what ping is doing rather than assume it: "ping still fine"
+        // beside a row at 100% ICMP loss was found in the field.
+        WebStatus::Web if t.web.fails > 0 => {
+            let icmp_loss = t.recent_loss_pct(th::RECENT);
+            let ping = if t.window.len() < th::MIN_SAMPLES {
+                ""
+            } else if icmp_loss >= th::LOSS_DOWN_PCT {
+                " — ping lost too"
+            } else if icmp_loss >= th::LOSS_BAD_PCT {
+                " — ping lossy too"
+            } else {
+                " — ping still fine"
+            };
+            Span::styled(
+                format!("not answering ({} probes){ping}", t.web.fails),
+                Style::new().fg(Color::Red).bold(),
+            )
+        }
         WebStatus::Web => Span::styled(
             t.web
                 .last_ttfb_ms
@@ -8660,6 +8674,19 @@ mod tests {
         let out = draw(&s, 170, 40);
         assert!(out.contains("· icmp"));
         assert!(!out.contains("github.com:22"));
+
+        // Pings back while 443 stays blocked: the monitor keeps running but
+        // the table opens on the ICMP numbers again, which now exist.
+        s.quality_family = None;
+        for t in &mut s.targets {
+            for _ in 0..20 {
+                t.record_reply(9.0);
+            }
+        }
+        assert_eq!(crate::verdict::auto_family(&s), ProbeFamily::Icmp);
+        let out = draw(&s, 170, 40);
+        assert!(out.contains("· icmp"));
+        assert!(out.contains("9.0ms"));
         assert_eq!(
             out.matches("Anchor").count(),
             egress_mentions + 1,

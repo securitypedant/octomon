@@ -744,9 +744,26 @@ pub fn web_dark(s: &AppState) -> bool {
 /// rows while it is running — the numbers that still mean something.
 pub fn auto_family(s: &AppState) -> crate::app::ProbeFamily {
     use crate::app::ProbeFamily as F;
-    if s.egress_monitor.as_ref().is_some_and(|m| m.active) {
+    // Every sampled anchor lost over ICMP, whatever the web check says.
+    let icmp_dead = {
+        let sampled: Vec<&TargetStat> = s
+            .targets
+            .iter()
+            .filter(|t| !t.discovered && t.window.len() >= th::MIN_SAMPLES)
+            .collect();
+        !sampled.is_empty()
+            && sampled
+                .iter()
+                .all(|t| t.recent_loss_pct(th::RECENT) >= 99.5)
+    };
+    let monitor_up = s.egress_monitor.as_ref().is_some_and(|m| m.active);
+    // The egress rows are the default only while nothing else measures:
+    // with pings answering, the ICMP numbers are the path's and the table
+    // opens on them, the egress rows a keypress away (found in the field:
+    // ICMP restored with 443 still blocked left the table on the monitor).
+    if monitor_up && icmp_dead {
         F::Egress
-    } else if icmp_blackholed(s) {
+    } else if icmp_blackholed(s) && !https_dark(s) {
         F::Tcp
     } else {
         F::Icmp
