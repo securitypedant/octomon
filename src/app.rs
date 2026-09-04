@@ -2163,8 +2163,8 @@ mod tests {
         assert_eq!(s.events.back().unwrap().message, "network changed → en7");
     }
 
-    /// During a total outage the RTT window holds only pre-outage successes;
-    /// `stats_stale` is what stops the display serving them as current.
+    /// During a total outage the display window holds no successes at all:
+    /// `stats_stale` says so, and `stats` has nothing to report for it.
     #[test]
     fn stats_go_stale_when_no_probe_in_the_window_answers() {
         let mut t = TargetStat::new("t".into(), IpAddr::V4(Ipv4Addr::LOCALHOST));
@@ -2176,10 +2176,12 @@ mod tests {
         for _ in 0..30 {
             t.record_loss();
         }
-        // The internet went away: the whole display window is losses, yet
-        // `stats` still reports the old replies — stale says don't show them.
+        // The internet went away: the whole display window is losses. The
+        // stats are windowed by probes, so there is nothing underneath the
+        // dashes either — the old replies sit outside the window it claims.
         assert!(t.stats_stale(30));
-        assert_eq!(t.stats(30).mean, Some(10.0), "figures frozen underneath");
+        assert!(t.stats(30).mean.is_none(), "nothing frozen underneath");
+        assert_eq!(t.stats(60).mean, Some(10.0), "a wider window reaches them");
         // A wider window still reaching the old replies is not stale: the
         // figures it shows genuinely sit inside the period it claims.
         assert!(!t.stats_stale(60));
