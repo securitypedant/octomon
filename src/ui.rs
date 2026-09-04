@@ -2766,6 +2766,7 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
     // truth. It also flips the split view's default family to TCP, so such a
     // network opens onto numbers instead of dashes.
     let blackholed = crate::verdict::icmp_blackholed(s);
+    let no_link = crate::verdict::link_state(s) != crate::verdict::LinkState::Up;
     let family = s
         .quality_family
         .unwrap_or_else(|| crate::verdict::auto_family(s));
@@ -2889,7 +2890,10 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         let icmp_loss = t.recent_loss_pct(n);
         // A mid-path router that never answers ICMP is not a fault — the
         // analysis already treats it that way — so it reads dim, not red.
-        let dim_hop = t.is_path_hop() && icmp_loss >= th::LOSS_DOWN_PCT;
+        // With the link known to be gone, every figure in the window is a
+        // measurement of a path that no longer exists: grey at once, rather
+        // than waiting for the window to fill with losses.
+        let dim_hop = (t.is_path_hop() && icmp_loss >= th::LOSS_DOWN_PCT) || no_link;
         // Every stat cell grades itself (see `family_cells`), so recovery
         // reads as the row greening from the left: `last` and the name turn
         // green the moment replies return, while p95/max/loss hold their
@@ -3419,6 +3423,10 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
                 excused: false,
                 probed: true,
             };
+            // The link gone dims the whole path at once, as in the target
+            // table: nothing in the window describes a path that exists.
+            let no_link = crate::verdict::link_state(s) != crate::verdict::LinkState::Up;
+            let mid_hop_policy = mid_hop_policy || no_link;
             let identity = if mid_hop_policy {
                 theme::dim()
             } else {
@@ -8484,6 +8492,42 @@ mod tests {
             "colo city in the Network panel"
         );
         assert!(out.contains("Charter Communications"), "isp row present");
+    }
+
+    /// The link known to be gone greys every stat at once: the window still
+    /// holds the last good replies, but they describe a path that no longer
+    /// exists, and waiting for losses to fill the window would leave green
+    /// figures on screen for half a minute after the cable came out.
+    #[test]
+    fn a_lost_link_greys_the_stats_at_once() {
+        use crate::app::TargetStat;
+        use std::net::{IpAddr, Ipv4Addr};
+        let mut s = AppState::new(vec![TargetStat::new(
+            "Cloudflare".into(),
+            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+        )]);
+        for _ in 0..20 {
+            s.targets[0].record_reply(10.0);
+        }
+        s.netinfo.iface = "en0".into();
+        s.netinfo.gateway_ip = "192.168.1.1".into();
+        s.netinfo.ipv4 = vec!["192.168.1.20/24".into()];
+        // The colour of the "avg" cell: the first cell on the row reading 10.0ms.
+        let avg_colour = |s: &AppState| {
+            let mut t = Terminal::new(TestBackend::new(170, 40)).unwrap();
+            t.draw(|f| render(f, s)).unwrap();
+            let buf = t.backend().buffer();
+            for y in 0..40u16 {
+                let row: String = (0..170u16).map(|x| buf[(x, y)].symbol()).collect();
+                if let Some(pos) = row.find("10.0ms") {
+                    return buf[(pos as u16, y)].fg;
+                }
+            }
+            panic!("no stat cell drawn");
+        };
+        assert_ne!(avg_colour(&s), theme::dim(), "healthy link: coloured");
+        s.link_lost = true;
+        assert_eq!(avg_colour(&s), theme::dim(), "link lost: grey at once");
     }
 
     /// An anchor's v6 twin is auto-added after the hops but is the anchor
