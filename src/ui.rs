@@ -946,21 +946,6 @@ fn column_lines(
         .collect()
 }
 
-/// Wash one rendered row in the cursor-row background out to `width`
-/// columns. A line's style only covers its own text, so the row is padded
-/// with a styled run of spaces to carry the wash to the panel's edge.
-fn highlight_row(row: &mut Line<'static>, width: usize) {
-    let bg = theme::sel_bg();
-    for span in row.spans.iter_mut() {
-        span.style = span.style.bg(bg);
-    }
-    let pad = width.saturating_sub(row.width());
-    if pad > 0 {
-        row.spans
-            .push(Span::styled(" ".repeat(pad), Style::new().bg(bg)));
-    }
-}
-
 /// Every stored network location with its learned baseline: what "normal"
 /// means at each place this machine has been.
 fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
@@ -1350,21 +1335,18 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             severity_color(e.severity)
         };
         // Arrived from the session bar: the entries inside the stretch that
-        // was selected are washed in the cursor-row background, edge to
-        // edge, with a solid block down the left — the same "these rows"
-        // cue the tables use, so the answer to "why am I looking at this
-        // part of the list" is unmissable rather than implied by the scroll
-        // position. (A hairline in the gutter alone was found to vanish.)
-        let inside = s
-            .events_focus
-            .as_ref()
-            .is_some_and(|f| e.at >= f.from && e.at <= f.to);
+        // was selected wear a solid block down the left and are bracketed
+        // by the dashed rules above, so the answer to "why am I looking at
+        // this part of the list" is visible rather than implied by the
+        // scroll position. (A hairline alone was found to vanish; a
+        // background wash was found to add nothing once the rules existed.)
+        let inside = inside_now;
         let gutter = if inside {
             Span::styled("▌", Style::new().fg(theme::accent()).bold())
         } else {
             Span::raw(" ")
         };
-        let mut rows = column_lines(
+        let rows = column_lines(
             vec![
                 gutter,
                 Span::styled(format!("{}  ", e.when()), Style::new().fg(theme::dim())),
@@ -1382,11 +1364,6 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             INDENT,
             text_w,
         );
-        if inside {
-            for row in rows.iter_mut() {
-                highlight_row(row, text_w);
-            }
-        }
         lines.extend(rows);
         taken += 1;
     }
@@ -7239,31 +7216,25 @@ mod tests {
             "the marked entry: {:?}",
             gutter_rows[0]
         );
-        // The highlight is a wash across the whole row, not a hairline: the
-        // marked entry's row carries the cursor-row background from the
-        // gutter to the panel's edge, and no other row does.
+        // A dashed rule brackets the block: one directly above the entry,
+        // one directly below, and no background wash on the rows (the
+        // bracket was found to make it redundant).
         {
             let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
             t.draw(|f| render(f, &s)).unwrap();
             let buf = t.backend().buffer();
-            let washed_rows: Vec<u16> = (0..h)
-                .filter(|y| {
-                    (0..w)
-                        .filter(|x| buf[(*x, *y)].bg == theme::sel_bg())
-                        .count()
-                        >= (w as usize) * 3 / 4
-                })
-                .collect();
-            assert_eq!(washed_rows.len(), 1, "one row washed: {washed_rows:?}");
-            let y = washed_rows[0];
-            let row: String = (0..w).map(|x| buf[(x, y)].symbol()).collect();
-            assert!(row.contains("inside the stretch"), "got: {row:?}");
-            // And a dashed rule brackets the block: one directly above the
-            // entry, one directly below.
+            let row_text = |y: u16| -> String { (0..w).map(|x| buf[(x, y)].symbol()).collect() };
+            let y = (0..h)
+                .find(|y| row_text(*y).contains("inside the stretch"))
+                .expect("the entry is drawn");
             let rule_rows: Vec<u16> = (0..h)
                 .filter(|y| (0..w).filter(|x| buf[(*x, *y)].symbol() == "╌").count() > 20)
                 .collect();
             assert_eq!(rule_rows, vec![y - 1, y + 1], "rules bracket the entry");
+            assert!(
+                (0..w).all(|x| buf[(x, y)].bg != theme::sel_bg()),
+                "no wash on the entry row"
+            );
         }
 
         // The stretch's own heading leads the list: times, how the bar read
