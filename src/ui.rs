@@ -2947,8 +2947,10 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         if focused && i == s.selected {
             row_style = row_style.bg(theme::sel_bg()).add_modifier(Modifier::BOLD);
         }
-        // '⇢' marks auto-discovered (gateway / hop) targets.
-        let label = if t.discovered {
+        // '⇢' marks auto-discovered path targets (gateway / hops / public
+        // IP). An anchor's v6 twin is auto-added too but is the anchor over
+        // the other family, not the path, so it wears no arrow.
+        let label = if t.discovered && !t.is_v6_anchor() {
             format!("⇢ {}", t.label)
         } else {
             t.label.clone()
@@ -8412,6 +8414,38 @@ mod tests {
             "colo city in the Network panel"
         );
         assert!(out.contains("Charter Communications"), "isp row present");
+    }
+
+    /// An anchor's v6 twin is auto-added after the hops but is the anchor
+    /// over the other family, not the path: it sits directly under its v4
+    /// sibling and wears no ⇢, while the discovered gateway keeps its arrow.
+    #[test]
+    fn a_v6_twin_sits_under_its_anchor_without_the_path_arrow() {
+        use crate::app::TargetStat;
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        let mut s = AppState::new(vec![
+            TargetStat::new("Cloudflare".into(), IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+            TargetStat::new("Google".into(), IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+        ]);
+        let mut gw = TargetStat::new("gateway".into(), IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        gw.discovered = true;
+        s.targets.push(gw);
+        let mut twin = TargetStat::new(
+            "Cloudflare v6".into(),
+            IpAddr::V6("2606:4700:4700::1111".parse::<Ipv6Addr>().unwrap()),
+        );
+        twin.discovered = true;
+        s.targets.push(twin);
+        assert_eq!(s.quality_order(), vec![0, 3, 1, 2]);
+
+        let out = draw(&s, 170, 40);
+        assert!(!out.contains("⇢ Cloudflare v6"), "no path arrow on a twin");
+        assert!(out.contains("⇢ gateway"), "the path keeps its arrow");
+        let (cf6, google) = (
+            out.find("Cloudflare v6").unwrap(),
+            out.find("Google").unwrap(),
+        );
+        assert!(cf6 < google, "the twin sits under its sibling");
     }
 
     /// The quality table's third family: while the egress monitor runs, its

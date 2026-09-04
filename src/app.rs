@@ -3361,7 +3361,32 @@ impl AppState {
     pub fn quality_order(&self) -> Vec<usize> {
         let mut order: Vec<usize> = (0..self.targets.len()).collect();
         let Some((col, desc)) = self.q_sort else {
-            return order;
+            // Unsorted: each anchor's v6 twin sits directly under it, not
+            // down among the discovered hops it was appended after — it is
+            // the same anchor over the other family, not part of the path.
+            let mut grouped: Vec<usize> = Vec::with_capacity(order.len());
+            for (i, t) in self.targets.iter().enumerate() {
+                if t.is_v6_anchor() {
+                    continue;
+                }
+                grouped.push(i);
+                let twin = format!("{}{}", t.label, V6_ANCHOR_SUFFIX);
+                grouped.extend(
+                    self.targets
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, o)| o.is_v6_anchor() && o.label == twin)
+                        .map(|(j, _)| j),
+                );
+            }
+            // A twin whose sibling is gone (deleted) still gets a row.
+            let orphans: Vec<usize> = order
+                .iter()
+                .copied()
+                .filter(|i| !grouped.contains(i))
+                .collect();
+            grouped.extend(orphans);
+            return grouped;
         };
         let n = self.window_samples();
         // Sort key: missing latency → +∞ so dead targets rank "worst".
