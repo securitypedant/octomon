@@ -333,6 +333,12 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
             r.check.host = d.text(&r.check.host);
         }
     }
+    // The edge's view names our public address, over each family.
+    for e in [v.edge.as_mut(), v.edge6.as_mut()].into_iter().flatten() {
+        if let Ok(ip) = e.ip.parse::<IpAddr>() {
+            e.ip = d.ip(ip).to_string();
+        }
+    }
     if let Some(m) = v.egress_monitor.as_mut() {
         for r in m.rows.iter_mut() {
             r.check.host = d.text(&r.check.host);

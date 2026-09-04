@@ -58,56 +58,38 @@ pub async fn run(
             (s.netinfo.mtu, !s.link_lost && !s.netinfo.iface.is_empty())
         };
         // A QUIC-speaking host: the probe relies on the version-negotiation
-        // answer, so it cannot be just any ping target.
-        let target = match tokio::net::lookup_host((host.as_str(), QUIC_PORT)).await {
-            Ok(mut addrs) => addrs.find_map(|a| match a.ip() {
-                IpAddr::V4(v4) => Some(v4),
-                IpAddr::V6(_) => None,
-            }),
-            Err(_) => None,
+        // answer, so it cannot be just any ping target. One address per
+        // family; the v6 one only while the link holds a global v6 address.
+        let (target4, target6) = match tokio::net::lookup_host((host.as_str(), QUIC_PORT)).await {
+            Ok(addrs) => {
+                let all: Vec<IpAddr> = addrs.map(|a| a.ip()).collect();
+                (
+                    all.iter().copied().find(IpAddr::is_ipv4),
+                    all.iter().copied().find(IpAddr::is_ipv6),
+                )
+            }
+            Err(_) => (None, None),
         };
-        // While the path is dropping a large share of *small* packets, a
-        // timeout-read DF probe cannot tell size from loss, and a "black
-        // hole" measured now would stick for the whole re-probe period.
-        // Defer and retry once the weather clears.
-        if available && let Some(target) = target {
-            use crate::verdict::thresholds as th;
-            let loss = {
-                let s = state.lock().unwrap();
-                s.targets
-                    .iter()
-                    .find(|t| t.addr == IpAddr::V4(target) && t.window.len() >= th::MIN_SAMPLES)
-                    .map(|t| t.recent_loss_pct(th::RECENT))
-            };
-            if loss.is_some_and(|l| l >= th::PMTU_LOSS_GATE_PCT) {
-                {
-                    let mut s = state.lock().unwrap();
-                    if s.pmtu.is_none() {
-                        s.pmtu_error = Some("deferred — the path is dropping packets".to_string());
-                    }
-                }
-                tokio::select! {
-                    _ = changed.notified() => {}
-                    _ = tokio::time::sleep(Duration::from_secs(120)) => {}
-                }
-                continue;
-            }
-            let result = tokio::task::spawn_blocking(move || probe(target, iface_mtu))
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()));
-            let mut s = state.lock().unwrap();
-            match result {
-                Ok(r) => {
-                    s.pmtu = Some(r);
-                    s.pmtu_error = None;
-                }
-                Err(e) => {
-                    tracing::debug!("pmtu probe: {e}");
-                    crate::errlog::log("pmtu", format!("probe toward {target} failed: {e}"));
-                    s.pmtu = None;
-                    s.pmtu_error = Some(e);
+        let v6_applicable =
+            crate::collectors::http::has_global_v6(&state.lock().unwrap().netinfo.ipv6);
+        let mut deferred = false;
+        if available {
+            for (target, v6) in [(target4, false), (target6.filter(|_| v6_applicable), true)] {
+                let Some(target) = target else {
+                    continue;
+                };
+                if !measure(&state, target, v6, iface_mtu).await {
+                    deferred = true;
                 }
             }
+        }
+        if deferred {
+            // The weather may clear well inside the re-probe period.
+            tokio::select! {
+                _ = changed.notified() => {}
+                _ = tokio::time::sleep(Duration::from_secs(120)) => {}
+            }
+            continue;
         }
         tokio::select! {
             _ = changed.notified() => {}
@@ -116,21 +98,82 @@ pub async fn run(
     }
 }
 
+/// One family's probe: the loss gate, the blocking probe, and the result
+/// into its slot. `false` when deferred because the path is dropping small
+/// packets too — a timeout-read DF probe cannot tell size from loss then,
+/// and a "black hole" measured now would stick for the whole re-probe
+/// period.
+async fn measure(
+    state: &Arc<Mutex<AppState>>,
+    target: IpAddr,
+    v6: bool,
+    iface_mtu: Option<u32>,
+) -> bool {
+    use crate::verdict::thresholds as th;
+    let loss = {
+        let s = state.lock().unwrap();
+        s.targets
+            .iter()
+            .find(|t| t.addr == target && t.window.len() >= th::MIN_SAMPLES)
+            .map(|t| t.recent_loss_pct(th::RECENT))
+    };
+    if loss.is_some_and(|l| l >= th::PMTU_LOSS_GATE_PCT) {
+        let mut guard = state.lock().unwrap();
+        let s: &mut AppState = &mut guard;
+        let (slot, err) = if v6 {
+            (&s.pmtu6, &mut s.pmtu6_error)
+        } else {
+            (&s.pmtu, &mut s.pmtu_error)
+        };
+        if slot.is_none() {
+            *err = Some("deferred — the path is dropping packets".to_string());
+        }
+        return false;
+    }
+    let result = tokio::task::spawn_blocking(move || probe(target, iface_mtu))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    let mut guard = state.lock().unwrap();
+    let s: &mut AppState = &mut guard;
+    let (slot, err) = if v6 {
+        (&mut s.pmtu6, &mut s.pmtu6_error)
+    } else {
+        (&mut s.pmtu, &mut s.pmtu_error)
+    };
+    match result {
+        Ok(r) => {
+            *slot = Some(r);
+            *err = None;
+        }
+        Err(e) => {
+            tracing::debug!("pmtu probe: {e}");
+            crate::errlog::log("pmtu", format!("probe toward {target} failed: {e}"));
+            *slot = None;
+            *err = Some(e);
+        }
+    }
+    true
+}
+
 /// Smallest size worth searching down to: the smallest datagram a QUIC server
-/// must answer (1200 bytes) plus IP and UDP headers.
+/// must answer (1200 bytes) plus IP and UDP headers — 20 + 8 for v4, 40 + 8
+/// for v6 (whose minimum link MTU, 1280, sits just above).
 #[cfg(unix)]
-const FLOOR: u32 = 1228;
+fn floor(v6: bool) -> u32 {
+    if v6 { 1248 } else { 1228 }
+}
 #[cfg(unix)]
 const REPLY_WAIT: Duration = Duration::from_millis(1500);
 /// QUIC's port at the probe hosts.
 const QUIC_PORT: u16 = 443;
 
 #[cfg(unix)]
-fn probe(target: std::net::Ipv4Addr, iface_mtu: Option<u32>) -> Result<PmtuResult, String> {
+fn probe(target: IpAddr, iface_mtu: Option<u32>) -> Result<PmtuResult, String> {
     use std::io::ErrorKind;
     let sock = DfSocket::open(target)?;
+    let floor = floor(target.is_ipv6());
     // Where to start: the interface MTU, else the Ethernet default.
-    let top = iface_mtu.unwrap_or(1500).clamp(FLOOR, 9000);
+    let top = iface_mtu.unwrap_or(1500).clamp(floor, 9000);
 
     // Does this OS honour DF at all for an unprivileged socket? A datagram
     // larger than the interface can carry must be refused or vanish; if it is
@@ -161,7 +204,7 @@ fn probe(target: std::net::Ipv4Addr, iface_mtu: Option<u32>) -> Result<PmtuResul
     match send(top)? {
         Outcome::Reply => {
             return Ok(PmtuResult {
-                target: IpAddr::V4(target),
+                target,
                 iface_mtu,
                 path_mtu: Some(top),
                 blackhole: false,
@@ -177,7 +220,7 @@ fn probe(target: std::net::Ipv4Addr, iface_mtu: Option<u32>) -> Result<PmtuResul
                 Outcome::Reply => {
                     // A lost packet, nothing more.
                     return Ok(PmtuResult {
-                        target: IpAddr::V4(target),
+                        target,
                         iface_mtu,
                         path_mtu: Some(top),
                         blackhole: false,
@@ -192,7 +235,7 @@ fn probe(target: std::net::Ipv4Addr, iface_mtu: Option<u32>) -> Result<PmtuResul
     // Binary search for the largest size that is answered. When PMTUD works
     // the misses are instant (EMSGSIZE); in a black hole each miss costs a
     // reply timeout, so the search is bounded to a handful of steps.
-    let (mut lo, mut hi) = (FLOOR, top - 1);
+    let (mut lo, mut hi) = (floor, top - 1);
     let mut best: Option<u32>;
     if matches!(send(lo)?, Outcome::Reply) {
         best = Some(lo);
@@ -202,7 +245,7 @@ fn probe(target: std::net::Ipv4Addr, iface_mtu: Option<u32>) -> Result<PmtuResul
         // here, and a "black hole" verdict would send the user chasing an
         // MTU that is not the problem. Report what is known and no more.
         return Ok(PmtuResult {
-            target: IpAddr::V4(target),
+            target,
             iface_mtu,
             path_mtu: None,
             blackhole: false,
@@ -224,7 +267,7 @@ fn probe(target: std::net::Ipv4Addr, iface_mtu: Option<u32>) -> Result<PmtuResul
         }
     }
     Ok(PmtuResult {
-        target: IpAddr::V4(target),
+        target,
         iface_mtu,
         path_mtu: best,
         blackhole,
@@ -233,7 +276,7 @@ fn probe(target: std::net::Ipv4Addr, iface_mtu: Option<u32>) -> Result<PmtuResul
 }
 
 #[cfg(not(unix))]
-fn probe(_target: std::net::Ipv4Addr, _iface_mtu: Option<u32>) -> Result<PmtuResult, String> {
+fn probe(_target: IpAddr, _iface_mtu: Option<u32>) -> Result<PmtuResult, String> {
     Err("path-MTU probe not implemented on this platform".to_string())
 }
 
@@ -249,32 +292,50 @@ enum Outcome {
 #[cfg(unix)]
 struct DfSocket {
     sock: socket2::Socket,
+    /// IP + UDP header bytes for this family: 28 for v4, 48 for v6.
+    headers: u32,
 }
 
 #[cfg(unix)]
 impl DfSocket {
-    fn open(target: std::net::Ipv4Addr) -> Result<Self, String> {
+    fn open(target: IpAddr) -> Result<Self, String> {
         use socket2::{Domain, Protocol, Socket, Type};
         use std::os::fd::AsRawFd;
-        let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+        let v6 = target.is_ipv6();
+        let domain = if v6 { Domain::IPV6 } else { Domain::IPV4 };
+        let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))
             .map_err(|e| format!("udp socket: {e}"))?;
         sock.set_read_timeout(Some(REPLY_WAIT))
             .map_err(|e| e.to_string())?;
         // Don't-Fragment. Linux: path-MTU discovery mode "DO" — set DF and let
         // the kernel enforce whatever MTU it has learned for the route, which
         // is what makes the second send after a timeout informative. macOS /
-        // BSD: the plain DF flag (honoured or not; the caller checks).
+        // BSD: the plain DF flag (honoured or not; the caller checks). v6 has
+        // no DF bit on the wire — routers never fragment — so the option only
+        // stops the *host* fragmenting, which is the same guarantee.
         let fd = sock.as_raw_fd();
         // SAFETY: setsockopt on a socket this function owns, with a correctly
         // sized int option value; the pointer does not outlive the call.
         let rc = unsafe {
             #[cfg(target_os = "linux")]
             {
-                let val: libc::c_int = libc::IP_PMTUDISC_DO;
+                let (level, opt, val): (libc::c_int, libc::c_int, libc::c_int) = if v6 {
+                    (
+                        libc::IPPROTO_IPV6,
+                        libc::IPV6_MTU_DISCOVER,
+                        libc::IPV6_PMTUDISC_DO,
+                    )
+                } else {
+                    (
+                        libc::IPPROTO_IP,
+                        libc::IP_MTU_DISCOVER,
+                        libc::IP_PMTUDISC_DO,
+                    )
+                };
                 libc::setsockopt(
                     fd,
-                    libc::IPPROTO_IP,
-                    libc::IP_MTU_DISCOVER,
+                    level,
+                    opt,
                     &val as *const _ as *const libc::c_void,
                     std::mem::size_of::<libc::c_int>() as libc::socklen_t,
                 )
@@ -282,10 +343,15 @@ impl DfSocket {
             #[cfg(not(target_os = "linux"))]
             {
                 let val: libc::c_int = 1;
+                let (level, opt) = if v6 {
+                    (libc::IPPROTO_IPV6, libc::IPV6_DONTFRAG)
+                } else {
+                    (libc::IPPROTO_IP, libc::IP_DONTFRAG)
+                };
                 libc::setsockopt(
                     fd,
-                    libc::IPPROTO_IP,
-                    libc::IP_DONTFRAG,
+                    level,
+                    opt,
                     &val as *const _ as *const libc::c_void,
                     std::mem::size_of::<libc::c_int>() as libc::socklen_t,
                 )
@@ -297,9 +363,12 @@ impl DfSocket {
                 std::io::Error::last_os_error()
             ));
         }
-        let dest = std::net::SocketAddr::new(IpAddr::V4(target), QUIC_PORT);
+        let dest = std::net::SocketAddr::new(target, QUIC_PORT);
         sock.connect(&dest.into()).map_err(|e| e.to_string())?;
-        Ok(Self { sock })
+        Ok(Self {
+            sock,
+            headers: if v6 { 40 + 8 } else { 20 + 8 },
+        })
     }
 
     /// One probe of `total` bytes on the wire (IP header included). `Ok(true)`
@@ -307,7 +376,7 @@ impl DfSocket {
     /// being the interesting one.
     fn send_probe(&self, total: u32) -> std::io::Result<bool> {
         use std::io::{Read, Write};
-        let payload = total.saturating_sub(20 + 8) as usize;
+        let payload = total.saturating_sub(self.headers) as usize;
         let pkt = quic_probe(payload);
         (&self.sock).write_all(&pkt)?;
 
@@ -407,12 +476,17 @@ mod tests {
     #[test]
     #[ignore = "requires network access"]
     fn live_pmtu() {
-        match probe(std::net::Ipv4Addr::new(1, 1, 1, 1), Some(1500)) {
-            Ok(r) => {
-                println!("{}", describe(&r));
-                assert!(r.path_mtu.is_some_and(|m| m >= FLOOR));
+        for target in [
+            IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)),
+            "2606:4700:4700::1111".parse::<IpAddr>().unwrap(),
+        ] {
+            match probe(target, Some(1500)) {
+                Ok(r) => {
+                    println!("{target}: {}", describe(&r));
+                    assert!(r.path_mtu.is_some_and(|m| m >= floor(target.is_ipv6())));
+                }
+                Err(e) => println!("{target}: unavailable: {e}"),
             }
-            Err(e) => println!("unavailable: {e}"),
         }
     }
 }

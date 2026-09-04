@@ -173,8 +173,10 @@ pub struct TargetStat {
     pub settle_until: Option<Instant>,
 }
 
-/// Label suffix of an anchor's auto-added IPv6 twin ("Cloudflare v6").
+/// Label suffix of an auto-added IPv6 twin ("Cloudflare v6", "gateway v6").
 pub const V6_ANCHOR_SUFFIX: &str = " v6";
+/// The discovered v6 default router's row.
+pub const V6_GATEWAY_LABEL: &str = "gateway v6";
 
 /// How long after a stats reset losses stay attributed to the switchover.
 /// Comfortably past the 1 s probe timeout, and enough for a VPN to finish
@@ -406,11 +408,23 @@ impl TargetStat {
         self.discovered && self.label.starts_with("hop ")
     }
 
+    /// An auto-added IPv6 twin of another row — an anchor's, or the
+    /// gateway's — named "<sibling> v6" and shown directly under it.
+    pub fn is_v6_twin(&self) -> bool {
+        self.discovered && self.addr.is_ipv6() && self.label.ends_with(V6_ANCHOR_SUFFIX)
+    }
+
     /// The IPv6 twin of a built-in anchor (see discovery): auto-added while
     /// the link holds a global v6 address, judged as a family and never as
     /// part of the v4 consensus.
     pub fn is_v6_anchor(&self) -> bool {
-        self.discovered && self.addr.is_ipv6() && self.label.ends_with(V6_ANCHOR_SUFFIX)
+        self.is_v6_twin() && !self.is_v6_gateway()
+    }
+
+    /// The v6 default router, probed through an interface-bound socket
+    /// because it is almost always link-local.
+    pub fn is_v6_gateway(&self) -> bool {
+        self.discovered && self.addr.is_ipv6() && self.label == V6_GATEWAY_LABEL
     }
 
     /// The hop's distance for a discovered path hop ("hop 3→1.1.1.1" → 3);
@@ -2431,6 +2445,9 @@ pub struct AppState {
     /// could not (an OS that ignores Don't-Fragment, no UDP out).
     pub pmtu: Option<PmtuResult>,
     pub pmtu_error: Option<String>,
+    /// The same probe over IPv6, while the link holds a global v6 address.
+    pub pmtu6: Option<PmtuResult>,
+    pub pmtu6_error: Option<String>,
     pub signal: SignalState,
     pub vitals: Vitals,
     /// Error/drop counters for the default interface.
@@ -2534,6 +2551,9 @@ pub struct AppState {
     /// The Cloudflare edge's view of this connection, when the `/edge` check
     /// is enabled and has answered. `None` = disabled, or not fetched yet.
     pub edge: Option<EdgeInfo>,
+    /// The edge's view over IPv6, from a client pinned to v6: which PoP the
+    /// v6 route lands on and how far away it thinks we are that way.
+    pub edge6: Option<EdgeInfo>,
     /// A newer released octomon version, when the edge check reports one —
     /// mentioned once on the timeline and in the help title, never acted on.
     pub update_available: Option<String>,
@@ -2736,6 +2756,8 @@ impl AppState {
             zoom_behind: false,
             pmtu: None,
             pmtu_error: None,
+            pmtu6: None,
+            pmtu6_error: None,
             signal: SignalState::default(),
             vitals: Vitals::default(),
             link_errors: LinkErrors::default(),
@@ -2778,6 +2800,7 @@ impl AppState {
             q_col: 0,
             quality_family: None,
             edge: None,
+            edge6: None,
             update_available: None,
             q_sort: None,
             traceroute: None,
@@ -3103,7 +3126,7 @@ impl AppState {
         if let Some(t) = self
             .targets
             .iter()
-            .find(|t| t.discovered && t.label.contains("public"))
+            .find(|t| t.discovered && t.label.contains("public") && t.addr.is_ipv4())
         {
             let token = t.addr.to_string();
             push(NetSlot::Public, &token);
@@ -3366,7 +3389,7 @@ impl AppState {
             // the same anchor over the other family, not part of the path.
             let mut grouped: Vec<usize> = Vec::with_capacity(order.len());
             for (i, t) in self.targets.iter().enumerate() {
-                if t.is_v6_anchor() {
+                if t.is_v6_twin() {
                     continue;
                 }
                 grouped.push(i);
@@ -3375,7 +3398,7 @@ impl AppState {
                     self.targets
                         .iter()
                         .enumerate()
-                        .filter(|(_, o)| o.is_v6_anchor() && o.label == twin)
+                        .filter(|(_, o)| o.is_v6_twin() && o.label == twin)
                         .map(|(j, _)| j),
                 );
             }

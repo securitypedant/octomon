@@ -55,6 +55,11 @@ pub struct Config {
     /// Public-IP discovery endpoint (plain-text IP response). Added as a target
     /// on startup. Set to "" to disable.
     pub public_ip_url: String,
+    /// The same over IPv6, asked only while the interface holds a global v6
+    /// address and pinned to v6 so the answer is a v6 address or a failure
+    /// (api64 would otherwise quietly fall back to v4). Set to "" to disable.
+    #[serde(default = "default_public_ip6_url")]
+    pub public_ip6_url: String,
     /// Address (or hostname) traced at startup to find the gateway and the next
     /// few hops toward the internet, which are added as targets. Pick something
     /// reliably reachable and beyond your ISP. Set to "" to disable discovery.
@@ -369,6 +374,7 @@ impl Default for Config {
             librespeed_server_list: "https://librespeed.org/backend-servers/servers.json"
                 .to_string(),
             public_ip_url: "https://api.ipify.org".to_string(),
+            public_ip6_url: default_public_ip6_url(),
             discovery_probe: "1.1.1.1".to_string(),
             dns_interval_ms: 5000,
             dns_timeout_ms: 2000,
@@ -396,6 +402,10 @@ impl Default for Config {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_public_ip6_url() -> String {
+    "https://api64.ipify.org".to_string()
 }
 
 fn default_reference_resolvers() -> Vec<String> {

@@ -5230,12 +5230,25 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
     if let Some(t) = s
         .targets
         .iter()
-        .find(|t| t.discovered && t.label.contains("public"))
+        .find(|t| t.discovered && t.label.contains("public") && t.addr.is_ipv4())
     {
-        lines.push(Line::from(vec![
+        let mut row = vec![
             Span::styled(format!("{:<9}", "public"), Style::new().fg(theme::dim())),
             hl(NetSlot::Public, t.addr.to_string()),
-        ]));
+        ];
+        // The v6 side, when the pinned fetch got one: dimmer, it is a fact
+        // about the same machine rather than a second whois cursor stop.
+        if let Some(v6) = s
+            .targets
+            .iter()
+            .find(|t| t.discovered && t.label == "public IPv6")
+        {
+            row.push(Span::styled(
+                format!("  v6 {}", v6.addr),
+                Style::new().fg(theme::dim()),
+            ));
+        }
+        lines.push(Line::from(row));
     }
 
     // The edge's view of this connection, when the /edge check is on and has
@@ -5267,6 +5280,13 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
                 format!(" · sees this machine at {rtt:.0}ms"),
                 Style::new().fg(theme::text()),
             ));
+        }
+        if let Some(e6) = &s.edge6 {
+            let mut over = format!(" · over v6: {}", e6.colo_label());
+            if let Some(rtt) = e6.tcp_rtt_ms {
+                over.push_str(&format!(" at {rtt:.0}ms"));
+            }
+            spans.push(Span::styled(over, Style::new().fg(theme::dim())));
         }
         lines.push(Line::from(spans));
     }
@@ -5317,27 +5337,30 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
     // Path MTU, only when it is narrower than the interface or broken. A
     // black-hole reading taken while the path drops most packets is loss
     // wearing a costume — same gate as the analysis, so the two never argue.
-    if let Some(p) = &s.pmtu
-        && (p.blackhole
-            || p.path_mtu
-                .zip(p.iface_mtu)
-                .is_some_and(|(path, iface)| path < iface))
-    {
-        let (text, color) = match crate::verdict::pmtu_gated(s) {
-            Some(reason) => (format!("not judged — {reason}"), theme::dim()),
-            None => (
-                crate::collectors::pmtu::describe(p),
-                if p.blackhole {
-                    Color::Red
-                } else {
-                    theme::warn()
-                },
-            ),
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<9}", "mtu"), Style::new().fg(theme::dim())),
-            Span::styled(text, Style::new().fg(color)),
-        ]));
+    // One row per family that has something to say.
+    for (label, p) in [("mtu", &s.pmtu), ("mtu v6", &s.pmtu6)] {
+        if let Some(p) = p
+            && (p.blackhole
+                || p.path_mtu
+                    .zip(p.iface_mtu)
+                    .is_some_and(|(path, iface)| path < iface))
+        {
+            let (text, color) = match crate::verdict::pmtu_gated_for(s, p) {
+                Some(reason) => (format!("not judged — {reason}"), theme::dim()),
+                None => (
+                    crate::collectors::pmtu::describe(p),
+                    if p.blackhole {
+                        Color::Red
+                    } else {
+                        theme::warn()
+                    },
+                ),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{label:<9}"), Style::new().fg(theme::dim())),
+                Span::styled(text, Style::new().fg(color)),
+            ]));
+        }
     }
 
     // Only when there is something to say: ordinary NAT is not news.
@@ -7473,6 +7496,7 @@ mod tests {
                 port,
                 proto: "tcp".into(),
                 note: "why".into(),
+                family: String::new(),
             },
             outcome: o,
         };
@@ -8440,6 +8464,16 @@ mod tests {
         }
         s.targets.push(twin);
         assert_eq!(s.quality_order(), vec![0, 3, 1, 2]);
+        // The v6 router groups under the v4 gateway the same way, arrow kept.
+        let mut gw6 = TargetStat::new(
+            crate::app::V6_GATEWAY_LABEL.into(),
+            IpAddr::V6("fe80::1".parse::<Ipv6Addr>().unwrap()),
+        );
+        gw6.discovered = true;
+        s.targets.push(gw6);
+        assert_eq!(s.quality_order(), vec![0, 3, 1, 2, 4]);
+        assert!(draw(&s, 170, 40).contains("⇢ gateway v6"));
+        s.targets.pop();
 
         // A twin is probed over tcp :443 like any anchor: its numbers show
         // where a hop's row would carry the quiet placeholder.

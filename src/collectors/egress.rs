@@ -41,6 +41,10 @@ pub struct EgressCheck {
     /// One line on why a user cares, shown beside a blocked row.
     #[serde(default)]
     pub note: String,
+    /// "v6" to resolve the host to its IPv6 address; anything else prefers
+    /// v4 (filters are written for v4, so that is the default question).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub family: String,
 }
 
 impl EgressCheck {
@@ -51,8 +55,68 @@ impl EgressCheck {
             port,
             proto: proto.into(),
             note: note.into(),
+            family: String::new(),
         }
     }
+
+    fn v6(mut self) -> Self {
+        self.family = "v6".into();
+        self
+    }
+
+    pub fn prefers_v6(&self) -> bool {
+        self.family == "v6"
+    }
+}
+
+/// The rows the [c] scan adds while the link holds a global IPv6 address:
+/// the same question over v6 for the protocols a v6 filter treats
+/// differently. Named hosts here publish AAAA records; the literal ones
+/// are the anchors' v6 twins. Not in the config list, so a v4-only link
+/// never shows them as "blocked".
+pub fn v6_checks() -> Vec<EgressCheck> {
+    vec![
+        EgressCheck::new(
+            "HTTPS (v6)",
+            "cloudflare.com",
+            443,
+            "tcp",
+            "the web over v6",
+        )
+        .v6(),
+        EgressCheck::new(
+            "HTTP (v6)",
+            "cloudflare.com",
+            80,
+            "tcp",
+            "plain http over v6",
+        )
+        .v6(),
+        EgressCheck::new(
+            "QUIC (v6)",
+            "2606:4700:4700::1111",
+            443,
+            "quic",
+            "UDP 443 over v6",
+        )
+        .v6(),
+        EgressCheck::new(
+            "DNS (UDP, v6)",
+            "2606:4700:4700::1111",
+            53,
+            "dns",
+            "a v6 resolver of your own choosing",
+        )
+        .v6(),
+        EgressCheck::new(
+            "NTP (v6)",
+            "time.cloudflare.com",
+            123,
+            "ntp",
+            "clock sync over v6",
+        )
+        .v6(),
+    ]
 }
 
 /// The default list. Reference hosts are chosen for answering reliably on the
@@ -444,7 +508,7 @@ pub async fn monitor(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
             let probes = rows.into_iter().map(|(i, c, addr)| async move {
                 let outcome = match addr {
                     Some(a) => probe(&c, a).await,
-                    None => match resolve(&c.host, c.port).await {
+                    None => match resolve(&c.host, c.port, c.prefers_v6()).await {
                         Ok(a) => probe(&c, a).await,
                         Err(e) => Outcome::Error(e),
                     },
@@ -476,15 +540,30 @@ async fn resolve_all(checks: &[EgressCheck]) -> Vec<Option<SocketAddr>> {
     futures_util::future::join_all(
         checks
             .iter()
-            .map(|c| async move { resolve(&c.host, c.port).await.ok() }),
+            .map(|c| async move { resolve(&c.host, c.port, c.prefers_v6()).await.ok() }),
     )
     .await
 }
 
 /// Start (or restart) a scan of `checks`; each row updates as it completes.
-pub fn start(state: Arc<Mutex<AppState>>, checks: Vec<EgressCheck>) {
+pub fn start(state: Arc<Mutex<AppState>>, mut checks: Vec<EgressCheck>) {
     {
         let mut s = state.lock().unwrap();
+        // The v6 rows ride along on a dual-stack link, skipping any the
+        // user already listed themselves.
+        if crate::collectors::http::has_global_v6(&s.netinfo.ipv6) {
+            for c in v6_checks() {
+                let dup = checks.iter().any(|k| {
+                    k.host == c.host
+                        && k.port == c.port
+                        && k.proto == c.proto
+                        && k.family == c.family
+                });
+                if !dup {
+                    checks.push(c);
+                }
+            }
+        }
         s.egress = Some(Scan {
             started: Instant::now(),
             running: true,
@@ -541,7 +620,7 @@ pub fn start(state: Arc<Mutex<AppState>>, checks: Vec<EgressCheck>) {
 }
 
 async fn run_check(c: &EgressCheck) -> Outcome {
-    let addr = match resolve(&c.host, c.port).await {
+    let addr = match resolve(&c.host, c.port, c.prefers_v6()).await {
         Ok(a) => a,
         Err(e) => return Outcome::Error(e),
     };
@@ -619,18 +698,19 @@ fn dns_probe() -> Vec<u8> {
     p
 }
 
-async fn resolve(host: &str, port: u16) -> Result<SocketAddr, String> {
+async fn resolve(host: &str, port: u16, prefer_v6: bool) -> Result<SocketAddr, String> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(SocketAddr::new(ip, port));
     }
     let mut addrs = tokio::net::lookup_host((host, port))
         .await
         .map_err(|e| format!("resolve: {}", short(&e)))?;
-    // Prefer v4: the check is about the network's filtering, and v4 is the
-    // family a filter is written for; v6-only failures are their own finding.
+    // Prefer v4 unless the row asks for v6: the check is about the network's
+    // filtering, and v4 is the family a filter is written for; the v6 rows
+    // ask the same question over the other family on purpose.
     let all: Vec<SocketAddr> = addrs.by_ref().collect();
     all.iter()
-        .find(|a| a.is_ipv4())
+        .find(|a| a.is_ipv6() == prefer_v6)
         .or(all.first())
         .copied()
         .ok_or_else(|| "no address".to_string())
@@ -695,6 +775,22 @@ mod tests {
         assert_eq!(rows[2].target(), "github.com:22");
     }
 
+    /// The v6 rows ask over v6 by construction: literal twins, or a name
+    /// with the family flag set so resolution takes the AAAA answer.
+    #[test]
+    fn the_v6_rows_all_resolve_over_v6() {
+        for c in v6_checks() {
+            assert!(c.name.ends_with("v6)"), "{}", c.name);
+            assert!(c.prefers_v6());
+            if let Ok(ip) = c.host.parse::<IpAddr>() {
+                assert!(ip.is_ipv6(), "{}", c.host);
+            }
+        }
+        // The config list carries no family field unless set.
+        let text = toml::to_string(&default_checks()[0]).unwrap();
+        assert!(!text.contains("family"));
+    }
+
     #[test]
     fn outcomes_read_as_a_person_would_say_them() {
         assert_eq!(Outcome::Refused.label(), "refused (reachable)");
@@ -705,7 +801,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires network access"]
     async fn live_egress() {
-        for c in default_checks() {
+        for c in default_checks().into_iter().chain(v6_checks()) {
             let o = run_check(&c).await;
             println!(
                 "{:<16} {}:{} {} → {}",

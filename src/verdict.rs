@@ -804,8 +804,10 @@ pub fn link_state(s: &AppState) -> LinkState {
 /// noise. Judged on the ping loss to the probe's own target when that address
 /// is being pinged, else on the best-behaved anchor (if even the cleanest
 /// path is above the gate, everything is).
-pub fn pmtu_gated(s: &AppState) -> Option<String> {
-    let p = s.pmtu.as_ref().filter(|p| p.blackhole)?;
+pub fn pmtu_gated_for(s: &AppState, p: &crate::app::PmtuResult) -> Option<String> {
+    if !p.blackhole {
+        return None;
+    }
     let loss = s
         .targets
         .iter()
@@ -1653,6 +1655,14 @@ pub fn evaluate(s: &AppState) -> Triage {
                 .iter()
                 .all(|t| t.recent_loss_pct(th::RECENT) >= th::LOSS_DOWN_PCT);
         let v6_web_failed = matches!(http.v6, FP::Fail(_));
+        // The v6 router itself, when discovery could probe it: the hop that
+        // says whether a break is at the router or beyond it.
+        let v6_gw = s
+            .targets
+            .iter()
+            .find(|t| t.is_v6_gateway() && t.window.len() >= th::MIN_SAMPLES);
+        let v6_gw_dead = v6_gw.is_some_and(|g| g.recent_loss_pct(th::RECENT) >= th::LOSS_DOWN_PCT);
+        let v6_gw_ok = v6_gw.is_some_and(|g| g.recent_loss_pct(th::RECENT) < th::LOSS_DOWN_PCT);
         let v6_break: Option<String> = match (&http.v4, &http.v6) {
             (FP::Ok(v4_ms), FP::Fail(reason)) => {
                 Some(format!("v6 probe: {reason} · v4 probe: ok {v4_ms:.0}ms"))
@@ -1728,6 +1738,12 @@ pub fn evaluate(s: &AppState) -> Triage {
                         .to_string(),
                 );
                 ("at the router: address but no route", true)
+            } else if v6_gw_dead {
+                evidence.push(format!(
+                    "the IPv6 router {} does not answer pings",
+                    v6_gw.map(|g| g.addr.to_string()).unwrap_or_default()
+                ));
+                ("at the router: the v6 gateway doesn't answer", true)
             } else if v6_dns_dead {
                 evidence.push(format!(
                     "the IPv6 resolver{} ({}) not answering either",
@@ -1739,6 +1755,16 @@ pub fn evaluate(s: &AppState) -> Triage {
                         .join(", ")
                 ));
                 ("beyond the router: nothing over v6 answers", true)
+            } else if v6_gw_ok {
+                evidence.push(format!(
+                    "the IPv6 router {} answers pings ({}) — the break is beyond it",
+                    v6_gw.map(|g| g.addr.to_string()).unwrap_or_default(),
+                    fmt_ms(v6_gw.and_then(|g| g.stats(th::RECENT).mean))
+                ));
+                (
+                    "beyond the router: the v6 gateway answers, nothing past it does",
+                    true,
+                )
             } else {
                 evidence.push(format!(
                     "IPv6 router {} is configured; the break is upstream of it",
@@ -1967,11 +1993,11 @@ pub fn evaluate(s: &AppState) -> Triage {
     // *everything* (plane Wi-Fi at 90% loss) "black hole" is just loss
     // wearing a costume — and it sends the user chasing a firewall that
     // doesn't exist.
-    if let Some(p) = &s.pmtu
-        && p.blackhole
-        && !no_link
-        && pmtu_gated(s).is_none()
-    {
+    for (p, family) in [(&s.pmtu, ""), (&s.pmtu6, "IPv6 ")] {
+        let Some(p) = p else { continue };
+        if !p.blackhole || no_link || pmtu_gated_for(s, p).is_some() {
+            continue;
+        }
         findings.push(Finding {
             cause: Cause::PathMtu,
             severity: Severity::Degraded,
@@ -1980,7 +2006,7 @@ pub fn evaluate(s: &AppState) -> Triage {
             // the fragmentation-needed message never came.
             confidence: judge(true, !p.pmtud_works, false),
             summary: format!(
-                "path MTU black hole — packets over {} bytes vanish silently",
+                "{family}path MTU black hole — packets over {} bytes vanish silently",
                 p.path_mtu.map(|m| m.to_string()).unwrap_or_else(|| "~1200".into())
             ),
             evidence: vec![
@@ -1992,7 +2018,7 @@ pub fn evaluate(s: &AppState) -> Triage {
                 ),
                 "symptom: pings and small pages fine, big downloads / uploads / VPNs stall — lower the MTU or fix the firewall dropping ICMP".to_string(),
             ],
-            subject: String::new(),
+            subject: family.trim().to_string(),
             symptom: false,
             since: None,
         });
@@ -3311,12 +3337,20 @@ pub fn checks(s: &AppState) -> Vec<Check> {
         if let Some(r) = e.tcp_rtt_ms {
             detail.push_str(&format!(" · edge rtt {r:.0}ms"));
         }
+        // The v6 route's own answer: a different PoP or a longer rtt over v6
+        // is exactly the kind of thing a person would never otherwise see.
+        if let Some(e6) = &s.edge6 {
+            detail.push_str(&format!(" · over v6: {}", e6.colo_label()));
+            if let Some(r) = e6.tcp_rtt_ms {
+                detail.push_str(&format!(" {r:.0}ms"));
+            }
+        }
         // A public IP that disagrees with the edge's is worth a word: two
         // egress paths (a proxy for HTTP, a different route for the probe).
         let public_seen = s
             .targets
             .iter()
-            .find(|t| t.discovered && t.label.contains("public"))
+            .find(|t| t.discovered && t.label.contains("public") && t.addr.is_ipv4())
             .map(|t| t.addr.to_string());
         let mismatch = public_seen.is_some_and(|p| !e.ip.is_empty() && p != e.ip);
         if mismatch {
@@ -3335,7 +3369,13 @@ pub fn checks(s: &AppState) -> Vec<Check> {
     let public = s
         .targets
         .iter()
-        .find(|t| t.discovered && t.label.contains("public"));
+        .find(|t| t.discovered && t.label.contains("public") && t.addr.is_ipv4());
+    let public6 = s
+        .targets
+        .iter()
+        .find(|t| t.discovered && t.label == "public IPv6")
+        .map(|t| format!(" · v6 {}", t.addr))
+        .unwrap_or_default();
     push(
         "public IP",
         if public.is_some() {
@@ -3344,9 +3384,9 @@ pub fn checks(s: &AppState) -> Vec<Check> {
             RungStatus::Unknown
         },
         match (public, &s.public_ip_error) {
-            (Some(t), _) => t.addr.to_string(),
-            (None, Some(e)) => format!("not discovered — {e}"),
-            (None, None) => "not discovered yet".to_string(),
+            (Some(t), _) => format!("{}{public6}", t.addr),
+            (None, Some(e)) => format!("not discovered — {e}{public6}"),
+            (None, None) => format!("not discovered yet{public6}"),
         },
     );
     // NAT.
@@ -3404,40 +3444,45 @@ pub fn checks(s: &AppState) -> Vec<Check> {
     }
     // Path MTU. A black-hole reading taken while the path drops most packets
     // is loss, not MTU — present it as unmeasurable, not as an alarm.
-    match (&s.pmtu, &s.pmtu_error) {
-        (Some(_), _) if pmtu_gated(s).is_some() => push(
-            "path MTU",
-            RungStatus::Unknown,
-            format!("not judged — {}", pmtu_gated(s).unwrap_or_default()),
-        ),
-        // Silence at every size is not a size problem: the probe speaks
-        // QUIC on UDP 443, and a network filtering that port answers none
-        // of it (found in the field behind a 443 block).
-        (Some(p), _) if p.path_mtu.is_none() && !p.blackhole => push(
-            "path MTU",
-            RungStatus::Unknown,
-            format!(
-                "not judged — nothing answered at any size; UDP 443 to {} may be filtered here",
-                p.target
+    // One row per family; the v6 row only once there is something to say.
+    for (name, result, error) in [
+        ("path MTU", &s.pmtu, &s.pmtu_error),
+        ("path MTU v6", &s.pmtu6, &s.pmtu6_error),
+    ] {
+        if name.ends_with("v6") && result.is_none() && error.is_none() {
+            continue;
+        }
+        match (result, error) {
+            (Some(p), _) if pmtu_gated_for(s, p).is_some() => push(
+                name,
+                RungStatus::Unknown,
+                format!("not judged — {}", pmtu_gated_for(s, p).unwrap_or_default()),
             ),
-        ),
-        (Some(p), _) => push(
-            "path MTU",
-            if p.blackhole {
-                RungStatus::Bad
-            } else if p.path_mtu.zip(p.iface_mtu).is_some_and(|(a, b)| a < b) {
-                RungStatus::Warn
-            } else {
-                RungStatus::Ok
-            },
-            crate::collectors::pmtu::describe(p),
-        ),
-        (None, Some(e)) => push(
-            "path MTU",
-            RungStatus::Unknown,
-            format!("not measured — {e}"),
-        ),
-        (None, None) => push("path MTU", RungStatus::Unknown, "not measured yet".into()),
+            // Silence at every size is not a size problem: the probe speaks
+            // QUIC on UDP 443, and a network filtering that port answers
+            // none of it (found in the field behind a 443 block).
+            (Some(p), _) if p.path_mtu.is_none() && !p.blackhole => push(
+                name,
+                RungStatus::Unknown,
+                format!(
+                    "not judged — nothing answered at any size; UDP 443 to {} may be filtered here",
+                    p.target
+                ),
+            ),
+            (Some(p), _) => push(
+                name,
+                if p.blackhole {
+                    RungStatus::Bad
+                } else if p.path_mtu.zip(p.iface_mtu).is_some_and(|(a, b)| a < b) {
+                    RungStatus::Warn
+                } else {
+                    RungStatus::Ok
+                },
+                crate::collectors::pmtu::describe(p),
+            ),
+            (None, Some(e)) => push(name, RungStatus::Unknown, format!("not measured — {e}")),
+            (None, None) => push(name, RungStatus::Unknown, "not measured yet".into()),
+        }
     }
     // DNS honesty + reference.
     let judged: Vec<&crate::app::DnsProbe> = s.dns.iter().filter(|p| p.hijack.is_some()).collect();
@@ -3559,6 +3604,23 @@ pub fn checks(s: &AppState) -> Vec<Check> {
                 format!("{up} of {} v6 anchors answer{web}", judged.len()),
             )
         };
+        // The router's own answer, when discovery could reach it.
+        let mut detail = detail;
+        if let Some(g) = s
+            .targets
+            .iter()
+            .find(|t| t.is_v6_gateway() && t.window.len() >= th::MIN_SAMPLES)
+        {
+            if g.recent_loss_pct(th::RECENT) < th::LOSS_DOWN_PCT {
+                detail.push_str(&format!(
+                    " · router {} answers ({})",
+                    g.addr,
+                    fmt_ms(g.stats(th::RECENT).mean)
+                ));
+            } else {
+                detail.push_str(&format!(" · router {} unanswered", g.addr));
+            }
+        }
         push("IPv6", status, detail);
     }
     out
@@ -6135,6 +6197,69 @@ mod tests {
         s.netinfo.ipv6 = vec!["fe80::1/64".into()];
         let t = evaluate(&s);
         assert!(row(&t).detail.contains("v4 only"));
+    }
+
+    /// The v6 router is the hop that localises a break: dead twins with a
+    /// dead router is "at the router"; dead twins behind a router that
+    /// answers is "beyond the router".
+    #[test]
+    fn the_v6_gateway_localises_an_ipv6_break() {
+        use crate::app::FamilyProbe;
+        use std::net::Ipv6Addr;
+        let mut s = healthy_state();
+        s.netinfo.ipv6 = vec!["2001:db8:1::10/64".into()];
+        s.netinfo.gateway_ipv6 = "fe80::1".into();
+        s.http.v4 = FamilyProbe::Ok(38.0);
+        s.http.v6 = FamilyProbe::Fail("timeout".into());
+        let mut twin = TargetStat::new(
+            "Cloudflare v6".into(),
+            IpAddr::V6("2606:4700:4700::1111".parse::<Ipv6Addr>().unwrap()),
+        );
+        twin.discovered = true;
+        let mut gw6 = TargetStat::new(
+            crate::app::V6_GATEWAY_LABEL.into(),
+            IpAddr::V6("fe80::1".parse::<Ipv6Addr>().unwrap()),
+        );
+        gw6.discovered = true;
+        assert!(gw6.is_v6_gateway() && !gw6.is_v6_anchor() && gw6.is_v6_twin());
+        for _ in 0..20 {
+            twin.record_loss();
+            gw6.record_loss();
+        }
+        s.targets.push(twin);
+        s.targets.push(gw6);
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::Ipv6Broken)
+            .unwrap();
+        assert!(f.summary.contains("at the router"), "{}", f.summary);
+        let ipv6 = t.checks.iter().find(|c| c.name == "IPv6").unwrap();
+        assert!(
+            ipv6.detail.contains("router fe80::1 unanswered"),
+            "{}",
+            ipv6.detail
+        );
+
+        // The router answering moves the break beyond it.
+        for t in s.targets.iter_mut().filter(|t| t.is_v6_gateway()) {
+            for _ in 0..20 {
+                t.record_reply(1.5);
+            }
+        }
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::Ipv6Broken)
+            .unwrap();
+        assert!(f.summary.contains("beyond the router"), "{}", f.summary);
+        // And the gateway row is still the v4 one.
+        assert_eq!(
+            gateway_target(&s).map(|g| g.label.as_str()),
+            Some("gateway")
+        );
     }
 
     /// Silence at every size from the MTU probe is not a black hole: its

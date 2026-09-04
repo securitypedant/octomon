@@ -24,18 +24,27 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config, changed: Arc<Notify>)
     if url.is_empty() {
         return;
     }
-    let client = match reqwest::Client::builder()
-        .user_agent(crate::util::USER_AGENT)
-        .timeout(Duration::from_secs(10))
-        .no_proxy()
-        .build()
-    {
+    // One client per family, pinned by local address: on a dual-stack link
+    // the v4 and v6 routes can land on different PoPs at different
+    // distances, and an unpinned client would report whichever it happened
+    // to pick. The v6 one is used only while the link holds a global v6
+    // address.
+    let family_client = |local: std::net::IpAddr| {
+        reqwest::Client::builder()
+            .user_agent(crate::util::USER_AGENT)
+            .local_address(local)
+            .timeout(Duration::from_secs(10))
+            .no_proxy()
+            .build()
+    };
+    let client = match family_client(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)) {
         Ok(c) => c,
         Err(e) => {
             crate::errlog::log("edge", format!("could not build an HTTP client: {e}"));
             return;
         }
     };
+    let client6 = family_client(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)).ok();
     // Each call names its reason with one of three constant labels — every
     // octomon in the world sends the identical strings, so the label links
     // nothing to anyone, but it lets the /privacy page turn call counts into
@@ -68,9 +77,25 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config, changed: Arc<Notify>)
                 s.update_available = Some(latest);
             }
         }
+        let v6_applicable =
+            crate::collectors::http::has_global_v6(&state.lock().unwrap().netinfo.ipv6);
+        if let Some(c6) = client6.as_ref().filter(|_| v6_applicable) {
+            let info6 = fetch(c6, &with_reason(&url, why))
+                .await
+                .map(|(info, _)| info);
+            // A failed v6 fetch on a link that claims v6 is itself telling:
+            // the row goes empty rather than keeping a stale answer.
+            state.lock().unwrap().edge6 = info6;
+        } else {
+            state.lock().unwrap().edge6 = None;
+        }
         tokio::select! {
             _ = changed.notified() => {
-                state.lock().unwrap().edge = None;
+                {
+                    let mut s = state.lock().unwrap();
+                    s.edge = None;
+                    s.edge6 = None;
+                }
                 why = "netchange";
                 // Let the new network settle before asking.
                 tokio::time::sleep(Duration::from_secs(3)).await;

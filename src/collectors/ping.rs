@@ -89,6 +89,36 @@ pub fn spawn_for(
         s.notice = Some(format!("no {family} ICMP socket — cannot probe {addr}"));
         return;
     };
+    spawn_with_client(state, clients, client, cfg, id, addr);
+}
+
+/// A v6 client bound to one interface, for the addresses only that interface
+/// can reach: the v6 default router is almost always link-local (`fe80::…`),
+/// which needs a scope the plain client has no way to carry. Binding the
+/// socket to the interface (`IPV6_BOUND_IF` / `SO_BINDTOIFINDEX`) supplies it.
+pub fn v6_client_on(iface_index: u32) -> Option<Arc<Client>> {
+    let index = std::num::NonZeroU32::new(iface_index)?;
+    Client::new(
+        &surge_ping::Config::builder()
+            .kind(surge_ping::ICMP::V6)
+            .interface_index(index)
+            .build(),
+    )
+    .map_err(|e| crate::errlog::log("icmp", format!("no scoped IPv6 ICMP socket: {e}")))
+    .ok()
+    .map(Arc::new)
+}
+
+/// [`spawn_for`] with the client chosen by the caller — the scoped v6 client
+/// for a link-local gateway, the family client for everything else.
+pub fn spawn_with_client(
+    state: Arc<Mutex<AppState>>,
+    clients: Clients,
+    client: Arc<Client>,
+    cfg: Config,
+    id: u64,
+    addr: IpAddr,
+) {
     tokio::spawn(async move {
         let mut pinger = client
             .pinger(addr, PingIdentifier((id as u16).wrapping_add(1)))
