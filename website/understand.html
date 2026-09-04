@@ -538,6 +538,18 @@
         </div>
 
         <div class="term">
+          <h3>spread</h3>
+          <p>How widely the round-trip times in the window are scattered
+          around their average (the standard deviation, in milliseconds). It
+          sits beside jitter in the Connection Quality title because they
+          answer different questions about the same samples: jitter is how
+          much each reply differs from the one before it, spread is how wide
+          the whole distribution is. A steady path with one 300&nbsp;ms spike
+          every few seconds has low jitter and high spread; a path that swings
+          20, 60, 20, 60 on every probe has high jitter and modest spread.</p>
+        </div>
+
+        <div class="term">
           <h3>packet loss</h3>
           <p>The share of packets that never arrive. TCP hides small amounts
           by resending (you experience it as slowness, not absence), but

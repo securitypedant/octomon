@@ -3068,7 +3068,7 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         } else {
             let st = t.stats(n);
             title.push_str(&format!(
-                " · {}: jit {:.1} · sd {:.1}",
+                " · {}: jit {:.1} · spread {:.1}",
                 t.label, t.jitter_ms, st.stddev
             ));
             if let Some(bloat) = t.bufferbloat_ms(n) {
