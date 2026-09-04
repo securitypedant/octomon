@@ -3338,10 +3338,20 @@ fn hop_monitor_view(f: &mut Frame, s: &AppState, n: usize, area: Rect) {
     // that goes — ratatui would otherwise squeeze every column, and p95
     // still carries the spike story there.
     const COLS: [u16; 8] = [4, 17, 8, 8, 8, 8, 7, 6];
-    const FULL_W: u16 = 4 + 17 + 8 + 8 + 8 + 8 + 7 + 6 + 7; // widths + gaps
-    let show_max = inner.width >= FULL_W;
+    // The address column fits the widest address on this path plus a space
+    // before the numbers: 17 is right for v4, and a v6 path squeezed into it
+    // was truncated hard against the `last` column.
+    let addr_w: u16 = m
+        .hops
+        .iter()
+        .filter_map(|h| h.addr.map(|a| a.to_string().len() as u16 + 1))
+        .max()
+        .unwrap_or(COLS[1])
+        .clamp(COLS[1], 41);
+    let full_w: u16 = 4 + addr_w + 8 + 8 + 8 + 8 + 7 + 6 + 7; // widths + gaps
+    let show_max = inner.width >= full_w;
     let mut labels = vec!["ttl", "address", "last", "avg", "p95"];
-    let mut widths_u: Vec<u16> = vec![COLS[0], COLS[1], COLS[2], COLS[3], COLS[4]];
+    let mut widths_u: Vec<u16> = vec![COLS[0], addr_w, COLS[2], COLS[3], COLS[4]];
     if show_max {
         labels.push("max");
         widths_u.push(COLS[5]);
