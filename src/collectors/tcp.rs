@@ -1,8 +1,9 @@
 //! TCP connect probes: the ICMP stand-in. A SYN→established round trip to
 //! port 443 measures network RTT the way tcping does — no ICMP required, so
 //! networks that blackhole ping (Azure VMs, locked-down hotels) still get
-//! real latency, jitter and loss columns. Anchors only: discovered hops and
-//! gateways rarely serve 443, and probing them would manufacture loss.
+//! real latency, jitter and loss columns. Anchors (and their auto-added v6
+//! twins) only: discovered hops and gateways rarely serve 443, and probing
+//! them would manufacture loss.
 //!
 //! One honesty caveat, documented rather than hidden: a lost SYN is
 //! retransmitted by the kernel (~1 s), so single-packet loss shows up as a
@@ -29,9 +30,10 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         // Snapshot the anchors under the lock, probe without it.
         let targets: Vec<(u64, IpAddr)> = {
             let s = state.lock().unwrap();
+            // Anchors and their v6 twins; never the gateway or the hops.
             s.targets
                 .iter()
-                .filter(|t| !t.discovered)
+                .filter(|t| !t.discovered || t.is_v6_anchor())
                 .map(|t| (t.id, t.addr))
                 .collect()
         };

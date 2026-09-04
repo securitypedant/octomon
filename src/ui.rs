@@ -2919,7 +2919,7 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
             rtt_ref: t.tcp.floor_ms(),
             loss_ref: None,
             excused: false,
-            probed: !t.discovered,
+            probed: !t.discovered || t.is_v6_anchor(),
         };
         // The identity columns wear the shown family's *current* condition —
         // last reply and fresh loss — not the windowed history beside them.
@@ -8435,8 +8435,18 @@ mod tests {
             IpAddr::V6("2606:4700:4700::1111".parse::<Ipv6Addr>().unwrap()),
         );
         twin.discovered = true;
+        for _ in 0..5 {
+            twin.tcp.record_reply(44.0);
+        }
         s.targets.push(twin);
         assert_eq!(s.quality_order(), vec![0, 3, 1, 2]);
+
+        // A twin is probed over tcp :443 like any anchor: its numbers show
+        // where a hop's row would carry the quiet placeholder.
+        s.quality_family = Some(crate::app::ProbeFamily::Tcp);
+        let out = draw(&s, 170, 40);
+        assert!(out.contains("44.0ms"), "the twin's tcp reading is shown");
+        s.quality_family = None;
 
         let out = draw(&s, 170, 40);
         assert!(!out.contains("⇢ Cloudflare v6"), "no path arrow on a twin");
