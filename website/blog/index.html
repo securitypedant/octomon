@@ -135,8 +135,18 @@
   .card .more { font-family: var(--octo-mono); font-size: 0.85rem; }
 
   /* the post body: one column at a readable measure, not the full 1120 */
-  .post { max-width: 36em; }
-  .post p, .post li { color: var(--octo-white); }
+  /* 44em at 17px is about 750px: a long-form measure with room for the
+     figures and the inline monospace, without lines turning into rows. */
+  .post { max-width: 44em; }
+  /* Body copy comes off pure white: #F4F7FA on the ink ground is the highest
+     contrast on the site, and at paragraph length that makes thin text glow.
+     A soft off-white keeps the dark theme and reads for longer; the extra
+     leading does the rest. Headings stay white. */
+  .post p, .post li {
+    color: color-mix(in srgb, var(--octo-white) 84%, var(--octo-ink));
+    font-size: 1.05rem;
+    line-height: 1.75;
+  }
   .post > p:first-child { margin-top: 0; }
   .post h2 {
     /* smaller than a section head: a subhead should not shout */
@@ -283,6 +293,20 @@
   "blogPost": [
     {
       "@type": "BlogPosting",
+      "@id": "https://octomon.dev/blog/filtered-is-not-down/",
+      "url": "https://octomon.dev/blog/filtered-is-not-down/",
+      "headline": "Filtered is not down & let's go IPv6!",
+      "description": "My Windows VM in Azure drops every ping. This taught me the difference between a network that is dead and one that is merely picky. Then I asked what happens when the web itself is the thing being filtered, and finally made octomon take IPv6 seriously.",
+      "datePublished": "2026-09-03",
+      "author": {
+        "@type": "Person",
+        "name": "Simon Thorpe",
+        "url": "https://github.com/securitypedant"
+      },
+      "image": "https://octomon.dev/blog/filtered-is-not-down/card.png"
+    },
+    {
+      "@type": "BlogPosting",
       "@id": "https://octomon.dev/blog/plane-wifi-is-not-broken/",
       "url": "https://octomon.dev/blog/plane-wifi-is-not-broken/",
       "headline": "Plane Wi-Fi is not broken",
@@ -366,6 +390,13 @@
   <section>
     <div class="wrap">
       <div class="postlist">
+
+      <article class="card">
+        <p class="postmeta"><time datetime="2026-09-03">3 September 2026</time> · 8 min read</p>
+        <h2><a href="/blog/filtered-is-not-down/">Filtered is not down &amp; let's go IPv6!</a></h2>
+        <p>My Windows VM in Azure drops every ping. This taught me the difference between a network that is dead and one that is merely picky. Then I asked what happens when the web itself is the thing being filtered, and finally made octomon take IPv6 seriously.</p>
+        <p class="more"><a href="/blog/filtered-is-not-down/">read →</a></p>
+      </article>
 
       <article class="card">
         <p class="postmeta"><time datetime="2026-08-28">28 August 2026</time> · 7 min read</p>

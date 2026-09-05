@@ -135,8 +135,18 @@
   .card .more { font-family: var(--octo-mono); font-size: 0.85rem; }
 
   /* the post body: one column at a readable measure, not the full 1120 */
-  .post { max-width: 36em; }
-  .post p, .post li { color: var(--octo-white); }
+  /* 44em at 17px is about 750px: a long-form measure with room for the
+     figures and the inline monospace, without lines turning into rows. */
+  .post { max-width: 44em; }
+  /* Body copy comes off pure white: #F4F7FA on the ink ground is the highest
+     contrast on the site, and at paragraph length that makes thin text glow.
+     A soft off-white keeps the dark theme and reads for longer; the extra
+     leading does the rest. Headings stay white. */
+  .post p, .post li {
+    color: color-mix(in srgb, var(--octo-white) 84%, var(--octo-ink));
+    font-size: 1.05rem;
+    line-height: 1.75;
+  }
   .post > p:first-child { margin-top: 0; }
   .post h2 {
     /* smaller than a section head: a subhead should not shout */
@@ -992,7 +1002,7 @@
           <p class="relmeta"><time datetime="2026-08-26">26 August 2026</time> · <a href="https://github.com/securitypedant/octomon/releases/tag/v0.8.0">release on GitHub</a></p>
           <p class="relsummary">TCP metrics beside ICMP, the /edge check, and a public privacy dashboard.</p>
           <ul>
-          <li>A second probe family: TCP connects to port 443 at ping cadence give last, avg, p95, max, jitter and loss that keep working where ICMP is blackholed. <code>i</code> toggles the split view between families, and a network with no ICMP defaults to TCP, so an Azure VM opens onto numbers instead of dashes. Full screen shows both families side by side, and the max columns yield first on narrow terminals.</li>
+          <li>A second probe family: TCP connects to port 443 at ping cadence give last, avg, p95, max, jitter and loss that keep working where ICMP is blackholed. <code>i</code> toggles the split view between families, and a network with no ICMP defaults to TCP. Full screen shows both families side by side, and the max columns yield first on narrow terminals.</li>
           <li>Baselines learn tcp-connect and web-TTFB normals per location, and the performance grade uses TCP while ICMP is blind (&quot;latency 12ms (tcp)&quot;).</li>
           <li>The /edge check: octomon.dev/edge answers with the Cloudflare edge&#39;s view of this connection, meaning the serving PoP, the ISP&#39;s AS, and the edge&#39;s own TCP RTT measurement of the client. It shows as an &quot;edge&quot; row in the Network panel and an analysis check, which also flags a public-IP disagreement. On by default, and <code>edge_check_url = &quot;&quot;</code> never calls it.</li>
           <li>The endpoint stores nothing about callers: no logs, no identifiers. The one thing counted is requests per octomon version family, and that count is published in full at <a href="/privacy">octomon.dev/privacy</a>, the only dashboard that exists.</li>
@@ -1017,7 +1027,7 @@
           <ul>
           <li>Tunnel detection now checks the adapter&#39;s friendly name, because Windows reports the GUID as the name and &quot;CloudflareWARP&quot; was invisible, plus a heuristic for a MAC-less unknown adapter carrying a known VPN address. This kills the false &quot;has an address but no gateway, nothing routes off the LAN&quot; finding on WARP.</li>
           <li>Full-tunnel VPNs are their own location, keyed per vendor: one stable &quot;Cloudflare WARP&quot; or &quot;NordVPN&quot; entry across reconnects, exit servers and utun renumbering. Split tunnels keep the physical network&#39;s identity.</li>
-          <li>Networks that blackhole ICMP (Azure VMs, some hotels) read as &quot;no ICMP&quot; in the locations overlay instead of an eternal dash, and the quality panel title notes that web works.</li>
+          <li>Networks that blackhole ICMP read as &quot;no ICMP&quot; in the locations overlay instead of an eternal dash, and the quality panel title notes that web works.</li>
           <li><code>Shift+T</code> shows the OS routing table verbatim as a global overlay, and support bundles include routes.txt.</li>
           <li>Light-background terminals: octomon asks the terminal its background (OSC 11, with a COLORFGBG fallback) and swaps the light-on-dark ramp for dark-on-light roles. <code>theme</code> in config and <code>--theme</code> override it.</li>
           <li>Quality-table stats dash out during a total outage instead of freezing at their last green values, and the title says the target is not answering.</li>

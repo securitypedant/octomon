@@ -137,7 +137,7 @@ The quality panel names both probe families everywhere.
 
 TCP metrics beside ICMP, the /edge check, and a public privacy dashboard.
 
-- A second probe family: TCP connects to port 443 at ping cadence give last, avg, p95, max, jitter and loss that keep working where ICMP is blackholed. `i` toggles the split view between families, and a network with no ICMP defaults to TCP, so an Azure VM opens onto numbers instead of dashes. Full screen shows both families side by side, and the max columns yield first on narrow terminals.
+- A second probe family: TCP connects to port 443 at ping cadence give last, avg, p95, max, jitter and loss that keep working where ICMP is blackholed. `i` toggles the split view between families, and a network with no ICMP defaults to TCP. Full screen shows both families side by side, and the max columns yield first on narrow terminals.
 - Baselines learn tcp-connect and web-TTFB normals per location, and the performance grade uses TCP while ICMP is blind ("latency 12ms (tcp)").
 - The /edge check: octomon.dev/edge answers with the Cloudflare edge's view of this connection, meaning the serving PoP, the ISP's AS, and the edge's own TCP RTT measurement of the client. It shows as an "edge" row in the Network panel and an analysis check, which also flags a public-IP disagreement. On by default, and `edge_check_url = ""` never calls it.
 - The endpoint stores nothing about callers: no logs, no identifiers. The one thing counted is requests per octomon version family, and that count is published in full at [octomon.dev/privacy](/privacy), the only dashboard that exists.
@@ -156,7 +156,7 @@ WARP on Windows detected, per-VPN locations, the routing table, light terminals.
 
 - Tunnel detection now checks the adapter's friendly name, because Windows reports the GUID as the name and "CloudflareWARP" was invisible, plus a heuristic for a MAC-less unknown adapter carrying a known VPN address. This kills the false "has an address but no gateway, nothing routes off the LAN" finding on WARP.
 - Full-tunnel VPNs are their own location, keyed per vendor: one stable "Cloudflare WARP" or "NordVPN" entry across reconnects, exit servers and utun renumbering. Split tunnels keep the physical network's identity.
-- Networks that blackhole ICMP (Azure VMs, some hotels) read as "no ICMP" in the locations overlay instead of an eternal dash, and the quality panel title notes that web works.
+- Networks that blackhole ICMP read as "no ICMP" in the locations overlay instead of an eternal dash, and the quality panel title notes that web works.
 - `Shift+T` shows the OS routing table verbatim as a global overlay, and support bundles include routes.txt.
 - Light-background terminals: octomon asks the terminal its background (OSC 11, with a COLORFGBG fallback) and swaps the light-on-dark ramp for dark-on-light roles. `theme` in config and `--theme` override it.
 - Quality-table stats dash out during a total outage instead of freezing at their last green values, and the title says the target is not answering.

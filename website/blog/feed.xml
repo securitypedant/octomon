@@ -7,6 +7,13 @@
   <description>Notes on building octomon.</description>
   <language>en</language>
   <item>
+    <title>Filtered is not down &amp; let's go IPv6!</title>
+    <link>https://octomon.dev/blog/filtered-is-not-down/</link>
+    <guid isPermaLink="true">https://octomon.dev/blog/filtered-is-not-down/</guid>
+    <pubDate>Thu, 03 Sep 2026 00:00:00 GMT</pubDate>
+    <description>My Windows VM in Azure drops every ping. This taught me the difference between a network that is dead and one that is merely picky. Then I asked what happens when the web itself is the thing being filtered, and finally made octomon take IPv6 seriously.</description>
+  </item>
+  <item>
     <title>Plane Wi-Fi is not broken</title>
     <link>https://octomon.dev/blog/plane-wifi-is-not-broken/</link>
     <guid isPermaLink="true">https://octomon.dev/blog/plane-wifi-is-not-broken/</guid>
