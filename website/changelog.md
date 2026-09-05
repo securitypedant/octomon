@@ -11,17 +11,17 @@ binaries for macOS, Linux and Windows.
 
 Filtered is not down, and IPv6 measured end to end.
 
-- A network that drops every ping while the web works is no longer "degraded but usable": the ping-driven claims are dropped, the ladder says "not measurable" where it said 100%, the internet and destinations rungs are judged on the TCP 443 probes, and the footer is green. "Degraded but usable" is reserved for partial loss.
+- A network that drops every ping while the web works is no longer "degraded but usable": the ping-driven claims are dropped, the ladder says "not measurable" where it reported 100% loss, the Internet and destinations rungs are judged on the TCP 443 probes, and the footer is green. "Degraded but usable" is reserved for partial loss.
 - Port 443 failing to every anchor is a state of its own, whatever pings and plain HTTP are doing. The connectivity check is plain HTTP on purpose (captive portals live there), so a rule blocking only 443 used to leave every rung green. Now: "HTTPS blocked on this network, port 80 still answers, port 443 does not".
-- An egress monitor: while port 443 is dead everywhere, HTTP, QUIC, SSH, NTP and DNS are probed every 5 s against reference hosts to tell a filtered network from a dead one. It announces itself on the timeline both ways, has its own row in the analysis, and the Connection Quality table can show its rows (`i` cycles icmp, tcp, egress). The finding names the ports: "web blocked on this network, SSH, NTP and DNS get out; HTTP and QUIC blocked". `egress_monitor = false` turns it off; `egress_monitor_checks` is the list.
-- Two reference resolvers, 1.1.1.1 and 8.8.8.8 (`dns_reference_resolvers`; the old single key is migrated). Either answering proves the internet path is up when pings and the web are not, and a network that hands out 1.1.1.1 as its own resolver no longer leaves octomon without a reference.
-- IPv6, when the interface holds a global address: the built-in anchors' v6 twins pinged and handshaked on 443 under their v4 rows, the v6 router as "gateway v6", a second traceroute for the v6 path, the public IPv6 address beside the v4 one, the path-MTU probe per family (a real reading on macOS for the first time, since v6 never fragments on path), the edge check per family, and five v6 rows in the port scan. An "IPv6" row in the analysis reads "works end to end", "address but no route", or "ICMPv6 filtered", and "IPv6 broken while IPv4 works" now says whether the break is at the router or beyond it. `probe_ipv6 = false` drops all of it.
+- An egress monitor: while port 443 is dead everywhere, HTTP, QUIC, SSH, NTP and DNS are probed every 5 s against reference hosts to tell a filtered network from a dead one. It announces itself on the timeline both ways, has its own row in the analysis, and the Connection Quality table can show its rows (`i` cycles icmp, tcp, egress). The finding names the ports: "web blocked on this network, SSH, NTP and DNS get out; HTTP and QUIC blocked". `egress_monitor = false` turns it off.
+- Two reference resolvers, 1.1.1.1 and 8.8.8.8 (`dns_reference_resolvers`; the old single key is migrated). Either answering proves the Internet path is up when pings and the web are not, and a network that assigns 1.1.1.1 as its own resolver no longer leaves octomon without a reference.
+- IPv6, when the interface holds a global address: the built-in targets' v6 twins pinged and handshaked on 443 under their v4 rows, the v6 router as "gateway v6", a second traceroute for the v6 path, the public IPv6 address beside the v4 one, the path-MTU probe per family (a real reading on macOS for the first time, since v6 never fragments on path), the edge check per family, and five v6 rows in the port scan. An "IPv6" row in the analysis reads "works end to end", "address but no route", or "ICMPv6 filtered", and "IPv6 broken while IPv4 works" now says whether the break is at the router or beyond it. `probe_ipv6 = false` drops all of it.
 - "IPv6 broken while IPv4 works" through a VPN tunnel is a note, not a degradation: a tunnel that carries only v4 is how it is built.
 - The path-MTU probe speaks QUIC on UDP 443; silence at every size behind a 443 block used to read as a black hole and now reads "not judged".
 - `t` and `m` on a v6 target work on macOS (traceroute6) and say `-6` on Linux and Windows.
 - A middle hop that answered the walk but never answers a probe, while a later hop does, reads "silent" rather than 100% loss, with no red bars.
 - avg, p95 and max are windowed by probes, not by successes: under heavy loss they no longer freeze on old replies. A lost link greys every row at once.
-- The events timeline opened from the session bar brackets the episode's entries with dashed rules and a gutter block.
+- The events timeline opened from the session bar brackets the episode's entries with dashed rules and a gutter block to aid readability.
 - The Connection Quality title says "spread" where it said "sd"; the hop table's address column fits v6 addresses.
 - Website: a how-to page, FAQ entries on ICMP blackholes and on what happens when pings and the web both fail, and a glossary entry for spread.
 
@@ -209,7 +209,7 @@ Analysis learns what normal looks like at each location, and judges against it.
 - Degraded but usable: an ICMP outage claim folds to a note when the web check proves traffic still flows, which is what plane and hotel Wi-Fi actually look like. That unlocks baseline learning on always-lossy networks.
 - Baselines learn loss (gateway and anchor) alongside latency, and loss grading is relative with absolute floors, like RTT.
 - The fold gate is refined so incidents only block the numbers they skew: latency-congested or loaded minutes fold latency-blind instead of never.
-- One latency reference everywhere: a p10 usual-best floor feeds the table, the rungs and the findings, and the internet rung grades latency rather than just loss.
+- One latency reference everywhere: a p10 usual-best floor feeds the table, the rungs and the findings, and the Internet rung grades latency rather than just loss.
 - Access-link consensus: uniform inflation blames the shared first hop, with own-load attribution (quiet, busy or loaded, naming the top talker) and the location's episode-cluster history cited when the pattern recurs.
 - The path-MTU black hole is gated on loss to the probe target, because loss is not MTU.
 - `z` zooms the active talkers table across the bottom band: full names and addresses, pid, exe path, command line, user, parent and start time, on all platforms.
@@ -222,7 +222,7 @@ Analysis learns what normal looks like at each location, and judges against it.
 
 Gateways that drop ICMP read as notes, not alarms. Plus an apt repo, support bundles and octomon.dev.
 
-- Analysis: ICMP-silent gateways and hops beside clean anchors are policy, not outage. Baselines learn through note-class findings, and private or CGNAT targets never vote on internet health.
+- Analysis: ICMP-silent gateways and hops beside clean anchors are policy, not outage. Baselines learn through note-class findings, and private or CGNAT targets never vote on Internet health.
 - Locations are sorted by last seen with the current one pinned, join and loss events name known locations, and hotspot gateways are probed from the routing table.
 - Network panel: DHCP server and static detection, a public IP row, and deduplicated resolver references.
 - Events are dated, with a session-start marker, green clears and amber raises.
@@ -235,7 +235,7 @@ Gateways that drop ICMP read as notes, not alarms. Plus an apt repo, support bun
 
 Local DNS outages get named, and DNS judgement gets faster.
 
-- A failing LAN resolver is no longer a footnote. When the network's own resolver times out while public ones answer, the analysis raises a Degraded "local DNS is down, internet OK, local names will not resolve" finding, lands it on the timeline, and names what is lost: the search domain, and why every lookup got slower when that resolver is first in order. A public resolver failing while the LAN's works stays an informational note.
+- A failing LAN resolver is no longer a footnote. When the network's own resolver times out while public ones answer, the analysis raises a Degraded "local DNS is down, Internet OK, local names will not resolve" finding, lands it on the timeline, and names what is lost: the search domain, and why every lookup got slower when that resolver is first in order. A public resolver failing while the LAN's works stays an informational note.
 - Resolvers are judged by streak before window share: three timeouts in a row is down, three answers in a row is back, roughly 15 seconds each way instead of half a minute.
 - `←` and `→` walk the resolvers on the dns row, and `W` asks whois about the highlighted one.
 - `d` deletes the selected location. The network you are on comes straight back as a blank entry tagged "learning from scratch". Monitoring time reads as "2d 9h healthy" rather than "3458 healthy min".
@@ -279,7 +279,7 @@ Latency colors judged relatively, locations gain a rename, and the OS trust stor
 The analysis ladder reworked, and a batch of new diagnostics.
 
 - A bottom "not connected" rung (no route, self-assigned address, no gateway) that everything downstream is a symptom of, plus symptom-aware ranking so a dead gateway headlines over the DNS failure behind it.
-- DNS is judged on a recent window, hop loss must persist downstream before it names the ISP, LAN targets are judged locally rather than as internet anchors, bufferbloat load is measured against the network's learned WAN capacity, and findings show how long they have been active.
+- DNS is judged on a recent window, hop loss must persist downstream before it names the ISP, LAN targets are judged locally rather than as Internet anchors, bufferbloat load is measured against the network's learned WAN capacity, and findings show how long they have been active.
 - New diagnostics: system clock skew via SNTP with an HTTP Date fallback; a public reference resolver alongside the system ones, with a once-a-minute NXDOMAIN hijack check; CGNAT and double NAT read from the first hops; a path-MTU probe using DF-bit QUIC version-negotiation packets, with black-hole detection and an honest "cannot measure here" on macOS; IPv6 breakage localized (no v6 route, v6 DNS, or upstream) plus the IPv4 mirror; and system web proxy detection, with the HTTP check repeated through it.
 - Outbound port scan overlay on `c`.
 - A network history pane (joins, roams, address, route and VPN changes) in the full-screen Network panel, and persistent per-network incident history with a 7-day summary in doctor, locations and the analysis.
@@ -316,7 +316,7 @@ octomon starts answering its own question: an analysis engine, per-network basel
 - A live analysis line in the footer synthesizes every collector into one headline, backed by a triage ladder on `y` showing each subsystem's status with its data, healthy rungs included, so the conclusion is auditable. Findings are ranked with hysteresis, simultaneous causes all show, and machine or VPN caveats never outrank network causes.
 - Per-network baselines, fingerprinted by SSID and gateway MAC (SSID alone for gatewayless hotspots), learned only from healthy minutes, named with `N` and browsed with `L`. The analysis reads "41ms vs ~9ms normal at Home".
 - An event timeline on `e`: finding raises and clears with durations and severity escalations, network, SSID, DNS and VPN changes, link lost and restored with an automatic stat reset, and speed tests. All of it also drains into CSV recordings.
-- An HTTP layer: an internet-level connectivity check with second-opinion verification and captive-portal, broken-IPv6 and filtered-web findings, plus per-target web probing with a TTFB strip for targets that demonstrably serve HTTP, with refused and filtered honestly distinguished from down.
+- An HTTP layer: an Internet-level connectivity check with second-opinion verification and captive-portal, broken-IPv6 and filtered-web findings, plus per-target web probing with a TTFB strip for targets that demonstrably serve HTTP, with refused and filtered honestly distinguished from down.
 - Hostname targets stay names: probed over HTTPS with SNI and re-resolved on network change, because CDNs answer per location, with a stats reset and a timeline entry when the answer moves.
 - ICMPv6 with per-family ping clients, so v6-resolved targets work on v6-only carrier hotspots, and link-local resolvers are probed with the interface scope they require.
 - Doctor mode: `octomon --doctor [--observe SECS] [--speedtest] [--json]` prints the analysis, this location's learned normal, measurements and events, redacted by default so it pastes safely into a ticket, with `--full` for local use. Exit codes are 0 healthy, 1 problems, 3 could not measure.
@@ -359,7 +359,7 @@ Linux support, a restructured path monitor, and DNS responsiveness.
 
 Split-tunnel VPNs detected, and identified from the tunnel itself.
 
-- 0.2.0 shipped tunnel detection that never fired for Cloudflare WARP and could name the wrong VPN when it did. Detection picked the default interface by routing to an RFC1918 address, which split-tunnel VPNs deliberately keep off the tunnel, and WARP compounds this by leaving `default` on the physical NIC while installing two half-internet routes that win on specificity. octomon now probes TEST-NET-1 to find the interface internet traffic actually leaves from, and describes the gateway as the real LAN gateway rather than the tunnel endpoint.
+- 0.2.0 shipped tunnel detection that never fired for Cloudflare WARP and could name the wrong VPN when it did. Detection picked the default interface by routing to an RFC1918 address, which split-tunnel VPNs deliberately keep off the tunnel, and WARP compounds this by leaving `default` on the physical NIC while installing two half-internet routes that win on specificity. octomon now probes TEST-NET-1 to find the interface Internet traffic actually leaves from, and describes the gateway as the real LAN gateway rather than the tunnel endpoint.
 - Identification comes from the addresses the live tunnel carries (WARP, Tailscale, Mullvad, NordLynx, Proton), ordered most-specific first, because helper daemons stay resident whether or not a tunnel is up. The process scan remains a fallback and stays silent unless exactly one client matches: an unnamed tunnel beats a wrong name.
 
 ## 0.2.0 · 2026-08-10
