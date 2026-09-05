@@ -7,6 +7,29 @@
   <description>Every octomon release, newest first, with what changed and why.</description>
   <language>en</language>
   <item>
+    <title>octomon 0.11.0</title>
+    <link>https://octomon.dev/changelog#v0.11.0</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.11.0</guid>
+    <pubDate>Fri, 04 Sep 2026 00:00:00 GMT</pubDate>
+    <description>Filtered is not down, and IPv6 measured end to end.</description>
+    <content:encoded><![CDATA[<p>Filtered is not down, and IPv6 measured end to end.</p>
+<ul>
+<li>A network that drops every ping while the web works is no longer &quot;degraded but usable&quot;: the ping-driven claims are dropped, the ladder says &quot;not measurable&quot; where it said 100%, the internet and destinations rungs are judged on the TCP 443 probes, and the footer is green. &quot;Degraded but usable&quot; is reserved for partial loss.</li>
+<li>Port 443 failing to every anchor is a state of its own, whatever pings and plain HTTP are doing. The connectivity check is plain HTTP on purpose (captive portals live there), so a rule blocking only 443 used to leave every rung green. Now: &quot;HTTPS blocked on this network, port 80 still answers, port 443 does not&quot;.</li>
+<li>An egress monitor: while port 443 is dead everywhere, HTTP, QUIC, SSH, NTP and DNS are probed every 5 s against reference hosts to tell a filtered network from a dead one. It announces itself on the timeline both ways, has its own row in the analysis, and the Connection Quality table can show its rows (<code>i</code> cycles icmp, tcp, egress). The finding names the ports: &quot;web blocked on this network, SSH, NTP and DNS get out; HTTP and QUIC blocked&quot;. <code>egress_monitor = false</code> turns it off; <code>egress_monitor_checks</code> is the list.</li>
+<li>Two reference resolvers, 1.1.1.1 and 8.8.8.8 (<code>dns_reference_resolvers</code>; the old single key is migrated). Either answering proves the internet path is up when pings and the web are not, and a network that hands out 1.1.1.1 as its own resolver no longer leaves octomon without a reference.</li>
+<li>IPv6, when the interface holds a global address: the built-in anchors&#39; v6 twins pinged and handshaked on 443 under their v4 rows, the v6 router as &quot;gateway v6&quot;, a second traceroute for the v6 path, the public IPv6 address beside the v4 one, the path-MTU probe per family (a real reading on macOS for the first time, since v6 never fragments on path), the edge check per family, and five v6 rows in the port scan. An &quot;IPv6&quot; row in the analysis reads &quot;works end to end&quot;, &quot;address but no route&quot;, or &quot;ICMPv6 filtered&quot;, and &quot;IPv6 broken while IPv4 works&quot; now says whether the break is at the router or beyond it. <code>probe_ipv6 = false</code> drops all of it.</li>
+<li>&quot;IPv6 broken while IPv4 works&quot; through a VPN tunnel is a note, not a degradation: a tunnel that carries only v4 is how it is built.</li>
+<li>The path-MTU probe speaks QUIC on UDP 443; silence at every size behind a 443 block used to read as a black hole and now reads &quot;not judged&quot;.</li>
+<li><code>t</code> and <code>m</code> on a v6 target work on macOS (traceroute6) and say <code>-6</code> on Linux and Windows.</li>
+<li>A middle hop that answered the walk but never answers a probe, while a later hop does, reads &quot;silent&quot; rather than 100% loss, with no red bars.</li>
+<li>avg, p95 and max are windowed by probes, not by successes: under heavy loss they no longer freeze on old replies. A lost link greys every row at once.</li>
+<li>The events timeline opened from the session bar brackets the episode&#39;s entries with dashed rules and a gutter block.</li>
+<li>The Connection Quality title says &quot;spread&quot; where it said &quot;sd&quot;; the hop table&#39;s address column fits v6 addresses.</li>
+<li>Website: a how-to page, FAQ entries on ICMP blackholes and on what happens when pings and the web both fail, and a glossary entry for spread.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
     <title>octomon 0.10.1</title>
     <link>https://octomon.dev/changelog#v0.10.1</link>
     <guid isPermaLink="false">https://octomon.dev/changelog/v0.10.1</guid>

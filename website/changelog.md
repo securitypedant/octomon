@@ -7,6 +7,24 @@ Every release since the first one, newest first. Each version is also a
 [GitHub release](https://github.com/securitypedant/octomon/releases) with
 binaries for macOS, Linux and Windows.
 
+## 0.11.0 · 2026-09-04
+
+Filtered is not down, and IPv6 measured end to end.
+
+- A network that drops every ping while the web works is no longer "degraded but usable": the ping-driven claims are dropped, the ladder says "not measurable" where it said 100%, the internet and destinations rungs are judged on the TCP 443 probes, and the footer is green. "Degraded but usable" is reserved for partial loss.
+- Port 443 failing to every anchor is a state of its own, whatever pings and plain HTTP are doing. The connectivity check is plain HTTP on purpose (captive portals live there), so a rule blocking only 443 used to leave every rung green. Now: "HTTPS blocked on this network, port 80 still answers, port 443 does not".
+- An egress monitor: while port 443 is dead everywhere, HTTP, QUIC, SSH, NTP and DNS are probed every 5 s against reference hosts to tell a filtered network from a dead one. It announces itself on the timeline both ways, has its own row in the analysis, and the Connection Quality table can show its rows (`i` cycles icmp, tcp, egress). The finding names the ports: "web blocked on this network, SSH, NTP and DNS get out; HTTP and QUIC blocked". `egress_monitor = false` turns it off; `egress_monitor_checks` is the list.
+- Two reference resolvers, 1.1.1.1 and 8.8.8.8 (`dns_reference_resolvers`; the old single key is migrated). Either answering proves the internet path is up when pings and the web are not, and a network that hands out 1.1.1.1 as its own resolver no longer leaves octomon without a reference.
+- IPv6, when the interface holds a global address: the built-in anchors' v6 twins pinged and handshaked on 443 under their v4 rows, the v6 router as "gateway v6", a second traceroute for the v6 path, the public IPv6 address beside the v4 one, the path-MTU probe per family (a real reading on macOS for the first time, since v6 never fragments on path), the edge check per family, and five v6 rows in the port scan. An "IPv6" row in the analysis reads "works end to end", "address but no route", or "ICMPv6 filtered", and "IPv6 broken while IPv4 works" now says whether the break is at the router or beyond it. `probe_ipv6 = false` drops all of it.
+- "IPv6 broken while IPv4 works" through a VPN tunnel is a note, not a degradation: a tunnel that carries only v4 is how it is built.
+- The path-MTU probe speaks QUIC on UDP 443; silence at every size behind a 443 block used to read as a black hole and now reads "not judged".
+- `t` and `m` on a v6 target work on macOS (traceroute6) and say `-6` on Linux and Windows.
+- A middle hop that answered the walk but never answers a probe, while a later hop does, reads "silent" rather than 100% loss, with no red bars.
+- avg, p95 and max are windowed by probes, not by successes: under heavy loss they no longer freeze on old replies. A lost link greys every row at once.
+- The events timeline opened from the session bar brackets the episode's entries with dashed rules and a gutter block.
+- The Connection Quality title says "spread" where it said "sd"; the hop table's address column fits v6 addresses.
+- Website: a how-to page, FAQ entries on ICMP blackholes and on what happens when pings and the web both fail, and a glossary entry for spread.
+
 ## 0.10.1 · 2026-08-30
 
 A release of nothing but the session bar.
