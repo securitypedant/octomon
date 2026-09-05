@@ -2962,7 +2962,7 @@ fn build_rungs(
             Rung {
                 area: Area::Internet,
                 status: RungStatus::Unknown,
-                detail: "pings unanswered here — tcp :443 probes collecting…".to_string(),
+                detail: "tcp :443 probes collecting…".to_string(),
             }
         } else {
             let worst_loss = tcp
@@ -2981,7 +2981,7 @@ fn build_rungs(
                     RungStatus::Warn
                 },
                 detail: format!(
-                    "{} anchor{} · tcp :443 · worst p95 {worst_p95:.0}ms · worst loss {worst_loss:.0}% · pings unanswered here",
+                    "{} anchor{} · tcp :443 · worst p95 {worst_p95:.0}ms · worst loss {worst_loss:.0}%",
                     tcp.len(),
                     if tcp.len() == 1 { "" } else { "s" }
                 ),
@@ -3103,7 +3103,7 @@ fn build_rungs(
             Rung {
                 area: Area::Destinations,
                 status: RungStatus::Warn,
-                detail: "pings and tcp :443 lost — the web is blocked here; the egress rows show what gets out".to_string(),
+                detail: "pings and tcp :443 lost — see the egress rows".to_string(),
             }
         } else if https_down && !blackholed {
             // Pings reach them; HTTPS does not. "All targets reachable"
@@ -3136,14 +3136,13 @@ fn build_rungs(
                 Rung {
                     area: Area::Destinations,
                     status: RungStatus::Unknown,
-                    detail: "pings unanswered here — tcp :443 probes collecting…".to_string(),
+                    detail: "tcp :443 probes collecting…".to_string(),
                 }
             } else if names.is_empty() {
                 Rung {
                     area: Area::Destinations,
                     status: RungStatus::Ok,
-                    detail: "all targets reachable over tcp :443 — pings unanswered here"
-                        .to_string(),
+                    detail: "all targets reachable over tcp :443".to_string(),
                 }
             } else {
                 Rung {
@@ -3249,8 +3248,9 @@ pub fn checks(s: &AppState) -> Vec<Check> {
         push(
             "ICMP",
             RungStatus::Warn,
-            "blocked on this network — every ping goes unanswered while the web answers, so the ICMP latency/loss columns cannot measure here; web, DNS and the tcp :443 probes carry the judgement"
-                .to_string(),
+            // One clause: the overlay is as wide as its widest row, and the
+            // healthy line below already says what the judgement rests on.
+            "blocked on this network".to_string(),
         );
     }
 
