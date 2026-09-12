@@ -357,6 +357,23 @@
         </details>
 
         <details>
+          <summary>I added a game server (or my own host) and it shows 100% loss. Is my internet down?</summary>
+          <div class="a">
+            <p>No. Plenty of hosts never answer ICMP at all: game servers,
+            cloud VMs, load balancers. The game or the site works while the
+            ping column sits at 100%. Only the built-in anchors (1.1.1.1,
+            8.8.8.8 and 9.9.9.9, chosen because they answer pings from
+            anywhere) vote on whether the internet is reachable. A target
+            you add is judged on its own against that consensus: one that
+            has never answered a ping on this network reads "doesn't answer
+            pings, your connection is fine" as a note, and the destinations
+            rung lists it under "never answered pings". A target that
+            answered and then stopped is a different story, and does read
+            as that host having gone away.</p>
+          </div>
+        </details>
+
+        <details>
           <summary>What does "degraded but usable" mean?</summary>
           <div class="a">
             <p>It's the honest verdict for plane and hotel Wi-Fi: ping-based

@@ -344,8 +344,18 @@
       "url": "https://octomon.dev/images/octomon-icon-tile.png"
     }
   },
-  "dateModified": "2026-09-04",
+  "dateModified": "2026-09-12",
   "hasPart": [
+    {
+      "@type": "SoftwareApplication",
+      "name": "octomon",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "macOS, Linux, Windows",
+      "softwareVersion": "0.11.1",
+      "datePublished": "2026-09-12",
+      "releaseNotes": "https://octomon.dev/changelog#v0.11.1",
+      "url": "https://github.com/securitypedant/octomon/releases/tag/v0.11.1"
+    },
     {
       "@type": "SoftwareApplication",
       "name": "octomon",
@@ -810,7 +820,7 @@
         binaries for macOS, Linux and Windows.</p>
       </div>
       <ul class="versions">
-        <li class="vgroup"><span class="vlabel">0.11</span><a href="#v0.11.0">0.11.0</a></li>
+        <li class="vgroup"><span class="vlabel">0.11</span><a href="#v0.11.1">0.11.1</a><a href="#v0.11.0">0.11.0</a></li>
         <li class="vgroup"><span class="vlabel">0.10</span><a href="#v0.10.1">0.10.1</a><a href="#v0.10.0">0.10.0</a></li>
         <li class="vgroup"><span class="vlabel">0.9</span><a href="#v0.9.8">0.9.8</a><a href="#v0.9.7">0.9.7</a><a href="#v0.9.6">0.9.6</a><a href="#v0.9.5">0.9.5</a><a href="#v0.9.4">0.9.4</a><a href="#v0.9.3">0.9.3</a><a href="#v0.9.2">0.9.2</a><a href="#v0.9.1">0.9.1</a><a href="#v0.9.0">0.9.0</a></li>
         <li class="vgroup"><span class="vlabel">0.8</span><a href="#v0.8.2">0.8.2</a><a href="#v0.8.1">0.8.1</a><a href="#v0.8.0">0.8.0</a></li>
@@ -828,6 +838,17 @@
   <section>
     <div class="wrap">
       <div class="post">
+
+        <article class="release" id="v0.11.1">
+          <h2><a href="#v0.11.1">0.11.1</a></h2>
+          <p class="relmeta"><time datetime="2026-09-12">12 September 2026</time> · <a href="https://github.com/securitypedant/octomon/releases/tag/v0.11.1">release on GitHub</a></p>
+          <p class="relsummary">Your own targets no longer vote on whether the internet is up.</p>
+          <ul>
+          <li>Only the built-in anchors (1.1.1.1, 8.8.8.8, 9.9.9.9) decide &quot;internet unreachable beyond the gateway&quot;. Targets you add are judged one at a time against that consensus. Found in the field: three Fortnite servers that never answer ICMP out-voted the anchors into &quot;internet unreachable (3 of 6 anchors failing)&quot; while the game played on. If you have removed every built-in anchor, your own targets stand in as before.</li>
+          <li>A target that has never answered a ping on this network reads &quot;doesn&#39;t answer pings, your connection is fine&quot; as a note, not &quot;unreachable&quot; as a degradation: game servers, cloud VMs and load balancers routinely ignore ICMP. The destinations rung lists them under &quot;never answered pings&quot; and stays amber. A target that answered and then stopped is still a red disappearance.</li>
+          <li>The performance grade is the anchors&#39; median again: a host that was never going to answer no longer drags loss to 100% and the grade to poor.</li>
+          </ul>
+        </article>
 
         <article class="release" id="v0.11.0">
           <h2><a href="#v0.11.0">0.11.0</a></h2>

@@ -7,6 +7,14 @@ Every release since the first one, newest first. Each version is also a
 [GitHub release](https://github.com/securitypedant/octomon/releases) with
 binaries for macOS, Linux and Windows.
 
+## 0.11.1 · 2026-09-12
+
+Your own targets no longer vote on whether the internet is up.
+
+- Only the built-in anchors (1.1.1.1, 8.8.8.8, 9.9.9.9) decide "internet unreachable beyond the gateway". Targets you add are judged one at a time against that consensus. Found in the field: three Fortnite servers that never answer ICMP out-voted the anchors into "internet unreachable (3 of 6 anchors failing)" while the game played on. If you have removed every built-in anchor, your own targets stand in as before.
+- A target that has never answered a ping on this network reads "doesn't answer pings, your connection is fine" as a note, not "unreachable" as a degradation: game servers, cloud VMs and load balancers routinely ignore ICMP. The destinations rung lists them under "never answered pings" and stays amber. A target that answered and then stopped is still a red disappearance.
+- The performance grade is the anchors' median again: a host that was never going to answer no longer drags loss to 100% and the grade to poor.
+
 ## 0.11.0 · 2026-09-04
 
 Filtered is not down, and IPv6 measured end to end.

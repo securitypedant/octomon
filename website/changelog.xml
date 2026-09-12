@@ -7,6 +7,19 @@
   <description>Every octomon release, newest first, with what changed and why.</description>
   <language>en</language>
   <item>
+    <title>octomon 0.11.1</title>
+    <link>https://octomon.dev/changelog#v0.11.1</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.11.1</guid>
+    <pubDate>Sat, 12 Sep 2026 00:00:00 GMT</pubDate>
+    <description>Your own targets no longer vote on whether the internet is up.</description>
+    <content:encoded><![CDATA[<p>Your own targets no longer vote on whether the internet is up.</p>
+<ul>
+<li>Only the built-in anchors (1.1.1.1, 8.8.8.8, 9.9.9.9) decide &quot;internet unreachable beyond the gateway&quot;. Targets you add are judged one at a time against that consensus. Found in the field: three Fortnite servers that never answer ICMP out-voted the anchors into &quot;internet unreachable (3 of 6 anchors failing)&quot; while the game played on. If you have removed every built-in anchor, your own targets stand in as before.</li>
+<li>A target that has never answered a ping on this network reads &quot;doesn&#39;t answer pings, your connection is fine&quot; as a note, not &quot;unreachable&quot; as a degradation: game servers, cloud VMs and load balancers routinely ignore ICMP. The destinations rung lists them under &quot;never answered pings&quot; and stays amber. A target that answered and then stopped is still a red disappearance.</li>
+<li>The performance grade is the anchors&#39; median again: a host that was never going to answer no longer drags loss to 100% and the grade to poor.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
     <title>octomon 0.11.0</title>
     <link>https://octomon.dev/changelog#v0.11.0</link>
     <guid isPermaLink="false">https://octomon.dev/changelog/v0.11.0</guid>

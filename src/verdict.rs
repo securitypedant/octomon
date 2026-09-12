@@ -876,16 +876,32 @@ pub fn evaluate(s: &AppState) -> Triage {
     let gw_health = gw
         .map(|g| probe_health(g, gw_norm))
         .unwrap_or(Health::NoData);
-    // Anchors: the user's endpoint targets (defaults: Cloudflare/Google/Quad9).
-    // Discovered mid-path hops are excluded — routers deprioritise ICMP, and a
-    // lossy hop that forwards fine is not a destination problem.
+    // Anchors: the built-in resolvers (Cloudflare/Google/Quad9), the jury
+    // that decides whether *the internet* is reachable. They are chosen
+    // because they answer pings from anywhere, so their silence means
+    // something. A target the user added is not on the jury: a game server,
+    // a corporate box or a CDN edge that never answered ICMP in its life says
+    // nothing about the internet, and three of them out-voted the anchors
+    // into "internet unreachable" while the game played on. Those targets
+    // are judged one at a time, against the jury's consensus, further down.
+    // Only when no built-in is configured at all do the user's endpoints
+    // stand in as the jury — better a rough vote than none.
+    // Discovered mid-path hops are excluded from both — routers deprioritise
+    // ICMP, and a lossy hop that forwards fine is not a destination problem.
     // A target on the LAN (a printer, the NAS) says nothing about the internet
     // and must not vote on it; it gets its own local finding below.
-    let anchors: Vec<&TargetStat> = s
+    let endpoints: Vec<&TargetStat> = s
         .targets
         .iter()
         .filter(|t| !t.discovered && !s.is_lan_addr(t.addr))
         .collect();
+    let has_builtin = endpoints
+        .iter()
+        .any(|t| crate::config::is_builtin_anchor(t.addr));
+    let (anchors, own): (Vec<&TargetStat>, Vec<&TargetStat>) = endpoints
+        .iter()
+        .copied()
+        .partition(|t| !has_builtin || crate::config::is_builtin_anchor(t.addr));
     let lan_targets: Vec<&TargetStat> = s
         .targets
         .iter()
@@ -902,6 +918,16 @@ pub fn evaluate(s: &AppState) -> Triage {
         .filter(|t| probe_health(t, anchor_norm) == Health::Bad)
         .collect();
     let fine = with_data.len() - bad.len();
+    // The user's own targets, with data: never jurors, always destinations.
+    let own: Vec<&TargetStat> = own
+        .into_iter()
+        .filter(|t| probe_health(t, anchor_norm) != Health::NoData)
+        .collect();
+    let own_bad: Vec<&TargetStat> = own
+        .iter()
+        .copied()
+        .filter(|t| probe_health(t, anchor_norm) == Health::Bad)
+        .collect();
     let gw_fine = matches!(gw_health, Health::Good | Health::Warn);
     // Every anchor packet transits the gateway, so ≥2 clean anchors with none
     // failing *prove* it forwards — an "unresponsive" gateway in that state is
@@ -1574,11 +1600,25 @@ pub fn evaluate(s: &AppState) -> Triage {
             });
         }
     } else if gw_health != Health::Bad && fine >= 2 {
-        // Consensus says the connection works; whatever is bad is *that* place.
-        for t in &bad {
+        // Consensus says the connection works; whatever is bad is *that*
+        // place — a failing anchor, or one of the user's own targets.
+        let n_bad = bad.len() + own_bad.len();
+        for t in bad.iter().chain(own_bad.iter()) {
             let loss = t.recent_loss_pct(th::RECENT);
             let unreachable = loss >= th::LOSS_DOWN_PCT;
-            let what = if unreachable {
+            // A target that has never answered a ping on this network is
+            // not "unreachable": it may simply not answer ICMP — game
+            // servers, cloud VMs and load balancers routinely don't, and
+            // the game or the site works regardless. A handshake on its
+            // port 443 proves as much. Silence is a note about the host,
+            // not a fault of the connection; a target that *answered and
+            // then stopped* is a real disappearance.
+            let silent = t.recv == 0 && t.web.status != crate::app::WebStatus::Web;
+            let tcp_answers = t.tcp.window.len() >= th::MIN_SAMPLES
+                && t.tcp.recent_loss_pct(th::RECENT) < th::LOSS_DOWN_PCT;
+            let what = if silent {
+                "doesn't answer pings".to_string()
+            } else if unreachable {
                 "unreachable".to_string()
             } else {
                 format!("degraded ({loss:.0}% loss)")
@@ -1586,23 +1626,36 @@ pub fn evaluate(s: &AppState) -> Triage {
             // Corroboration: its web service is unanswered too, or it is the
             // only one out while several others answer.
             let web_out = t.web.status == crate::app::WebStatus::Web && t.web.fails >= 2;
+            let mut evidence = vec![if silent {
+                format!(
+                    "{} ({}): no reply to {} ping{} on this network — the host may not answer ICMP at all",
+                    t.label,
+                    t.addr,
+                    t.sent,
+                    if t.sent == 1 { "" } else { "s" }
+                )
+            } else {
+                format!("{} ({}): {loss:.0}% loss", t.label, t.addr)
+            }];
+            if silent && tcp_answers {
+                evidence
+                    .push("it completes tcp :443 handshakes — it is up, just quiet".to_string());
+            }
+            evidence.push(format!("{fine} anchors fine, gateway fine"));
             findings.push(Finding {
                 cause: Cause::SingleDestination,
                 // The connection is fine by construction here — this is about
-                // one far end. Some loss to one anchor is a note; only a
+                // one far end. Some loss to one target is a note; only a
                 // destination that has gone entirely is worth more, and even
                 // then it is that place's problem, not this machine's.
-                severity: if unreachable {
+                severity: if unreachable && !silent {
                     Severity::Degraded
                 } else {
                     Severity::Info
                 },
-                confidence: judge(true, web_out || (bad.len() == 1 && fine >= 3), false),
+                confidence: judge(true, web_out || (n_bad == 1 && fine >= 3), false),
                 summary: format!("{} {what} — your connection is fine", t.label),
-                evidence: vec![
-                    format!("{} ({}): {loss:.0}% loss", t.label, t.addr),
-                    format!("{fine} other anchors fine, gateway fine"),
-                ],
+                evidence,
                 subject: t.label.clone(),
                 symptom: false,
                 since: None,
@@ -2386,6 +2439,8 @@ pub fn evaluate(s: &AppState) -> Triage {
         &with_data,
         &bad,
         fine,
+        &own,
+        &own_bad,
         self_load,
         anchor_norm,
         usable,
@@ -2554,6 +2609,8 @@ fn build_rungs(
     with_data: &[&TargetStat],
     bad: &[&TargetStat],
     fine: usize,
+    own: &[&TargetStat],
+    own_bad: &[&TargetStat],
     self_load: bool,
     anchor_norm: Option<f64>,
     usable: bool,
@@ -3076,12 +3133,26 @@ fn build_rungs(
         }
     });
 
-    // Destinations: the odd ones out while consensus says the connection works.
-    rungs.push(if with_data.is_empty() {
+    // Destinations: the odd ones out while consensus says the connection
+    // works — the anchors *and* the user's own targets, which live here and
+    // nowhere else in the ladder.
+    let n_targets = with_data.len() + own.len();
+    // A user's target that never answered a ping on this network is quiet,
+    // not down (see the finding): it gets named, never a red rung.
+    let silent = |t: &TargetStat| t.recv == 0 && t.web.status != crate::app::WebStatus::Web;
+    rungs.push(if with_data.is_empty() && own.is_empty() {
         Rung {
             area: Area::Destinations,
             status: RungStatus::Unknown,
             detail: "no data yet".to_string(),
+        }
+    } else if with_data.is_empty() {
+        // Anchors still collecting, the user's own targets already judged
+        // on their own: no consensus to contrast them with yet.
+        Rung {
+            area: Area::Destinations,
+            status: RungStatus::Unknown,
+            detail: "anchors collecting…".to_string(),
         }
     } else {
         // Name a few, count the rest: under a speed test every target reads
@@ -3091,7 +3162,7 @@ fn build_rungs(
             if names.len() <= 3 {
                 names.join(", ")
             } else {
-                format!("{} of {} targets", names.len(), with_data.len())
+                format!("{} of {} targets", names.len(), n_targets)
             }
         };
         let load = if self_load {
@@ -3122,10 +3193,12 @@ fn build_rungs(
             // ping is lost here by policy, so ICMP cannot single anyone out.
             let measured = with_data
                 .iter()
+                .chain(own.iter())
                 .filter(|t| t.tcp.window.len() >= th::MIN_SAMPLES)
                 .count();
             let names: Vec<&str> = with_data
                 .iter()
+                .chain(own.iter())
                 .filter(|t| {
                     t.tcp.window.len() >= th::MIN_SAMPLES
                         && loss_grade(t.tcp.recent_loss_pct(th::RECENT), None) == RttGrade::Bad
@@ -3151,13 +3224,34 @@ fn build_rungs(
                     detail: format!("struggling over tcp :443: {}{load}", list(&names)),
                 }
             }
-        } else if !bad.is_empty() && fine >= 2 && bad.len() * 2 < with_data.len() {
-            let names: Vec<&str> = bad.iter().map(|t| t.label.as_str()).collect();
+        } else if fine >= 2
+            && bad.len() * 2 < with_data.len()
+            && (!bad.is_empty() || !own_bad.is_empty())
+        {
+            // The odd ones out against a working consensus: a minority of
+            // anchors, and any of the user's own targets. The quiet ones —
+            // never a ping answered on this network — are named apart from
+            // the struggling ones, and never make the rung red: a host that
+            // ignores ICMP is not a destination that went away.
+            let (quiet, struggling): (Vec<&TargetStat>, Vec<&TargetStat>) = bad
+                .iter()
+                .chain(own_bad.iter())
+                .copied()
+                .partition(|t| silent(t));
+            let struggling_names: Vec<&str> = struggling.iter().map(|t| t.label.as_str()).collect();
+            let quiet_names: Vec<&str> = quiet.iter().map(|t| t.label.as_str()).collect();
             // Red only for a destination that has gone entirely; loss to one
             // far end while the rest answer is a caution about that place.
-            let any_unreachable = bad
+            let any_unreachable = struggling
                 .iter()
                 .any(|t| t.recent_loss_pct(th::RECENT) >= th::LOSS_DOWN_PCT);
+            let mut parts = Vec::with_capacity(2);
+            if !struggling_names.is_empty() {
+                parts.push(format!("struggling: {}{load}", list(&struggling_names)));
+            }
+            if !quiet_names.is_empty() {
+                parts.push(format!("never answered pings: {}", list(&quiet_names)));
+            }
             Rung {
                 area: Area::Destinations,
                 status: if any_unreachable {
@@ -3165,7 +3259,7 @@ fn build_rungs(
                 } else {
                     RungStatus::Warn
                 },
-                detail: format!("struggling: {}{load}", list(&names)),
+                detail: parts.join(" · "),
             }
         } else if !bad.is_empty() {
             // Most or all targets failing at once: the cause was judged at the
@@ -3194,9 +3288,13 @@ fn build_rungs(
                 detail,
             }
         } else {
+            // Anchors all answering (or still too few to judge anyone
+            // against): name whatever is slow or lossy, the user's own
+            // targets included.
             let warn: Vec<&str> = with_data
                 .iter()
-                .filter(|t| probe_health(t, anchor_norm) == Health::Warn)
+                .chain(own.iter())
+                .filter(|t| probe_health(t, anchor_norm) != Health::Good)
                 .map(|t| t.label.as_str())
                 .collect();
             if warn.is_empty() {
@@ -4647,6 +4745,97 @@ mod tests {
             .find(|r| r.area == Area::Destinations)
             .unwrap();
         assert_eq!(rung.status, RungStatus::Warn);
+    }
+
+    /// Found in the field: three Fortnite servers added as targets, none of
+    /// which answers ICMP, out-voted the three built-in anchors into
+    /// "internet unreachable" while the game played on. The user's own
+    /// targets are not on the internet jury; a host that has never
+    /// answered a ping on this network is quiet, not down.
+    #[test]
+    fn silent_user_targets_do_not_vote_on_the_internet() {
+        let mut s = healthy_state();
+        for (i, label) in ["fortnite-1", "fortnite-2", "fortnite-3"]
+            .iter()
+            .enumerate()
+        {
+            s.targets
+                .push(probe(label, [34, 46, 39, 180 + i as u8], 0, 20));
+        }
+        let t = evaluate(&s);
+        assert!(
+            !causes(&t).contains(&Cause::WideInternet),
+            "user targets voted: {:?}",
+            t.findings
+        );
+        let rung = |a: Area| t.rungs.iter().find(|r| r.area == a).unwrap();
+        assert_eq!(rung(Area::Internet).status, RungStatus::Ok);
+
+        // Each is a note about that host, never a degradation.
+        let notes: Vec<&Finding> = t
+            .findings
+            .iter()
+            .filter(|f| f.cause == Cause::SingleDestination)
+            .collect();
+        assert_eq!(notes.len(), 3);
+        for f in &notes {
+            assert_eq!(f.severity, Severity::Info, "{}", f.summary);
+            assert!(f.summary.contains("doesn't answer pings"), "{}", f.summary);
+            assert!(f.summary.contains("your connection is fine"));
+            assert!(
+                f.evidence.iter().any(|e| e.contains("may not answer ICMP")),
+                "{:?}",
+                f.evidence
+            );
+        }
+        // The destinations rung names them as quiet, and stays off red.
+        let d = rung(Area::Destinations);
+        assert_eq!(d.status, RungStatus::Warn, "{}", d.detail);
+        assert!(
+            d.detail.starts_with("never answered pings:"),
+            "{}",
+            d.detail
+        );
+        assert!(!d.detail.contains("struggling"), "{}", d.detail);
+
+        // And the performance grade is the anchors' 0% loss, not a median
+        // dragged to 100% by hosts that were never going to answer.
+        let perf = t.performance.expect("anchors have data");
+        assert!(
+            !perf.detail.contains("loss 100%"),
+            "silent targets in the median: {}",
+            perf.detail
+        );
+
+        // A target that answered and then went away is a real disappearance:
+        // still that host's problem, but a degradation, and a red rung.
+        s.targets.push(probe("myserver", [203, 0, 113, 9], 5, 15));
+        let t = evaluate(&s);
+        assert!(!causes(&t).contains(&Cause::WideInternet));
+        let f = t.findings.iter().find(|f| f.subject == "myserver").unwrap();
+        assert_eq!(f.severity, Severity::Degraded);
+        assert!(f.summary.contains("unreachable"), "{}", f.summary);
+        let d = t
+            .rungs
+            .iter()
+            .find(|r| r.area == Area::Destinations)
+            .unwrap();
+        assert_eq!(d.status, RungStatus::Bad, "{}", d.detail);
+        assert!(d.detail.contains("struggling: myserver"), "{}", d.detail);
+        assert!(d.detail.contains("never answered pings:"), "{}", d.detail);
+    }
+
+    /// With no built-in anchor configured at all, the user's endpoints are
+    /// the only jury there is, and vote as they always did.
+    #[test]
+    fn without_builtin_anchors_the_users_targets_are_the_jury() {
+        let mut s = healthy_state();
+        s.targets.retain(|t| t.discovered);
+        s.targets.push(probe("a", [203, 0, 113, 1], 20, 0));
+        s.targets.push(probe("b", [203, 0, 113, 2], 5, 15));
+        s.targets.push(probe("c", [203, 0, 113, 3], 5, 15));
+        let t = evaluate(&s);
+        assert_eq!(t.findings[0].cause, Cause::WideInternet, "{:?}", t.findings);
     }
 
     #[test]

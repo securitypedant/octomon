@@ -33,7 +33,10 @@ The panels:
   TCP connects to port 443 (`i`), which keep working when ping is blackholed.
   When port 443 stops answering everywhere, an egress monitor probes HTTP,
   QUIC, SSH, NTP and DNS every 5 s and the table shows those rows instead,
-  so a filtered network reads as filtered, not dead.
+  so a filtered network reads as filtered, not dead. Only the built-in
+  anchors (1.1.1.1, 8.8.8.8, 9.9.9.9) vote on whether the internet is up;
+  targets you add are judged one at a time against that consensus, and one
+  that never answers pings is noted as quiet, not called down.
   Auto-discovers the gateway and next hops, traceroutes (`t`), monitors every
   hop MTR-style (`m`), and find out who owns an address (`W`).
 - **Bandwidth** — live throughput, an on-demand speed test (`s`), and
