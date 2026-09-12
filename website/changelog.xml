@@ -7,6 +7,18 @@
   <description>Every octomon release, newest first, with what changed and why.</description>
   <language>en</language>
   <item>
+    <title>octomon 0.11.2</title>
+    <link>https://octomon.dev/changelog#v0.11.2</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.11.2</guid>
+    <pubDate>Sat, 12 Sep 2026 00:00:00 GMT</pubDate>
+    <description>The session bar describes your connection, never the targets you added.</description>
+    <content:encoded><![CDATA[<p>The session bar describes your connection, never the targets you added.</p>
+<ul>
+<li>A target you added is always a note, whatever it does. &quot;Unreachable, your connection is fine&quot; used to be a degradation, which painted the footer and the session bar amber while saying the connection was fine. Only a built-in anchor going unreachable still reads as a caution about the path, and only that turns the destinations rung red; your own targets make it amber at most.</li>
+<li>A quiet host whose web service answers is up. 0.11.1 read a never-pinged host as &quot;unreachable&quot; when its HTTPS probe succeeded, the wrong way round: three identical game servers gave two quiet notes and one degradation. The web answering is now evidence it is up, just quiet. A host whose site answered and has since gone dark still reads as gone.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
     <title>octomon 0.11.1</title>
     <link>https://octomon.dev/changelog#v0.11.1</link>
     <guid isPermaLink="false">https://octomon.dev/changelog/v0.11.1</guid>

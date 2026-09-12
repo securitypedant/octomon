@@ -7,6 +7,13 @@ Every release since the first one, newest first. Each version is also a
 [GitHub release](https://github.com/securitypedant/octomon/releases) with
 binaries for macOS, Linux and Windows.
 
+## 0.11.2 · 2026-09-12
+
+The session bar describes your connection, never the targets you added.
+
+- A target you added is always a note, whatever it does. "Unreachable, your connection is fine" used to be a degradation, which painted the footer and the session bar amber while saying the connection was fine. Only a built-in anchor going unreachable still reads as a caution about the path, and only that turns the destinations rung red; your own targets make it amber at most.
+- A quiet host whose web service answers is up. 0.11.1 read a never-pinged host as "unreachable" when its HTTPS probe succeeded, the wrong way round: three identical game servers gave two quiet notes and one degradation. The web answering is now evidence it is up, just quiet. A host whose site answered and has since gone dark still reads as gone.
+
 ## 0.11.1 · 2026-09-12
 
 Your own targets no longer vote on whether the internet is up.

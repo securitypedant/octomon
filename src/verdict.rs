@@ -1603,7 +1603,11 @@ pub fn evaluate(s: &AppState) -> Triage {
         // Consensus says the connection works; whatever is bad is *that*
         // place — a failing anchor, or one of the user's own targets.
         let n_bad = bad.len() + own_bad.len();
-        for t in bad.iter().chain(own_bad.iter()) {
+        for (t, on_jury) in bad
+            .iter()
+            .map(|t| (t, true))
+            .chain(own_bad.iter().map(|t| (t, false)))
+        {
             let loss = t.recent_loss_pct(th::RECENT);
             let unreachable = loss >= th::LOSS_DOWN_PCT;
             // A target that has never answered a ping on this network is
@@ -1612,8 +1616,15 @@ pub fn evaluate(s: &AppState) -> Triage {
             // the game or the site works regardless. A handshake on its
             // port 443 proves as much. Silence is a note about the host,
             // not a fault of the connection; a target that *answered and
-            // then stopped* is a real disappearance.
-            let silent = t.recv == 0 && t.web.status != crate::app::WebStatus::Web;
+            // then stopped* is a real disappearance — over ICMP, or over
+            // the web: a host whose site answered and has since gone dark
+            // has gone away whatever its pings ever did. A site that still
+            // answers is the opposite, proof the host is up and merely quiet
+            // (found in the field: an AWS game server serving HTTPS read
+            // "unreachable" for exactly that reason).
+            let web_out = t.web.status == crate::app::WebStatus::Web && t.web.fails >= 2;
+            let web_answers = t.web.status == crate::app::WebStatus::Web && t.web.fails == 0;
+            let silent = t.recv == 0 && !web_out;
             let tcp_answers = t.tcp.window.len() >= th::MIN_SAMPLES
                 && t.tcp.recent_loss_pct(th::RECENT) < th::LOSS_DOWN_PCT;
             let what = if silent {
@@ -1625,7 +1636,6 @@ pub fn evaluate(s: &AppState) -> Triage {
             };
             // Corroboration: its web service is unanswered too, or it is the
             // only one out while several others answer.
-            let web_out = t.web.status == crate::app::WebStatus::Web && t.web.fails >= 2;
             let mut evidence = vec![if silent {
                 format!(
                     "{} ({}): no reply to {} ping{} on this network — the host may not answer ICMP at all",
@@ -1637,7 +1647,9 @@ pub fn evaluate(s: &AppState) -> Triage {
             } else {
                 format!("{} ({}): {loss:.0}% loss", t.label, t.addr)
             }];
-            if silent && tcp_answers {
+            if silent && web_answers {
+                evidence.push("its web service answers — it is up, just quiet".to_string());
+            } else if silent && tcp_answers {
                 evidence
                     .push("it completes tcp :443 handshakes — it is up, just quiet".to_string());
             }
@@ -1648,7 +1660,13 @@ pub fn evaluate(s: &AppState) -> Triage {
                 // one far end. Some loss to one target is a note; only a
                 // destination that has gone entirely is worth more, and even
                 // then it is that place's problem, not this machine's.
-                severity: if unreachable && !silent {
+                // And a target the user added is *never* more than a note:
+                // the footer and the session bar describe the connection,
+                // and "your connection is fine" painted amber contradicts
+                // itself. An anchor that has gone is a different matter —
+                // a provider the internet is judged by, unreachable from
+                // here, is worth a caution about the path.
+                severity: if unreachable && !silent && on_jury {
                     Severity::Degraded
                 } else {
                     Severity::Info
@@ -3139,7 +3157,10 @@ fn build_rungs(
     let n_targets = with_data.len() + own.len();
     // A user's target that never answered a ping on this network is quiet,
     // not down (see the finding): it gets named, never a red rung.
-    let silent = |t: &TargetStat| t.recv == 0 && t.web.status != crate::app::WebStatus::Web;
+    let silent = |t: &TargetStat| {
+        let web_out = t.web.status == crate::app::WebStatus::Web && t.web.fails >= 2;
+        t.recv == 0 && !web_out
+    };
     rungs.push(if with_data.is_empty() && own.is_empty() {
         Rung {
             area: Area::Destinations,
@@ -3240,11 +3261,14 @@ fn build_rungs(
                 .partition(|t| silent(t));
             let struggling_names: Vec<&str> = struggling.iter().map(|t| t.label.as_str()).collect();
             let quiet_names: Vec<&str> = quiet.iter().map(|t| t.label.as_str()).collect();
-            // Red only for a destination that has gone entirely; loss to one
-            // far end while the rest answer is a caution about that place.
-            let any_unreachable = struggling
-                .iter()
-                .any(|t| t.recent_loss_pct(th::RECENT) >= th::LOSS_DOWN_PCT);
+            // Red only for an *anchor* that has gone entirely; loss to one
+            // far end while the rest answer is a caution about that place,
+            // and a target the user added is a caution at most, whatever it
+            // does — the rung colours the connection, not the user's list.
+            let any_unreachable = struggling.iter().any(|t| {
+                t.recent_loss_pct(th::RECENT) >= th::LOSS_DOWN_PCT
+                    && bad.iter().any(|b| b.id == t.id)
+            });
             let mut parts = Vec::with_capacity(2);
             if !struggling_names.is_empty() {
                 parts.push(format!("struggling: {}{load}", list(&struggling_names)));
@@ -4719,14 +4743,37 @@ mod tests {
         assert_eq!(f.subject, "myserver");
         assert!(f.summary.contains("your connection is fine"));
         assert!(!causes(&t).contains(&Cause::WideInternet));
-        // 75% loss: gone, so Degraded and a red destinations rung.
-        assert_eq!(f.severity, Severity::Degraded);
+        // 75% loss to a target the user added: gone, but that host's
+        // problem — a note and an amber rung, never a degraded connection
+        // (the footer and the session bar describe the connection).
+        assert_eq!(f.severity, Severity::Info);
         let rung = t
             .rungs
             .iter()
             .find(|r| r.area == Area::Destinations)
             .unwrap();
-        assert_eq!(rung.status, RungStatus::Bad);
+        assert_eq!(rung.status, RungStatus::Warn, "{}", rung.detail);
+
+        // The same disappearance of an *anchor* is a caution about the
+        // path: Degraded, and a red destinations rung.
+        let mut s = healthy_state();
+        let quad9 = s.targets.iter_mut().find(|t| t.label == "Quad9").unwrap();
+        for _ in 0..15 {
+            quad9.record_loss();
+        }
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::SingleDestination)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Degraded, "{}", f.summary);
+        let rung = t
+            .rungs
+            .iter()
+            .find(|r| r.area == Area::Destinations)
+            .unwrap();
+        assert_eq!(rung.status, RungStatus::Bad, "{}", rung.detail);
 
         // Some loss to one far end while the rest answer: a note, and a
         // caution on the rung — the machine isn't even using that resolver.
@@ -4807,22 +4854,80 @@ mod tests {
             perf.detail
         );
 
-        // A target that answered and then went away is a real disappearance:
-        // still that host's problem, but a degradation, and a red rung.
+        // A target that answered and then went away is a real disappearance
+        // — worded as one, listed as struggling — but still that host's
+        // problem: a note, and the rung no redder than amber, because the
+        // user's list never colours the connection.
         s.targets.push(probe("myserver", [203, 0, 113, 9], 5, 15));
         let t = evaluate(&s);
         assert!(!causes(&t).contains(&Cause::WideInternet));
         let f = t.findings.iter().find(|f| f.subject == "myserver").unwrap();
-        assert_eq!(f.severity, Severity::Degraded);
+        assert_eq!(f.severity, Severity::Info);
         assert!(f.summary.contains("unreachable"), "{}", f.summary);
+        assert_eq!(
+            session_state(&Verdict::Problems(t.findings.clone())),
+            crate::session::SessionState::Healthy,
+            "user targets painted the bar"
+        );
         let d = t
             .rungs
             .iter()
             .find(|r| r.area == Area::Destinations)
             .unwrap();
-        assert_eq!(d.status, RungStatus::Bad, "{}", d.detail);
+        assert_eq!(d.status, RungStatus::Warn, "{}", d.detail);
         assert!(d.detail.contains("struggling: myserver"), "{}", d.detail);
         assert!(d.detail.contains("never answered pings:"), "{}", d.detail);
+    }
+
+    /// A quiet host whose web service answers is up, not unreachable — the
+    /// web answering is proof, not a reason to promote silence to a fault
+    /// (found in the field: an AWS game server serving HTTPS read
+    /// "unreachable" at Degraded beside two identical hosts reading quiet).
+    /// A quiet host whose web service *went dark* has genuinely gone away.
+    #[test]
+    fn a_quiet_host_whose_web_answers_is_up_not_unreachable() {
+        let mut s = healthy_state();
+        let mut web_up = probe("game-web", [3, 129, 132, 108], 0, 20);
+        web_up.web.status = crate::app::WebStatus::Web;
+        web_up.web.fails = 0;
+        s.targets.push(web_up);
+        let mut web_gone = probe("game-gone", [3, 129, 132, 109], 0, 20);
+        web_gone.web.status = crate::app::WebStatus::Web;
+        web_gone.web.fails = 3;
+        s.targets.push(web_gone);
+
+        let t = evaluate(&s);
+        let by = |subject: &str| t.findings.iter().find(|f| f.subject == subject).unwrap();
+        let up = by("game-web");
+        assert_eq!(up.severity, Severity::Info, "{}", up.summary);
+        assert!(
+            up.summary.contains("doesn't answer pings"),
+            "{}",
+            up.summary
+        );
+        assert!(
+            up.evidence
+                .iter()
+                .any(|e| e.contains("web service answers")),
+            "{:?}",
+            up.evidence
+        );
+        let gone = by("game-gone");
+        // Gone for real, worded so — but a user's target, so still a note.
+        assert_eq!(gone.severity, Severity::Info, "{}", gone.summary);
+        assert!(gone.summary.contains("unreachable"), "{}", gone.summary);
+
+        let d = t
+            .rungs
+            .iter()
+            .find(|r| r.area == Area::Destinations)
+            .unwrap();
+        assert!(
+            d.detail.contains("never answered pings: game-web"),
+            "{}",
+            d.detail
+        );
+        assert!(d.detail.contains("struggling: game-gone"), "{}", d.detail);
     }
 
     /// With no built-in anchor configured at all, the user's endpoints are
