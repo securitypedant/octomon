@@ -41,6 +41,18 @@ jobs:
     env:
       TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
     steps:
+      # wingetcreate opens the PR from the token owner's fork and tries to
+      # fast-forward that fork to upstream first. microsoft/winget-pkgs moves
+      # thousands of commits a month, and once the fork is far enough behind
+      # that sync gives up ("could not be synced with the upstream commits",
+      # v0.11.3, 14,593 commits behind) even though it is a clean
+      # fast-forward. Doing it here first, with the same token, keeps the
+      # fork current and the submission reliable.
+      - name: Sync the winget-pkgs fork with upstream
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: gh repo sync securitypedant/winget-pkgs
       - name: Submit manifest update to winget-pkgs
         shell: pwsh
         env:

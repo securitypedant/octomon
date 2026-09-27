@@ -454,14 +454,15 @@ sudo apt update &amp;&amp; sudo apt install octomon">copy</button>
         </div>
         <div class="install-card">
           <div class="head">
-            <h3>powershell · Windows</h3>
-            <button type="button" class="copy-btn" data-copy="irm https://github.com/securitypedant/octomon/releases/latest/download/octomon-installer.ps1 | iex">copy</button>
+            <h3>winget · Windows</h3>
+            <button type="button" class="copy-btn" data-copy="winget install SimonThorpe.Octomon">copy</button>
           </div>
           <div class="cmd"><div class="cmd-scroll">
-            <div class="line"><span class="prompt">&gt;</span><code>irm https://github.com/securitypedant/octomon/releases/latest/download/octomon-installer.ps1 | iex</code></div>
+            <div class="line"><span class="prompt">&gt;</span><code>winget install SimonThorpe.Octomon</code></div>
           </div></div>
-          <p class="note">x64 and ARM64, installer picks the right binary. Zips are on
-          <a href="https://github.com/securitypedant/octomon/releases">GitHub releases</a>.</p>
+          <p class="note">x64 and ARM64. No winget? The PowerShell installer does the same:
+          <code>irm https://github.com/securitypedant/octomon/releases/latest/download/octomon-installer.ps1 | iex</code>.
+          Zips are on <a href="https://github.com/securitypedant/octomon/releases">GitHub releases</a>.</p>
         </div>
         <div class="install-card">
           <div class="head">

@@ -147,7 +147,13 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 
 ### Windows
 
-x64 and ARM64; the PowerShell installer picks the right one:
+x64 and ARM64, from the winget community repository:
+
+```powershell
+winget install SimonThorpe.Octomon
+```
+
+Without winget, the PowerShell installer picks the right binary:
 
 ```powershell
 irm https://github.com/securitypedant/octomon/releases/latest/download/octomon-installer.ps1 | iex
