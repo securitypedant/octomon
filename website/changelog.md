@@ -7,6 +7,16 @@ Every release since the first one, newest first. Each version is also a
 [GitHub release](https://github.com/securitypedant/octomon/releases) with
 binaries for macOS, Linux and Windows.
 
+## 0.11.3 · 2026-09-26
+
+The bandwidth graph behind a VPN on Windows, a leaner demo mode, and octomon on winget.
+
+- The Bandwidth graph drew a few bars and then sat at zero for the whole session when NordVPN was up on Windows. The tunnel adapter that holds the default route has no byte counters under the name the network probe reports, and the collector counted nothing at all. It now reads the physical adapter underneath the tunnel, which carries the same bytes encrypted, and falls back to summing every adapter only when that is missing too. Each step down is logged once, and shows on the Machine panel's errs row.
+- `--demo` rewrites the gateway and the first three hops and leaves the rest of a path alone. A backbone router in another city places nobody, and the far path is what a traceroute demo is showing. Private and carrier-grade NAT addresses are still rewritten at any distance.
+- `--demo` now rewrites the public IPv6 address. It lives in its own field, unlike the public IPv4, and was the one address the disguise missed. `--demo-mac` gives it the same EUI-64 check as the local addresses.
+- Windows: `winget install SimonThorpe.Octomon`. The package is in the winget community repository and each release submits its version bump automatically.
+- Website: the install cards no longer come out in two sizes on iOS, and the hero stays centred on very wide displays.
+
 ## 0.11.2 · 2026-09-12
 
 The session bar describes your connection, never the targets you added.

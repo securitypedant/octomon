@@ -1041,6 +1041,10 @@ pub struct NetInfo {
     pub underlay_gateway_ip: String,
     pub underlay_gateway_mac: String,
     pub underlay_medium: LinkMedium,
+    /// The underlay's counter name (see `netinfo::counter_name`): the
+    /// throughput collector reads this adapter when the tunnel's own has no
+    /// counters under its name (NordLynx on Windows, found in the field).
+    pub underlay_iface: String,
     /// Present when the default interface is Wi-Fi and details are available.
     pub wifi: Option<WifiInfo>,
 }

@@ -120,14 +120,16 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
             // underneath, so "Home via WARP" and "Hotel via WARP" stay
             // separate places instead of one mixed per-vendor bucket.
             if info.medium == LinkMedium::Tunnel
-                && let Some((ip, mac, medium)) = tokio::task::spawn_blocking(underlay_identity)
-                    .await
-                    .ok()
-                    .flatten()
+                && let Some((ip, mac, medium, iface)) =
+                    tokio::task::spawn_blocking(underlay_identity)
+                        .await
+                        .ok()
+                        .flatten()
             {
                 info.underlay_gateway_ip = ip;
                 info.underlay_gateway_mac = mac;
                 info.underlay_medium = medium;
+                info.underlay_iface = iface;
             }
             if info.tunnel.is_some() {
                 let vendor = match &vendor_cache {
@@ -372,6 +374,7 @@ fn build(iface: &netdev::Interface) -> NetInfo {
         underlay_gateway_ip: String::new(),
         underlay_gateway_mac: String::new(),
         underlay_medium: LinkMedium::Unknown,
+        underlay_iface: String::new(),
         wifi: None, // filled in by the caller for Wi-Fi links
     }
 }
@@ -381,7 +384,9 @@ fn build(iface: &netdev::Interface) -> NetInfo {
 /// business; the heuristic — the gatewayed physical interface, wired first —
 /// matches how metrics fall out on every setup seen so far. `None` when no
 /// physical interface has a gateway (some VMs put the tunnel alone).
-fn underlay_identity() -> Option<(String, String, LinkMedium)> {
+/// The physical network under a tunnel that holds the default route: its
+/// gateway (IP and MAC), medium, and the adapter's counter name.
+fn underlay_identity() -> Option<(String, String, LinkMedium, String)> {
     let ifaces = netdev::get_interfaces();
     let mut candidates: Vec<_> = ifaces
         .iter()
@@ -399,10 +404,10 @@ fn underlay_identity() -> Option<(String, String, LinkMedium)> {
                 .first()
                 .map(|a| a.to_string())
                 .or_else(|| gw.ipv6.first().map(|a| a.to_string()))?;
-            Some((ip, gw.mac_addr.to_string(), classify(i)))
+            Some((ip, gw.mac_addr.to_string(), classify(i), counter_name(i)))
         })
         .collect();
-    candidates.sort_by_key(|(_, _, m)| match m {
+    candidates.sort_by_key(|(_, _, m, _)| match m {
         LinkMedium::Ethernet => 0,
         LinkMedium::WiFi => 1,
         _ => 2,

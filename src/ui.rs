@@ -6644,6 +6644,38 @@ mod tests {
     }
 
     /// The compact talkers table narrows under the '/' filter, announces it
+    /// Reported from Windows, full-screen Bandwidth: typing '/' "stops the
+    /// graph". Whatever the cause, the throughput sparklines must keep
+    /// drawing while a filter is being typed, at a PowerShell-sized terminal.
+    #[test]
+    fn typing_a_talkers_filter_keeps_the_throughput_graph_drawing() {
+        let mut s = AppState::new(vec![]);
+        s.netinfo.iface = "Intel10G-1".into();
+        s.throughput.iface = "Intel10G-1".into();
+        for i in 0..200 {
+            s.throughput.down_hist.push(f64::from(i % 17) * 1000.0);
+            s.throughput.up_hist.push(500.0);
+        }
+        s.focus = Panel::Bandwidth;
+        s.fullscreen = true;
+        s.bw_view = crate::app::BwView::Remotes;
+        let bars = |out: &str| out.chars().filter(|c| "▁▂▃▄▅▆▇█".contains(*c)).count();
+        let before = bars(&draw(&s, 120, 30));
+        assert!(before > 100, "graphs drawn before the filter: {before}");
+
+        s.input_mode = InputMode::TalkersFilter;
+        s.input_buffer = "34".into();
+        s.bw_filter = "34".into();
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("filter talkers"), "{out}");
+        assert!(out.contains("↓ down"), "{out}");
+        let during = bars(&out);
+        assert!(
+            during >= before,
+            "graph lost bars while typing: {before} -> {during}\n{out}"
+        );
+    }
+
     /// in the panel title, and explains an empty result instead of drawing a
     /// blank table.
     #[test]

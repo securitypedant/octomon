@@ -198,8 +198,10 @@ octomon --theme light                # auto | dark | light
 traceroute), `--no-edge` (never call octomon.dev/edge).
 
 **Screen recording:** `--demo` measures for real but shows fake
-MACs/addresses/SSIDs; `--demo-mac` disguises only this machine's MAC. Neither
-shows process command lines.
+MACs/addresses/SSIDs. The gateway and the first three hops are rewritten, the
+rest of a path keeps its real addresses: a backbone router places nobody, and
+the far path is what a traceroute demo is showing. `--demo-mac` disguises only
+this machine's MAC. Neither shows process command lines.
 
 Scripting a bundle, since it prints its path and nothing else:
 

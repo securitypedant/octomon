@@ -344,8 +344,18 @@
       "url": "https://octomon.dev/images/octomon-icon-tile.png"
     }
   },
-  "dateModified": "2026-09-12",
+  "dateModified": "2026-09-26",
   "hasPart": [
+    {
+      "@type": "SoftwareApplication",
+      "name": "octomon",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "macOS, Linux, Windows",
+      "softwareVersion": "0.11.3",
+      "datePublished": "2026-09-26",
+      "releaseNotes": "https://octomon.dev/changelog#v0.11.3",
+      "url": "https://github.com/securitypedant/octomon/releases/tag/v0.11.3"
+    },
     {
       "@type": "SoftwareApplication",
       "name": "octomon",
@@ -830,7 +840,7 @@
         binaries for macOS, Linux and Windows.</p>
       </div>
       <ul class="versions">
-        <li class="vgroup"><span class="vlabel">0.11</span><a href="#v0.11.2">0.11.2</a><a href="#v0.11.1">0.11.1</a><a href="#v0.11.0">0.11.0</a></li>
+        <li class="vgroup"><span class="vlabel">0.11</span><a href="#v0.11.3">0.11.3</a><a href="#v0.11.2">0.11.2</a><a href="#v0.11.1">0.11.1</a><a href="#v0.11.0">0.11.0</a></li>
         <li class="vgroup"><span class="vlabel">0.10</span><a href="#v0.10.1">0.10.1</a><a href="#v0.10.0">0.10.0</a></li>
         <li class="vgroup"><span class="vlabel">0.9</span><a href="#v0.9.8">0.9.8</a><a href="#v0.9.7">0.9.7</a><a href="#v0.9.6">0.9.6</a><a href="#v0.9.5">0.9.5</a><a href="#v0.9.4">0.9.4</a><a href="#v0.9.3">0.9.3</a><a href="#v0.9.2">0.9.2</a><a href="#v0.9.1">0.9.1</a><a href="#v0.9.0">0.9.0</a></li>
         <li class="vgroup"><span class="vlabel">0.8</span><a href="#v0.8.2">0.8.2</a><a href="#v0.8.1">0.8.1</a><a href="#v0.8.0">0.8.0</a></li>
@@ -848,6 +858,19 @@
   <section>
     <div class="wrap">
       <div class="post">
+
+        <article class="release" id="v0.11.3">
+          <h2><a href="#v0.11.3">0.11.3</a></h2>
+          <p class="relmeta"><time datetime="2026-09-26">26 September 2026</time> · <a href="https://github.com/securitypedant/octomon/releases/tag/v0.11.3">release on GitHub</a></p>
+          <p class="relsummary">The bandwidth graph behind a VPN on Windows, a leaner demo mode, and octomon on winget.</p>
+          <ul>
+          <li>The Bandwidth graph drew a few bars and then sat at zero for the whole session when NordVPN was up on Windows. The tunnel adapter that holds the default route has no byte counters under the name the network probe reports, and the collector counted nothing at all. It now reads the physical adapter underneath the tunnel, which carries the same bytes encrypted, and falls back to summing every adapter only when that is missing too. Each step down is logged once, and shows on the Machine panel&#39;s errs row.</li>
+          <li><code>--demo</code> rewrites the gateway and the first three hops and leaves the rest of a path alone. A backbone router in another city places nobody, and the far path is what a traceroute demo is showing. Private and carrier-grade NAT addresses are still rewritten at any distance.</li>
+          <li><code>--demo</code> now rewrites the public IPv6 address. It lives in its own field, unlike the public IPv4, and was the one address the disguise missed. <code>--demo-mac</code> gives it the same EUI-64 check as the local addresses.</li>
+          <li>Windows: <code>winget install SimonThorpe.Octomon</code>. The package is in the winget community repository and each release submits its version bump automatically.</li>
+          <li>Website: the install cards no longer come out in two sizes on iOS, and the hero stays centred on very wide displays.</li>
+          </ul>
+        </article>
 
         <article class="release" id="v0.11.2">
           <h2><a href="#v0.11.2">0.11.2</a></h2>

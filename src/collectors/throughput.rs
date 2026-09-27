@@ -18,6 +18,9 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
     // Which interface the previous sample measured. A change means the counter
     // delta spans two different NICs, so that one sample has to be discarded.
     let mut prev_iface: Option<String> = None;
+    // The default-route name the counters could not find, logged once per
+    // name rather than once per second.
+    let mut missing_logged: Option<String> = None;
 
     loop {
         ticker.tick().await;
@@ -30,9 +33,12 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         // Follow the default route as netinfo re-probes it, rather than a name
         // captured at startup — otherwise switching Wi-Fi networks, plugging in
         // Ethernet, or a VPN coming up leaves this reading a dead interface.
-        let want = {
+        let (want, underlay) = {
             let s = state.lock().unwrap();
-            Some(s.netinfo.iface.clone()).filter(|n| !n.is_empty())
+            (
+                Some(s.netinfo.iface.clone()).filter(|n| !n.is_empty()),
+                Some(s.netinfo.underlay_iface.clone()).filter(|n| !n.is_empty()),
+            )
         };
 
         let mut down = 0u64;
@@ -46,20 +52,59 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         let mut rx_pkt = 0u64;
         let mut tx_pkt = 0u64;
 
-        for (name, data) in &networks {
-            match &want {
-                Some(di) if di == name => {
-                    down = data.received();
-                    up = data.transmitted();
-                    rx_err = data.errors_on_received();
-                    tx_err = data.errors_on_transmitted();
-                    rx_pkt = data.packets_received();
-                    tx_pkt = data.packets_transmitted();
-                    label = di.clone();
-                    break;
+        // The default-route interface alone when its counters can be found.
+        // Failing that, the physical adapter under a tunnel: the same bytes
+        // pass through it, encrypted, so it is the right single reading
+        // when the tunnel adapter itself has no counters (NordVPN's NordLynx
+        // on Windows, found in the field: the default route named an adapter
+        // sysinfo does not list, and a name that matched nothing used to
+        // count nothing, so the graph drew its first few samples while the
+        // default route was still unknown and then sat at zero for the rest
+        // of the session). Failing both, every non-loopback adapter summed:
+        // the honest reading when nothing can be singled out, at the cost
+        // of counting a tunnel's traffic twice. Each step down is logged
+        // once so it can be seen and fixed.
+        let find = |n: &String| networks.iter().find(|(name, _)| *name == n);
+        let matched = want
+            .as_ref()
+            .and_then(find)
+            .or_else(|| underlay.as_ref().and_then(find));
+        match matched {
+            Some((name, data)) => {
+                if let Some(di) = &want
+                    && di != name
+                    && missing_logged.as_deref() != Some(di.as_str())
+                {
+                    crate::errlog::log(
+                        "throughput",
+                        format!(
+                            "default interface {di:?} has no counters under that name; reading its underlay {name:?}"
+                        ),
+                    );
+                    missing_logged = Some(di.clone());
                 }
-                Some(_) => continue,
-                None => {
+                down = data.received();
+                up = data.transmitted();
+                rx_err = data.errors_on_received();
+                tx_err = data.errors_on_transmitted();
+                rx_pkt = data.packets_received();
+                tx_pkt = data.packets_transmitted();
+                label = name.clone();
+            }
+            None => {
+                if let Some(di) = &want
+                    && missing_logged.as_deref() != Some(di.as_str())
+                {
+                    let known: Vec<&str> = networks.keys().map(|n| n.as_str()).collect();
+                    crate::errlog::log(
+                        "throughput",
+                        format!(
+                            "default interface {di:?} has no counters under that name (sysinfo knows {known:?}); summing every adapter"
+                        ),
+                    );
+                    missing_logged = Some(di.clone());
+                }
+                for (name, data) in &networks {
                     if name.starts_with("lo") {
                         continue;
                     }

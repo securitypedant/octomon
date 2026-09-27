@@ -108,11 +108,14 @@
      every width; nowrap is the guarantee that it never splits. */
   .hero h1 { font-size: clamp(2rem, 13.5cqw, 4.4rem); white-space: nowrap; }
   /* the art takes the bigger share and, on wide screens, bleeds past the
-     wrap to the viewport's right edge so it renders ~20% larger */
+     wrap toward the viewport's right edge so it renders ~20% larger. The
+     bleed is capped: uncapped it grew with the viewport, and on a 3400px
+     display the art ran a thousand pixels past the wrap, leaving the hero
+     sitting well right of the centred nav above it. */
   .hero-art {
     flex: 1 1 62%; min-width: 0; height: auto; align-self: center;
     padding-top: 24px;
-    margin-right: min(0px, calc((1120px - 100vw) / 2));
+    margin-right: max(-120px, min(0px, calc((1120px - 100vw) / 2)));
   }
   /* the plain-language line runs the full width under both columns */
   .hero p.sub-risky {
@@ -144,6 +147,12 @@
     font-family: var(--octo-mono);
     font-size: 0.9rem;
     line-height: 1.7;
+    /* iOS Safari "text autosizing" inflates the type in any block wider than
+       the viewport, which is exactly the long apt and PowerShell lines and
+       not the short brew and cargo ones, so the four cards came out in two
+       different sizes on a phone. Pin the size. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
   }
   .cmd .line { display: flex; gap: 10px; white-space: pre; width: max-content; }
   .cmd .prompt { color: var(--octo-green); user-select: none; }

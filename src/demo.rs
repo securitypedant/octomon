@@ -11,11 +11,14 @@
 //! - MAC addresses → locally-administered `02:xx:…` values.
 //! - Private / link-local / CGNAT IPv4 → `192.168.0.x`; the gateway is always
 //!   `192.168.0.1`. Every IPv6 → the documentation prefix `2001:db8::/32`.
-//! - Public addresses that are *ours or about us* — the public IP, discovered
-//!   hops, remote addresses, path-monitor hops, resolvers — → TEST-NET ranges
+//! - Public addresses that are *ours or about us* — the public IP, the first
+//!   few hops, remote addresses, resolvers — → TEST-NET ranges
 //!   (`203.0.113.x`, `198.51.100.x`). Well-known public resolvers (1.1.1.1,
 //!   8.8.8.8, 9.9.9.9 and kin) are kept: they identify nobody and are the
-//!   default targets.
+//!   default targets. Hops beyond the near edge ([`NEAR_HOPS`]) keep their
+//!   real public addresses in the quality table, the hop monitor and the
+//!   traceroute: a backbone router places nobody, and the far path is what a
+//!   demo of a traceroute is showing.
 //! - SSIDs → `DemoNet` (ours) and stored location labels that were SSIDs; the
 //!   names a user gave ("Home") are kept — they were chosen to be shareable.
 //! - Whois answers → an example registry record; proxy hosts → `proxy.example`.
@@ -44,6 +47,29 @@ fn h64(s: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut h);
     h.finish()
+}
+
+/// How many hops out the path stops being about you: the gateway and the
+/// ISP's first two routers are the ones that say where you live and who you
+/// pay; beyond them a router is the internet's, not yours.
+pub const NEAR_HOPS: u8 = 3;
+
+/// A public, globally routable address — the kind a distant hop shows and
+/// nobody needs hidden. Private, link-local, CGNAT and ULA ranges are not.
+fn is_global(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            let shared = o[0] == 100 && (64..=127).contains(&o[1]);
+            !(v4.is_private() || v4.is_link_local() || v4.is_loopback() || shared)
+        }
+        IpAddr::V6(v6) => {
+            let s0 = v6.segments()[0];
+            let link_local = (s0 & 0xffc0) == 0xfe80;
+            let ula = (s0 & 0xfe00) == 0xfc00;
+            !(link_local || ula || v6.is_loopback())
+        }
+    }
 }
 
 /// Public resolvers that are nobody's secret and are the default targets.
@@ -118,6 +144,20 @@ impl Disguise {
         };
         self.remember(&key, &fake.to_string());
         fake
+    }
+
+    /// The fake for a hop `ttl` routers out — or its real address once the
+    /// path is past the near edge. The gateway and the ISP's first routers
+    /// place a person: a street, a town, a provider. A backbone router in
+    /// another city places nobody, and a demo that rewrites the whole path
+    /// throws away the part of a traceroute worth looking at. Private and
+    /// CGNAT addresses are rewritten at any distance (an ISP's internal
+    /// numbering is still about that ISP).
+    pub fn hop_ip(&mut self, ttl: u8, ip: IpAddr) -> IpAddr {
+        if ttl > NEAR_HOPS && is_global(ip) {
+            return ip;
+        }
+        self.ip(ip)
     }
 
     /// `"192.168.1.20/24"` and bare forms.
@@ -233,6 +273,9 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
     }
     v.netinfo.ipv4 = v.netinfo.ipv4.iter().map(|a| d.cidr(a)).collect();
     v.netinfo.ipv6 = v.netinfo.ipv6.iter().map(|a| d.cidr(a)).collect();
+    // The public IPv6 lives in its own field, not in the targets like the
+    // public IPv4 does, and was the one address the disguise missed.
+    v.public_ipv6 = v.public_ipv6.map(|ip| d.ip(ip));
     if !v.netinfo.gateway_ipv6.is_empty() {
         v.netinfo.gateway_ipv6 = d.cidr(&v.netinfo.gateway_ipv6);
     }
@@ -256,10 +299,13 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
         p.bypass = String::new();
     }
 
-    // Targets: discovered ones (gateway, hops, public IP) and anything on a
-    // private range are ours; well-known anchors pass through untouched.
+    // Targets: discovered ones (gateway, near hops, public IP) and anything on
+    // a private range are ours; well-known targets and far hops pass through.
     for t in v.targets.iter_mut() {
-        t.addr = d.ip(t.addr);
+        t.addr = match t.hop_ttl() {
+            Some(ttl) => d.hop_ip(ttl, t.addr),
+            None => d.ip(t.addr),
+        };
         if let Some(h) = t.hostname.as_mut()
             && h.parse::<IpAddr>().is_ok()
         {
@@ -279,9 +325,9 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
     v.pinned_remotes = v.pinned_remotes.iter().map(|a| d.ip(*a)).collect();
     if let Some(m) = v.hop_monitor.as_mut() {
         for h in m.hops.iter_mut() {
-            h.addr = h.addr.map(|a| d.ip(a));
+            h.addr = h.addr.map(|a| d.hop_ip(h.ttl, a));
             if let Some(st) = h.stat.as_mut() {
-                st.addr = d.ip(st.addr);
+                st.addr = d.hop_ip(h.ttl, st.addr);
             }
         }
         m.dest = d.ip(m.dest);
@@ -292,7 +338,7 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
             if let Some(a) = h.addr.as_mut()
                 && let Ok(ip) = a.parse::<IpAddr>()
             {
-                *a = d.ip(ip).to_string();
+                *a = d.hop_ip(h.ttl, ip).to_string();
             }
         }
         t.target = d.text(&t.target);
@@ -417,6 +463,13 @@ pub fn disguise_machine(s: &AppState, d: &mut Disguise) -> AppState {
             }
         })
         .collect();
+    // The public v6 is this machine's own global address, and on a stack
+    // that does not randomise it the MAC sits inside it just the same.
+    if let Some(ip) = v.public_ipv6
+        && embeds_mac(&ip.to_string(), &real_mac)
+    {
+        v.public_ipv6 = Some(d.ip(ip));
+    }
     // The free-text pass replaces only what is in the mapping — here, just
     // the machine's own identifiers — so network history entries like
     // "before: … mac 22:dd:…" stop carrying the real hardware address.
@@ -589,6 +642,89 @@ mod tests {
         }
     }
 
+    /// The near hops place a person; the far ones place nobody. Simon: "we
+    /// only need to fake the first 2-3 hops, after that the IP information
+    /// doesn't really reveal anything about me."
+    #[test]
+    fn far_hops_keep_their_real_public_addresses() {
+        let mut s = AppState::new(vec![]);
+        s.netinfo.gateway_ip = "10.0.0.1".into();
+        let near = |ttl: u8, ip: &str| {
+            let mut t = TargetStat::new(format!("hop {ttl}→1.1.1.1"), ip.parse().unwrap());
+            t.discovered = true;
+            t
+        };
+        s.targets.push(near(2, "76.14.0.9")); // the ISP's first router
+        s.targets.push(near(3, "76.14.1.1")); // and its second
+        s.targets.push(near(4, "4.69.140.9")); // a backbone router
+        s.targets.push(near(7, "10.250.0.7")); // ISP-internal numbering, far out
+        s.hop_monitor = Some(crate::app::HopMonitor {
+            target: "Cloudflare (1.1.1.1)".into(),
+            dest: "1.1.1.1".parse().unwrap(),
+            hops: vec![
+                crate::app::MonitoredHop {
+                    ttl: 2,
+                    addr: Some("76.14.0.9".parse().unwrap()),
+                    stat: None,
+                },
+                crate::app::MonitoredHop {
+                    ttl: 9,
+                    addr: Some("142.250.160.160".parse().unwrap()),
+                    stat: None,
+                },
+            ],
+            discovering: false,
+            generation: 0,
+            selected: 0,
+        });
+        s.traceroute = Some(crate::app::Traceroute {
+            target: "1.1.1.1".into(),
+            running: false,
+            hops: vec![
+                crate::app::Hop {
+                    ttl: 3,
+                    addr: Some("76.14.1.1".into()),
+                    rtt_ms: None,
+                },
+                crate::app::Hop {
+                    ttl: 11,
+                    addr: Some("142.250.160.160".into()),
+                    rtt_ms: None,
+                },
+            ],
+        });
+
+        let mut d = Disguise::new();
+        let v = disguise(&s, &mut d);
+        let addr = |i: usize| v.targets[i].addr.to_string();
+        assert!(
+            !addr(0).starts_with("76.14."),
+            "hop 2 is the ISP: {}",
+            addr(0)
+        );
+        assert!(
+            !addr(1).starts_with("76.14."),
+            "hop 3 is the ISP: {}",
+            addr(1)
+        );
+        assert_eq!(
+            addr(2),
+            "4.69.140.9",
+            "a far backbone hop is nobody's secret"
+        );
+        assert!(
+            addr(3).starts_with("192.168.0."),
+            "a private hop is rewritten at any distance: {}",
+            addr(3)
+        );
+        let m = v.hop_monitor.unwrap();
+        assert!(!m.hops[0].addr.unwrap().to_string().starts_with("76.14."));
+        assert_eq!(m.hops[1].addr.unwrap().to_string(), "142.250.160.160");
+        let t = v.traceroute.unwrap();
+        assert!(!t.hops[0].addr.as_deref().unwrap().starts_with("76.14."));
+        assert_eq!(t.hops[1].addr.as_deref(), Some("142.250.160.160"));
+    }
+
     #[test]
     fn a_state_comes_out_with_nothing_real_left() {
         let mut s = AppState::new(vec![TargetStat::new(
@@ -606,6 +742,7 @@ mod tests {
             ..Default::default()
         });
         s.netinfo.dhcp_server = "10.27.88.200".into();
+        s.public_ipv6 = Some("2601:646:8f00:1234::5".parse().unwrap());
         s.pinned_remotes.push("23.93.34.5".parse().unwrap());
         let mut hop = TargetStat::new("hop 2→1.1.1.1".into(), "76.14.0.9".parse().unwrap());
         hop.discovered = true;
@@ -655,6 +792,10 @@ mod tests {
             v.events.iter().any(|e| e.message.contains("192.168.0.1")),
             "the substitution, not deletion"
         );
+        // The public IPv6 lives in its own field and was the one address the
+        // disguise used to miss.
+        let v6 = v.public_ipv6.unwrap().to_string();
+        assert!(v6.starts_with("2001:db8:"), "public v6 rewritten: {v6}");
         // The live state is untouched.
         assert_eq!(s.netinfo.gateway_ip, "10.20.30.1");
     }
