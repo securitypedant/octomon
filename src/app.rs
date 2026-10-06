@@ -1552,7 +1552,35 @@ pub struct Vitals {
     pub throttled: bool,
     /// "AC Power" / "Battery Power" where known.
     pub power_source: String,
+    /// The processes using the most CPU or memory right now — the union of
+    /// the top ten by each, unsorted; the panel sorts by the chosen column
+    /// and shows ten. Enough to answer "why is the CPU (or memory) maxed"
+    /// without becoming a task manager.
+    pub top_procs: Vec<TopProc>,
+    /// octomon's own footprint, so a monitor on a struggling machine can
+    /// show it is not part of the problem.
+    pub own: Option<TopProc>,
+    /// Seconds since boot. "Since a restart" and "since waking" explain a
+    /// surprising number of Wi-Fi and DNS oddities.
+    pub uptime_secs: u64,
 }
+
+/// One row of the busiest-processes list.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TopProc {
+    pub pid: u32,
+    pub name: String,
+    /// Per core, the convention of Activity Monitor, top and htop: one fully
+    /// busy core is 100%, so a multithreaded build can read 400%. The rows
+    /// do not add up to the CPU gauge (that is per machine); they add up to
+    /// the gauge times the core count.
+    pub cpu_pct: f32,
+    /// Resident memory, bytes.
+    pub mem: u64,
+}
+
+/// How many processes the busiest-processes list keeps.
+pub const TOP_PROCS: usize = 10;
 
 impl Vitals {
     /// Number of cores currently reporting.
@@ -2481,6 +2509,10 @@ pub struct AppState {
     pub pmtu6_error: Option<String>,
     pub signal: SignalState,
     pub vitals: Vitals,
+    /// Machine panel, full screen: the column cursor over the busiest-
+    /// processes table (0 = cpu, 1 = mem) and its sort `(column, desc)`.
+    pub proc_col: usize,
+    pub proc_sort: (usize, bool),
     /// Error/drop counters for the default interface.
     pub link_errors: LinkErrors,
     pub focus: Panel,
@@ -2792,6 +2824,8 @@ impl AppState {
             pmtu6_error: None,
             signal: SignalState::default(),
             vitals: Vitals::default(),
+            proc_col: 0,
+            proc_sort: (0, true),
             link_errors: LinkErrors::default(),
             focus: Panel::Quality,
             fullscreen: false,
@@ -2909,6 +2943,8 @@ impl AppState {
         self.bw_sort = live.bw_sort;
         self.bw_col_other = live.bw_col_other;
         self.bw_sort_other = live.bw_sort_other;
+        self.proc_col = live.proc_col;
+        self.proc_sort = live.proc_sort;
         self.bw_filter = live.bw_filter.clone();
         self.bw_filter_other = live.bw_filter_other.clone();
         self.zoom_view = live.zoom_view;

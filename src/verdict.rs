@@ -2181,12 +2181,24 @@ pub fn evaluate(s: &AppState) -> Triage {
     // load (cpu 36%)" — a note nobody believes.
     let hottest = v.hottest_core().map(|(_, pct)| pct).unwrap_or(0.0);
     if v.cpu_pct >= th::CPU_HOT_PCT {
+        let mut evidence = vec![format!("cpu {:.0}%, hottest core {hottest:.0}%", v.cpu_pct)];
+        // Name the culprits: "under load" is a symptom, the process is the
+        // answer, and it is what the person will go and close.
+        if !v.top_procs.is_empty() {
+            let busiest: Vec<String> = v
+                .top_procs
+                .iter()
+                .take(3)
+                .map(|p| format!("{} {:.0}%", p.name, p.cpu_pct))
+                .collect();
+            evidence.push(format!("busiest: {}", busiest.join(", ")));
+        }
         findings.push(Finding {
             cause: Cause::Machine,
             severity: Severity::Info,
             confidence: Confidence::Likely,
             summary: format!("machine under load (cpu {:.0}%)", v.cpu_pct),
-            evidence: vec![format!("cpu {:.0}%, hottest core {hottest:.0}%", v.cpu_pct)],
+            evidence,
             subject: "cpu".to_string(),
             symptom: false,
             since: None,

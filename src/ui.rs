@@ -1734,7 +1734,13 @@ fn context_line(s: &AppState) -> Line<'static> {
             }
             v
         }
-        Panel::Vitals => vec![],
+        Panel::Vitals => {
+            if s.fullscreen && !s.vitals.top_procs.is_empty() {
+                vec![key("[←→ ↵]"), txt("sort processes ")]
+            } else {
+                vec![]
+            }
+        }
     };
     spans.push(key("[?]"));
     spans.push(txt("help "));
@@ -6028,16 +6034,49 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
     } else {
         0
     };
-    let parts = Layout::vertical([
-        Constraint::Length(1), // cpu
-        Constraint::Length(1), // memory pressure
-        Constraint::Length(1), // load average
-        Constraint::Length(1), // link errors
-        Constraint::Length(1), // thermal / power
+    // The busiest processes, full-screen only, beside the five summary lines
+    // rather than under the core grid: the summary is a narrow column of
+    // short lines, so the right half of a wide screen was empty, and the
+    // table answers "why is the CPU maxed" right next to the gauge that
+    // asks it. Only as many rows as leave the history a few lines.
+    let proc_rows = if s.fullscreen && !v.top_procs.is_empty() {
+        let want = v.top_procs.len().min(crate::app::TOP_PROCS) as u16 + 1;
+        let spare = inner.height.saturating_sub(core_rows + 6);
+        if spare >= 3 { want.min(spare) } else { 0 }
+    } else {
+        0
+    };
+    // Bands: the top band holds the summary (and the table beside it), then
+    // the core grid, then the history with whatever is left.
+    // Full screen adds three lines under the five: octomon's own footprint,
+    // the connection count, and the uptime. The split view stays a summary.
+    let summary_rows: u16 = if s.fullscreen { 8 } else { 5 };
+    let bands = Layout::vertical([
+        Constraint::Length(summary_rows.max(proc_rows)),
         Constraint::Length(core_rows),
-        Constraint::Min(0), // history
+        Constraint::Min(0),
     ])
     .split(inner);
+    let (summary, procs_area) = if proc_rows > 0 {
+        // The summary's longest line is short; the table's names are not.
+        let cols = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(bands[0]);
+        (cols[0], cols[1])
+    } else {
+        (bands[0], Rect::default())
+    };
+    // One row per line: cpu, memory pressure, load, link errors, power; full
+    // screen adds octomon's footprint, connections and uptime. The extra
+    // constraints exist only when their rows do — asking a five-row band
+    // for eight one-row slots makes the solver squeeze the real ones.
+    let mut constraints = vec![Constraint::Length(1); summary_rows as usize];
+    constraints.push(Constraint::Min(0));
+    let lines = Layout::vertical(constraints).split(summary);
+    // Same slots as before: 0–4 the summary lines, 5 cores, 6 processes,
+    // 7 history.
+    let parts: Vec<Rect> = vec![
+        lines[0], lines[1], lines[2], lines[3], lines[4], bands[1], procs_area, bands[2],
+    ];
 
     // LineGauge keeps the label to the left of the bar, so it stays legible
     // (a Gauge draws the label over the fill, which is unreadable on yellow).
@@ -6134,8 +6173,84 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
         f.render_widget(Paragraph::new(Line::from(spans)), parts[4]);
     }
 
+    // Full screen only (the split view's band is five rows, so these rects
+    // are empty there and draw nothing).
+    if s.fullscreen {
+        // octomon's own footprint: a monitor on a struggling machine should
+        // be able to show it is not part of the problem.
+        let own = match &v.own {
+            Some(p) => Line::from(vec![
+                Span::styled("octomon ", Style::new().fg(theme::dim())),
+                Span::styled(
+                    format!("{:.1}% cpu", p.cpu_pct),
+                    Style::new().fg(usage_color(p.cpu_pct)),
+                ),
+                Span::styled(
+                    format!(" · {}", fmt_bytes(p.mem)),
+                    Style::new().fg(theme::text()),
+                ),
+            ]),
+            None => Line::from(Span::styled("octomon —", Style::new().fg(theme::dim()))),
+        };
+        f.render_widget(Paragraph::new(own), lines[5]);
+
+        // Connections, from the talkers the Bandwidth panel already holds:
+        // remotes with traffic this interval, remotes seen this session,
+        // and the processes moving bytes right now. A machine with hundreds
+        // of sockets open, or one process holding most of them, is a
+        // network-relevant fact no other panel states as a number.
+        let active = s
+            .remotes
+            .iter()
+            .filter(|r| r.down_bps + r.up_bps > 0.0)
+            .count();
+        let talking = s
+            .processes
+            .iter()
+            .filter(|p| p.down_bps + p.up_bps > 0.0)
+            .count();
+        let conns = Line::from(vec![
+            Span::styled("conns ", Style::new().fg(theme::dim())),
+            Span::styled(format!("{active} active"), Style::new().fg(theme::text())),
+            Span::styled(
+                format!(
+                    " · {} remote{} this session · {talking} process{} talking",
+                    s.remotes.len(),
+                    if s.remotes.len() == 1 { "" } else { "s" },
+                    if talking == 1 { "" } else { "es" }
+                ),
+                Style::new().fg(theme::dim()),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(conns), lines[6]);
+
+        // Uptime: "since a restart" and "since waking" explain a surprising
+        // number of Wi-Fi and DNS oddities.
+        let up = v.uptime_secs;
+        let (d, h, m) = (up / 86_400, (up % 86_400) / 3_600, (up % 3_600) / 60);
+        let text = if up == 0 {
+            "—".to_string()
+        } else if d > 0 {
+            format!("{d}d {h}h {m}m")
+        } else if h > 0 {
+            format!("{h}h {m}m")
+        } else {
+            format!("{m}m")
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("uptime ", Style::new().fg(theme::dim())),
+                Span::styled(text, Style::new().fg(theme::text())),
+            ])),
+            lines[7],
+        );
+    }
+
     if core_rows > 0 {
         core_grid(f, &v.cores, parts[5]);
+    }
+    if proc_rows > 0 {
+        top_procs_table(f, s, parts[6]);
     }
 
     // CPU history sparkline (uses the remaining space), with available
@@ -6144,20 +6259,20 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
     // the question — "did memory dive when the CPU spiked?".
     let spark = Sparkline::default()
         .max(100)
-        .data(v.cpu_hist.tail_u64(parts[6].width as usize))
+        .data(v.cpu_hist.tail_u64(parts[7].width as usize))
         .bar_set(s.bar_set.clone())
         .style(Style::new().fg(theme::warn()))
         .block(Block::new().title(Line::from(vec![
             Span::styled(" cpu history ", Style::new().fg(theme::dim())),
             Span::styled("· avail mem ", Style::new().fg(P95_COLOR)),
         ])));
-    f.render_widget(spark, parts[6]);
+    f.render_widget(spark, parts[7]);
     // The line rides the same rect: Chart plots only its dots, so the bars
     // stay visible everywhere the line isn't.
     let graph = Rect {
-        y: parts[6].y + 1,
-        height: parts[6].height.saturating_sub(1),
-        ..parts[6]
+        y: parts[7].y + 1,
+        height: parts[7].height.saturating_sub(1),
+        ..parts[7]
     };
     if graph.height >= 1 && graph.width >= 4 {
         let want = graph.width as usize * 2;
@@ -6188,6 +6303,83 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
             f.render_widget(chart, graph);
         }
     }
+}
+
+/// The busiest processes: a header and one row each, cpu as a share of the
+/// whole machine (so the rows add up to the gauge), resident memory, name.
+/// Just enough to know what is eating the CPU; not a task manager.
+fn top_procs_table(f: &mut Frame, s: &AppState, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    // Sorted by the chosen column (←/→ + Enter, like the talkers tables):
+    // the list holds the top ten by cpu and by memory, so either sort has
+    // its answers in it.
+    let (sort_col, desc) = s.proc_sort;
+    let mut procs: Vec<&crate::app::TopProc> = s.vitals.top_procs.iter().collect();
+    procs.sort_by(|a, b| {
+        let ord = match sort_col {
+            0 => a.cpu_pct.total_cmp(&b.cpu_pct),
+            _ => a.mem.cmp(&b.mem),
+        };
+        if desc { ord.reverse() } else { ord }
+    });
+    // The title doubles as the name column's header, so the rows start at
+    // the left edge and a long process name has the width to itself. The
+    // column under the cursor is highlighted, the sorted one carries its
+    // arrow, as in every other sortable header.
+    let focused = s.focus == Panel::Vitals;
+    let head = |i: usize, label: &str, width: usize| {
+        let mut txt = label.to_string();
+        if sort_col == i {
+            txt.push(if desc { '▼' } else { '▲' });
+        }
+        let style = if focused && s.proc_col == i {
+            Style::new()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::new().fg(theme::dim())
+        };
+        // The padding is its own unstyled span: right-aligning inside the
+        // styled one underlined the blank column, not just the word.
+        let pad = " ".repeat(width.saturating_sub(txt.chars().count()));
+        [Span::raw(pad), Span::styled(txt, style)]
+    };
+    let [cpu_pad, cpu_label] = head(0, "cpu", 7);
+    let [mem_pad, mem_label] = head(1, "mem", 7);
+    let mut lines = vec![Line::from(vec![
+        Span::raw(" "),
+        cpu_pad,
+        cpu_label,
+        Span::raw("  "),
+        mem_pad,
+        mem_label,
+        Span::styled(
+            "  busiest processes · cpu is per core",
+            Style::new().fg(theme::dim()),
+        ),
+    ])];
+    for p in procs
+        .iter()
+        .take(crate::app::TOP_PROCS)
+        .take(area.height.saturating_sub(1) as usize)
+    {
+        lines.push(Line::from(vec![
+            // Width for four digits: a build can read 1200% on a big box.
+            // Colour saturates at a full core.
+            Span::styled(
+                format!(" {:>6.1}%", p.cpu_pct),
+                Style::new().fg(usage_color(p.cpu_pct.min(100.0))),
+            ),
+            Span::styled(
+                format!("  {:>7}", fmt_bytes(p.mem)),
+                Style::new().fg(theme::text()),
+            ),
+            Span::styled(format!("  {}", p.name), Style::new().fg(theme::bright())),
+        ]));
+    }
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 /// How many per-core meters sit on one row.
@@ -8261,6 +8453,72 @@ mod tests {
         assert!(!out.contains("per-core"));
         s.fullscreen = true;
         assert!(draw(&s, 120, 30).contains("per-core (4 cores)"));
+
+        // The busiest processes, full-screen only: when the CPU is maxed
+        // this is what says why (user feedback). Cpu is a share of the
+        // machine, so the rows add up to the gauge.
+        s.vitals.top_procs = vec![
+            crate::app::TopProc {
+                pid: 4242,
+                name: "FortniteClient-Win64-Shipping.exe".into(),
+                cpu_pct: 71.5,
+                mem: 6 * 1024 * 1024 * 1024,
+            },
+            crate::app::TopProc {
+                pid: 17,
+                name: "chrome".into(),
+                cpu_pct: 12.0,
+                mem: 900 * 1024 * 1024,
+            },
+        ];
+        // Beside the summary lines, not under the core grid: the right half
+        // of a wide screen was empty and the history was squeezed.
+        let out = draw(&s, 160, 36);
+        let row = |needle: &str| out.find(needle).map(|i| out[..i].chars().count() / 160);
+        assert_eq!(
+            row("busiest processes"),
+            row("CPU "),
+            "table beside the gauge: {out}"
+        );
+        assert!(out.contains("busiest processes"), "{out}");
+        assert!(out.contains("71.5%"), "{out}");
+        assert!(out.contains("FortniteClient-Win64-Shipping.exe"), "{out}");
+        assert!(out.contains("chrome"), "{out}");
+        // The history graph keeps its space underneath.
+        assert!(out.contains("cpu history"), "{out}");
+        // Sorted by cpu, descending, by default: the game first.
+        let pos = |needle: &str| out.find(needle).unwrap_or(usize::MAX);
+        assert!(pos("FortniteClient") < pos("chrome"), "{out}");
+        assert!(out.contains("cpu▼"), "{out}");
+
+        // ←/→ + Enter sort by the other column, or flip the direction.
+        s.proc_col = 1;
+        s.proc_sort = (1, false);
+        let out = draw(&s, 160, 36);
+        assert!(out.contains("mem▲"), "{out}");
+        let pos = |needle: &str| out.find(needle).unwrap_or(usize::MAX);
+        assert!(
+            pos("chrome") < pos("FortniteClient"),
+            "mem ascending: {out}"
+        );
+
+        // The three extra summary lines, full screen only.
+        s.vitals.own = Some(crate::app::TopProc {
+            pid: 1,
+            name: "octomon".into(),
+            cpu_pct: 0.4,
+            mem: 38 * 1024 * 1024,
+        });
+        s.vitals.uptime_secs = 3 * 86_400 + 4 * 3_600 + 12 * 60;
+        let out = draw(&s, 160, 36);
+        assert!(out.contains("octomon 0.4% cpu · 38M"), "{out}");
+        assert!(out.contains("conns 0 active"), "{out}");
+        assert!(out.contains("uptime 3d 4h 12m"), "{out}");
+
+        s.fullscreen = false;
+        let out = draw(&s, 120, 30);
+        assert!(!out.contains("busiest processes"));
+        assert!(!out.contains("uptime"), "split view stays a summary: {out}");
     }
 
     #[test]

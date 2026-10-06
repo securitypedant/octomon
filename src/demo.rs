@@ -4,26 +4,29 @@
 //!
 //! The disguise is applied to a *copy* of the state just before each draw,
 //! never to the state the collectors write, and it is deterministic: the same
-//! real address becomes the same fake address for the whole session, so
-//! targets, hops, remotes and events stay consistent with each other. What is
-//! rewritten:
+//! real value becomes the same fake value for the whole session, so every
+//! place it appears stays consistent. What is rewritten is a short, fixed
+//! list of things that place a person or a machine:
 //!
-//! - MAC addresses → locally-administered `02:xx:…` values.
-//! - Private / link-local / CGNAT IPv4 → `192.168.0.x`; the gateway is always
-//!   `192.168.0.1`. Every IPv6 → the documentation prefix `2001:db8::/32`.
-//! - Public addresses that are *ours or about us* — the public IP, the first
-//!   few hops, remote addresses, resolvers — → TEST-NET ranges
-//!   (`203.0.113.x`, `198.51.100.x`). Well-known public resolvers (1.1.1.1,
-//!   8.8.8.8, 9.9.9.9 and kin) are kept: they identify nobody and are the
-//!   default targets. Hops beyond the near edge ([`NEAR_HOPS`]) keep their
-//!   real public addresses in the quality table, the hop monitor and the
-//!   traceroute: a backbone router places nobody, and the far path is what a
-//!   demo of a traceroute is showing.
-//! - SSIDs → `DemoNet` (ours) and stored location labels that were SSIDs; the
+//! - MAC addresses (ours, the gateway's, the underlay gateway's) →
+//!   locally-administered `02:xx:…` values.
+//! - The public IPv4 and IPv6 addresses — the discovered "public IP" rows,
+//!   the edge's view of us, and the global-scope IPv6 addresses on the
+//!   interface and its router, which are public-facing by construction →
+//!   TEST-NET ranges (`203.0.113.x`, `198.51.100.x`) and the documentation
+//!   prefix `2001:db8::/32`.
+//! - The SSID → `DemoNet`, and stored location labels that were SSIDs; the
 //!   names a user gave ("Home") are kept — they were chosen to be shareable.
-//! - Whois answers → an example registry record; proxy hosts → `proxy.example`.
-//! - Free text (events, network history, notices, the recording path) gets the
-//!   same substitutions, and the home directory becomes `~`.
+//! - Free text (events, network history, notices, the recording path, whois
+//!   output, the routing table) gets the same substitutions, and the home
+//!   directory becomes `~`.
+//!
+//! Everything else is real: the LAN (`192.168.1.x` says nothing about who
+//! you are), the resolvers, every hop of every path, the remote addresses
+//! the machine talks to, and whois answers for any address but our own. An
+//! earlier version rewrote all of those too, and a demo of "which server is
+//! the game on" showed `203.0.113.105`, whose whois said Example Networks —
+//! a disguise that hides the thing the demo is about is not useful.
 //!
 //! Hostnames of targets the user added by name, process names and interface
 //! names are left alone: they are what a demo is about, and the user chose
@@ -48,11 +51,6 @@ fn h64(s: &str) -> u64 {
     s.hash(&mut h);
     h.finish()
 }
-
-/// How many hops out the path stops being about you: the gateway and the
-/// ISP's first two routers are the ones that say where you live and who you
-/// pay; beyond them a router is the internet's, not yours.
-pub const NEAR_HOPS: u8 = 3;
 
 /// A public, globally routable address — the kind a distant hop shows and
 /// nobody needs hidden. Private, link-local, CGNAT and ULA ranges are not.
@@ -105,8 +103,10 @@ impl Disguise {
         }
     }
 
-    /// The fake for `ip`. Loopback and well-known public resolvers pass
-    /// through; the gateway is pinned to `192.168.0.1` by the caller.
+    /// The fake for `ip`, remembered so free text and every later sighting
+    /// agree. Loopback and well-known public resolvers pass through. Only
+    /// the sensitive values go through here (see the module doc); the rest
+    /// of the state is drawn through [`Self::known_ip`].
     pub fn ip(&mut self, ip: IpAddr) -> IpAddr {
         if ip.is_loopback() || well_known(ip) {
             return ip;
@@ -146,18 +146,22 @@ impl Disguise {
         fake
     }
 
-    /// The fake for a hop `ttl` routers out — or its real address once the
-    /// path is past the near edge. The gateway and the ISP's first routers
-    /// place a person: a street, a town, a provider. A backbone router in
-    /// another city places nobody, and a demo that rewrites the whole path
-    /// throws away the part of a traceroute worth looking at. Private and
-    /// CGNAT addresses are rewritten at any distance (an ISP's internal
-    /// numbering is still about that ISP).
-    pub fn hop_ip(&mut self, ttl: u8, ip: IpAddr) -> IpAddr {
-        if ttl > NEAR_HOPS && is_global(ip) {
-            return ip;
-        }
-        self.ip(ip)
+    /// `ip` as it should be drawn: its fake when it is one of the sensitive
+    /// values already learned, itself otherwise. The pass learns the public
+    /// addresses first, then draws everything else through this, so a
+    /// remote row or an event that happens to carry our public address is
+    /// consistent with the Network panel — and a remote that is simply
+    /// some server stays that server.
+    pub fn known_ip(&self, ip: IpAddr) -> IpAddr {
+        self.subs
+            .get(&ip.to_string())
+            .and_then(|f| f.parse().ok())
+            .unwrap_or(ip)
+    }
+
+    /// Whether `ip` is one of the learned sensitive values.
+    pub fn is_known(&self, ip: IpAddr) -> bool {
+        self.subs.contains_key(&ip.to_string())
     }
 
     /// `"192.168.1.20/24"` and bare forms.
@@ -247,90 +251,82 @@ fn drop_command_lines(v: &mut AppState) {
     }
 }
 
-/// A copy of `s` with everything identifying rewritten. `d` accumulates the
-/// mapping across frames so the fakes stay stable for the whole session.
+/// A global-scope IPv6 (bare or CIDR): the kind that is public-facing.
+fn global_v6(cidr: &str) -> bool {
+    let ip = cidr.split('/').next().unwrap_or(cidr).trim();
+    matches!(ip.parse::<IpAddr>(), Ok(ip @ IpAddr::V6(_)) if is_global(ip))
+}
+
+/// A copy of `s` with the sensitive values rewritten — see the module doc
+/// for the list. `d` accumulates the mapping across frames so the fakes
+/// stay stable for the whole session.
 pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
     let mut v = s.clone();
 
-    // Network identity first: the gateway pins to .1 before anything else can
-    // claim it, and the mapping it creates feeds every later substitution.
-    let gw_real = v.netinfo.gateway_ip.clone();
-    if let Ok(gw) = gw_real.parse::<IpAddr>() {
-        let fake = match gw {
-            IpAddr::V4(_) => "192.168.0.1".to_string(),
-            IpAddr::V6(_) => "fe80::1".to_string(),
-        };
-        d.remember(&gw_real, &fake);
-        v.netinfo.gateway_ip = fake;
-    }
-    v.netinfo.gateway_mac = d.mac(&v.netinfo.gateway_mac);
+    // First the sensitive values themselves, so the mapping exists before
+    // anything is drawn through it.
     v.netinfo.mac = d.mac(&v.netinfo.mac);
-    if let Ok(ip) = v.netinfo.underlay_gateway_ip.parse::<IpAddr>() {
-        v.netinfo.underlay_gateway_ip = d.ip(ip).to_string();
-    }
+    v.netinfo.gateway_mac = d.mac(&v.netinfo.gateway_mac);
     if !v.netinfo.underlay_gateway_mac.is_empty() {
         v.netinfo.underlay_gateway_mac = d.mac(&v.netinfo.underlay_gateway_mac);
-    }
-    v.netinfo.ipv4 = v.netinfo.ipv4.iter().map(|a| d.cidr(a)).collect();
-    v.netinfo.ipv6 = v.netinfo.ipv6.iter().map(|a| d.cidr(a)).collect();
-    // The public IPv6 lives in its own field, not in the targets like the
-    // public IPv4 does, and was the one address the disguise missed.
-    v.public_ipv6 = v.public_ipv6.map(|ip| d.ip(ip));
-    if !v.netinfo.gateway_ipv6.is_empty() {
-        v.netinfo.gateway_ipv6 = d.cidr(&v.netinfo.gateway_ipv6);
-    }
-    v.netinfo.dns = v.netinfo.dns.iter().map(|a| d.cidr(a)).collect();
-    if !v.netinfo.dhcp_server.is_empty() {
-        v.netinfo.dhcp_server = d.cidr(&v.netinfo.dhcp_server);
     }
     if let Some(w) = v.netinfo.wifi.as_mut() {
         w.ssid = d.ssid(&w.ssid);
     }
-    if let Some(p) = v.proxy.as_mut() {
-        use crate::app::ProxyKind;
-        p.kind = match &p.kind {
-            ProxyKind::Manual { .. } => ProxyKind::Manual {
-                http: "proxy.example:8080".into(),
-                https: "proxy.example:8080".into(),
-            },
-            ProxyKind::Pac(_) => ProxyKind::Pac("http://proxy.example/proxy.pac".into()),
-            ProxyKind::Wpad => ProxyKind::Wpad,
-        };
-        p.bypass = String::new();
+    // The public IPv4 lives in the discovered "public IP" target rows (and
+    // the label names it); the public IPv6 in its own field; the edge check
+    // reports what the edge saw us as, over each family.
+    for t in v.targets.iter_mut() {
+        if t.discovered && t.label.contains("public") {
+            t.addr = d.ip(t.addr);
+            if let Some(h) = t.hostname.as_mut()
+                && h.parse::<IpAddr>().is_ok()
+            {
+                *h = d.text(h);
+            }
+        }
+    }
+    v.public_ipv6 = v.public_ipv6.map(|ip| d.ip(ip));
+    for e in [v.edge.as_mut(), v.edge6.as_mut()].into_iter().flatten() {
+        if let Ok(ip) = e.ip.parse::<IpAddr>() {
+            e.ip = d.ip(ip).to_string();
+        }
+    }
+    // Global-scope IPv6 on the interface and its router is public-facing:
+    // the prefix is the ISP's allocation to this line. Link-local and ULA
+    // say no more than 192.168.x does, and stay.
+    v.netinfo.ipv6 = v
+        .netinfo
+        .ipv6
+        .iter()
+        .map(|a| if global_v6(a) { d.cidr(a) } else { a.clone() })
+        .collect();
+    if global_v6(&v.netinfo.gateway_ipv6) {
+        v.netinfo.gateway_ipv6 = d.cidr(&v.netinfo.gateway_ipv6);
     }
 
-    // Targets: discovered ones (gateway, near hops, public IP) and anything on
-    // a private range are ours; well-known targets and far hops pass through.
+    // Everything else is drawn as measured, with the mapping applied where
+    // one of those values turns up again (the router's v6 as a target row,
+    // our public address in an event).
     for t in v.targets.iter_mut() {
-        t.addr = match t.hop_ttl() {
-            Some(ttl) => d.hop_ip(ttl, t.addr),
-            None => d.ip(t.addr),
-        };
-        if let Some(h) = t.hostname.as_mut()
-            && h.parse::<IpAddr>().is_ok()
-        {
-            *h = d.text(h);
-        }
+        t.addr = d.known_ip(t.addr);
         t.label = d.text(&t.label);
     }
     for p in v.dns.iter_mut() {
-        p.server = d.ip(p.server);
+        p.server = d.known_ip(p.server);
     }
     for r in v.remotes.iter_mut() {
-        r.addr = d.ip(r.addr);
+        r.addr = d.known_ip(r.addr);
     }
-    // Pinned remotes follow their rows' fakes, or the pin highlight would
-    // vanish in demo mode — and the drawn copy would still hold a real
-    // address. (Pinned process names are left alone, like process names.)
-    v.pinned_remotes = v.pinned_remotes.iter().map(|a| d.ip(*a)).collect();
+    v.pinned_remotes = v.pinned_remotes.iter().map(|a| d.known_ip(*a)).collect();
     if let Some(m) = v.hop_monitor.as_mut() {
         for h in m.hops.iter_mut() {
-            h.addr = h.addr.map(|a| d.hop_ip(h.ttl, a));
+            h.addr = h.addr.map(|a| d.known_ip(a));
             if let Some(st) = h.stat.as_mut() {
-                st.addr = d.hop_ip(h.ttl, st.addr);
+                st.addr = d.known_ip(st.addr);
             }
         }
-        m.dest = d.ip(m.dest);
+        m.dest = d.known_ip(m.dest);
         m.target = d.text(&m.target);
     }
     if let Some(t) = v.traceroute.as_mut() {
@@ -338,51 +334,44 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
             if let Some(a) = h.addr.as_mut()
                 && let Ok(ip) = a.parse::<IpAddr>()
             {
-                *a = d.hop_ip(h.ttl, ip).to_string();
+                *a = d.known_ip(ip).to_string();
             }
         }
         t.target = d.text(&t.target);
     }
     if let Some(p) = v.pmtu.as_mut() {
-        p.target = d.ip(p.target);
+        p.target = d.known_ip(p.target);
     }
+    // Whois: a record about our own public address names the ISP and the
+    // city, so that one is replaced with an example record. Any other
+    // address's record is the point of asking, and stays.
     if let Some(w) = v.whois.as_mut() {
-        w.addr = d.ip(w.addr);
-        if !w.fields.is_empty() {
-            w.fields = vec![
-                (
-                    "network".into(),
-                    "203.0.113.0 – 203.0.113.255  (203.0.113.0/24)".into(),
-                ),
-                ("name".into(), "EXAMPLE-NET".into()),
-                ("country".into(), "XX".into()),
-                ("registrant".into(), "Example Networks".into()),
-                ("abuse".into(), "abuse@example.net".into()),
-                ("asn".into(), "AS64500 · Example Networks".into()),
-            ];
+        if d.is_known(w.addr) {
+            w.addr = d.known_ip(w.addr);
+            if !w.fields.is_empty() {
+                w.fields = vec![
+                    (
+                        "network".into(),
+                        "203.0.113.0 – 203.0.113.255  (203.0.113.0/24)".into(),
+                    ),
+                    ("name".into(), "EXAMPLE-NET".into()),
+                    ("country".into(), "XX".into()),
+                    ("registrant".into(), "Example Networks".into()),
+                    ("abuse".into(), "abuse@example.net".into()),
+                    ("asn".into(), "AS64500 · Example Networks".into()),
+                ];
+            }
         }
         w.raw = w.raw.iter().map(|l| d.text(l)).collect();
     }
-    // The routing table is raw tool output, full of subnets and neighbours the
-    // substitution map has never seen: a canned table beats an under-disguised
-    // real one.
-    if v.routes.is_some() {
-        v.routes = Some(vec![
-            "Destination        Gateway            Flags     Netif".to_string(),
-            "default            192.168.0.1        UGScg     en0".to_string(),
-            "192.168.0.0/24     link#12            UCS       en0".to_string(),
-            "192.168.0.1/32     link#12            UCS       en0".to_string(),
-        ]);
+    // The routing table is real; neighbour entries can carry a MAC and the
+    // interface's global v6, which the mapping covers.
+    if let Some(routes) = v.routes.as_mut() {
+        *routes = routes.iter().map(|l| d.text(l)).collect();
     }
     if let Some(e) = v.egress.as_mut() {
         for r in e.results.iter_mut() {
             r.check.host = d.text(&r.check.host);
-        }
-    }
-    // The edge's view names our public address, over each family.
-    for e in [v.edge.as_mut(), v.edge6.as_mut()].into_iter().flatten() {
-        if let Ok(ip) = e.ip.parse::<IpAddr>() {
-            e.ip = d.ip(ip).to_string();
         }
     }
     if let Some(m) = v.egress_monitor.as_mut() {
@@ -390,11 +379,11 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
             r.check.host = d.text(&r.check.host);
             r.addr = r
                 .addr
-                .map(|a| std::net::SocketAddr::new(d.ip(a.ip()), a.port()));
+                .map(|a| std::net::SocketAddr::new(d.known_ip(a.ip()), a.port()));
         }
     }
 
-    // Locations: labels that were SSIDs or gateways; user-given names stay.
+    // Locations: labels that were SSIDs; user-given names stay.
     if let Some(b) = v.baseline.as_mut() {
         b.label = d.ssid_or_text(&b.label);
     }
@@ -642,98 +631,24 @@ mod tests {
         }
     }
 
-    /// The near hops place a person; the far ones place nobody. Simon: "we
-    /// only need to fake the first 2-3 hops, after that the IP information
-    /// doesn't really reveal anything about me."
+    /// Simon, after a demo of "which server is the game on" showed a
+    /// TEST-NET address whose whois said Example Networks: "--demo should
+    /// ONLY hide any IP that is sensitive. My local 192.168. isn't, but my
+    /// public IP and MAC address is. Maybe the SSID should also be masked."
     #[test]
-    fn far_hops_keep_their_real_public_addresses() {
-        let mut s = AppState::new(vec![]);
-        s.netinfo.gateway_ip = "10.0.0.1".into();
-        let near = |ttl: u8, ip: &str| {
-            let mut t = TargetStat::new(format!("hop {ttl}→1.1.1.1"), ip.parse().unwrap());
-            t.discovered = true;
-            t
-        };
-        s.targets.push(near(2, "76.14.0.9")); // the ISP's first router
-        s.targets.push(near(3, "76.14.1.1")); // and its second
-        s.targets.push(near(4, "4.69.140.9")); // a backbone router
-        s.targets.push(near(7, "10.250.0.7")); // ISP-internal numbering, far out
-        s.hop_monitor = Some(crate::app::HopMonitor {
-            target: "Cloudflare (1.1.1.1)".into(),
-            dest: "1.1.1.1".parse().unwrap(),
-            hops: vec![
-                crate::app::MonitoredHop {
-                    ttl: 2,
-                    addr: Some("76.14.0.9".parse().unwrap()),
-                    stat: None,
-                },
-                crate::app::MonitoredHop {
-                    ttl: 9,
-                    addr: Some("142.250.160.160".parse().unwrap()),
-                    stat: None,
-                },
-            ],
-            discovering: false,
-            generation: 0,
-            selected: 0,
-        });
-        s.traceroute = Some(crate::app::Traceroute {
-            target: "1.1.1.1".into(),
-            running: false,
-            hops: vec![
-                crate::app::Hop {
-                    ttl: 3,
-                    addr: Some("76.14.1.1".into()),
-                    rtt_ms: None,
-                },
-                crate::app::Hop {
-                    ttl: 11,
-                    addr: Some("142.250.160.160".into()),
-                    rtt_ms: None,
-                },
-            ],
-        });
-
-        let mut d = Disguise::new();
-        let v = disguise(&s, &mut d);
-        let addr = |i: usize| v.targets[i].addr.to_string();
-        assert!(
-            !addr(0).starts_with("76.14."),
-            "hop 2 is the ISP: {}",
-            addr(0)
-        );
-        assert!(
-            !addr(1).starts_with("76.14."),
-            "hop 3 is the ISP: {}",
-            addr(1)
-        );
-        assert_eq!(
-            addr(2),
-            "4.69.140.9",
-            "a far backbone hop is nobody's secret"
-        );
-        assert!(
-            addr(3).starts_with("192.168.0."),
-            "a private hop is rewritten at any distance: {}",
-            addr(3)
-        );
-        let m = v.hop_monitor.unwrap();
-        assert!(!m.hops[0].addr.unwrap().to_string().starts_with("76.14."));
-        assert_eq!(m.hops[1].addr.unwrap().to_string(), "142.250.160.160");
-        let t = v.traceroute.unwrap();
-        assert!(!t.hops[0].addr.as_deref().unwrap().starts_with("76.14."));
-        assert_eq!(t.hops[1].addr.as_deref(), Some("142.250.160.160"));
-    }
-
-    #[test]
-    fn a_state_comes_out_with_nothing_real_left() {
+    fn only_the_public_addresses_macs_and_ssid_are_hidden() {
         let mut s = AppState::new(vec![TargetStat::new(
             "Cloudflare".into(),
             "1.1.1.1".parse().unwrap(),
         )]);
         s.netinfo.iface = "en0".into();
         s.netinfo.ipv4 = vec!["10.20.30.40/24".into()];
+        s.netinfo.ipv6 = vec![
+            "fe80::1031:259c:bc37:2a61/64".into(),
+            "2601:646:8f00:1234:1031:259c:bc37:2a61/64".into(),
+        ];
         s.netinfo.gateway_ip = "10.20.30.1".into();
+        s.netinfo.gateway_ipv6 = "fe80::1".into();
         s.netinfo.mac = "de:ad:be:ef:00:01".into();
         s.netinfo.gateway_mac = "de:ad:be:ef:00:02".into();
         s.netinfo.dns = vec!["10.20.30.1".into(), "1.1.1.1".into()];
@@ -743,60 +658,124 @@ mod tests {
         });
         s.netinfo.dhcp_server = "10.27.88.200".into();
         s.public_ipv6 = Some("2601:646:8f00:1234::5".parse().unwrap());
-        s.pinned_remotes.push("23.93.34.5".parse().unwrap());
+        // The game server the demo is about, and a pin on it.
+        s.remotes.push(crate::app::RemoteBandwidth {
+            addr: "34.46.39.183".parse().unwrap(),
+            port: 9012,
+            ports: 1,
+            process: "FortniteClient".into(),
+            down_bytes: 1,
+            up_bytes: 1,
+            total_bytes: 2,
+            share: 1.0,
+            down_bps: 0.0,
+            up_bps: 0.0,
+        });
+        s.pinned_remotes.push("34.46.39.183".parse().unwrap());
         let mut hop = TargetStat::new("hop 2→1.1.1.1".into(), "76.14.0.9".parse().unwrap());
         hop.discovered = true;
         s.targets.push(hop);
+        let mut public = TargetStat::new("public IP".into(), "23.93.34.5".parse().unwrap());
+        public.discovered = true;
+        s.targets.push(public);
         s.push_event(
             crate::verdict::Severity::Info,
             crate::app::EventCategory::Network,
-            "network changed → en0 · gateway 10.20.30.1".into(),
+            "network changed → en0 · gateway 10.20.30.1 · public 23.93.34.5".into(),
         );
-        // A location named by its SSID label, as the join/loss history writes.
         s.push_event(
             crate::verdict::Severity::Info,
             crate::app::EventCategory::Network,
             "known location → SecretNet".into(),
         );
+
         let mut d = Disguise::new();
         let v = disguise(&s, &mut d);
-        assert_eq!(v.netinfo.gateway_ip, "192.168.0.1");
-        assert!(v.netinfo.ipv4[0].starts_with("192.168.0.") && v.netinfo.ipv4[0].ends_with("/24"));
+
+        // Hidden: MACs, SSID, the public addresses, the global v6.
         assert!(v.netinfo.mac.starts_with("02:"));
+        assert!(v.netinfo.gateway_mac.starts_with("02:"));
         assert_eq!(v.netinfo.wifi.unwrap().ssid, "DemoNet");
-        assert_eq!(
-            v.netinfo.dns[0], "192.168.0.1",
-            "the gateway resolver maps like the gateway"
-        );
-        assert_eq!(v.netinfo.dns[1], "1.1.1.1");
-        assert_eq!(v.targets[0].addr.to_string(), "1.1.1.1", "anchor kept");
-        assert!(!v.targets[1].addr.to_string().starts_with("76.14."));
+        let public_row = v.targets.iter().find(|t| t.label == "public IP").unwrap();
         assert!(
-            v.netinfo.dhcp_server.starts_with("192.168.0."),
+            !public_row.addr.to_string().starts_with("23.93."),
             "{}",
-            v.netinfo.dhcp_server
+            public_row.addr
         );
-        assert_ne!(v.pinned_remotes[0].to_string(), "23.93.34.5");
-        assert_eq!(
-            v.pinned_remotes[0],
-            d.ip("23.93.34.5".parse().unwrap()),
-            "pins carry the same fake as their rows"
-        );
-        assert!(
-            v.events
-                .iter()
-                .all(|e| !e.message.contains("SecretNet") && !e.message.contains("10.20.30.1")),
-            "location names and addresses scrubbed from event text"
-        );
-        assert!(
-            v.events.iter().any(|e| e.message.contains("192.168.0.1")),
-            "the substitution, not deletion"
-        );
-        // The public IPv6 lives in its own field and was the one address the
-        // disguise used to miss.
         let v6 = v.public_ipv6.unwrap().to_string();
         assert!(v6.starts_with("2001:db8:"), "public v6 rewritten: {v6}");
+        assert!(
+            v.netinfo.ipv6[1].starts_with("2001:db8:"),
+            "global v6 rewritten: {}",
+            v.netinfo.ipv6[1]
+        );
+        let event = &v.events[v.events.len() - 2].message;
+        assert!(
+            !event.contains("23.93.34.5"),
+            "public address scrubbed from text: {event}"
+        );
+        assert!(
+            !v.events.back().unwrap().message.contains("SecretNet"),
+            "SSID scrubbed from text"
+        );
+
+        // Real: the LAN, the router, the resolvers, the hops, the remotes.
+        assert_eq!(v.netinfo.gateway_ip, "10.20.30.1");
+        assert_eq!(v.netinfo.ipv4[0], "10.20.30.40/24");
+        assert_eq!(
+            v.netinfo.ipv6[0], "fe80::1031:259c:bc37:2a61/64",
+            "link-local v6 kept"
+        );
+        assert_eq!(v.netinfo.gateway_ipv6, "fe80::1");
+        assert_eq!(v.netinfo.dns, vec!["10.20.30.1", "1.1.1.1"]);
+        assert_eq!(v.netinfo.dhcp_server, "10.27.88.200");
+        assert_eq!(v.targets[0].addr.to_string(), "1.1.1.1");
+        assert_eq!(
+            v.targets[1].addr.to_string(),
+            "76.14.0.9",
+            "the ISP hop is not about me"
+        );
+        assert_eq!(
+            v.remotes[0].addr.to_string(),
+            "34.46.39.183",
+            "the game server is the point"
+        );
+        assert_eq!(v.pinned_remotes[0].to_string(), "34.46.39.183");
+        assert!(
+            event.contains("gateway 10.20.30.1"),
+            "LAN addresses stay in text: {event}"
+        );
         // The live state is untouched.
-        assert_eq!(s.netinfo.gateway_ip, "10.20.30.1");
+        assert_eq!(s.netinfo.mac, "de:ad:be:ef:00:01");
+    }
+
+    /// Whois is the point of asking about a server; about our own address
+    /// it names the ISP and the town.
+    #[test]
+    fn whois_is_real_for_anyone_but_us() {
+        let mut s = AppState::new(vec![]);
+        let mut public = TargetStat::new("public IP".into(), "23.93.34.5".parse().unwrap());
+        public.discovered = true;
+        s.targets.push(public);
+        let record = |addr: &str| crate::app::Whois {
+            addr: addr.parse().unwrap(),
+            running: false,
+            fields: vec![("name".into(), "SONIC-NET".into())],
+            raw: vec![format!("inetnum: {addr}")],
+            source: "rdap.arin.net".into(),
+            error: None,
+        };
+        s.whois = Some(record("34.46.39.183"));
+        let v = disguise(&s, &mut Disguise::new());
+        let w = v.whois.unwrap();
+        assert_eq!(w.addr.to_string(), "34.46.39.183");
+        assert_eq!(w.fields[0].1, "SONIC-NET", "someone else's record is real");
+
+        s.whois = Some(record("23.93.34.5"));
+        let v = disguise(&s, &mut Disguise::new());
+        let w = v.whois.unwrap();
+        assert!(!w.addr.to_string().starts_with("23.93."));
+        assert_eq!(w.fields[1].1, "EXAMPLE-NET", "our own record is canned");
+        assert!(!w.raw[0].contains("23.93.34.5"), "{:?}", w.raw);
     }
 }

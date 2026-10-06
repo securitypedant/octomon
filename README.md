@@ -46,7 +46,8 @@ The panels:
   SSID/channel/signal and airspace congestion, and when notable, proxy,
   clock, path-MTU and NAT rows.
 - **Machine** — "is my box the bottleneck?": CPU with the busiest core, memory
-  pressure, load, interface errors, thermal throttling.
+  pressure, load, interface errors, thermal throttling, and full screen the
+  ten processes using the most CPU, so a maxed CPU comes with a name.
 
 What it looks for beyond the graphs:
 
@@ -203,11 +204,13 @@ octomon --theme light                # auto | dark | light
 **Turn things off:** `--no-speedtest`, `--no-discovery` (skip the startup
 traceroute), `--no-edge` (never call octomon.dev/edge).
 
-**Screen recording:** `--demo` measures for real but shows fake
-MACs/addresses/SSIDs. The gateway and the first three hops are rewritten, the
-rest of a path keeps its real addresses: a backbone router places nobody, and
-the far path is what a traceroute demo is showing. `--demo-mac` disguises only
-this machine's MAC. Neither shows process command lines.
+**Screen recording:** `--demo` measures for real but hides the few things
+that place you: your public IPv4 and IPv6 addresses (and the global IPv6 on
+the interface), the MAC addresses, and the SSID, everywhere they appear. The
+LAN, the resolvers, every hop, the remote addresses the machine talks to and
+their whois records stay real, because they are what a demo is about.
+`--demo-mac` disguises only this machine's MAC. Neither shows process command
+lines.
 
 Scripting a bundle, since it prints its path and nothing else:
 

@@ -7,13 +7,16 @@
 
 use std::sync::{Arc, Mutex};
 
-use sysinfo::System;
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
-use crate::app::AppState;
+use crate::app::{AppState, TOP_PROCS, TopProc};
 use crate::config::Config;
 
 /// The thermal probe shells out, so it runs far less often than the counters.
 const THERMAL_EVERY: u32 = 30;
+/// Walking the process table costs tens of milliseconds on a busy machine;
+/// every other sample is plenty for "what is eating the CPU".
+const PROCS_EVERY: u32 = 2;
 
 pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
     let mut sys = System::new();
@@ -52,9 +55,60 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         } else {
             None
         };
+        // The busiest processes. The cpu figure is per core, the convention
+        // of Activity Monitor, top and htop: one fully busy core is 100%, a
+        // multithreaded build can read 400%. The first cut divided by the
+        // core count so the rows added up to the gauge above, and a
+        // swift-frontend at 73% in Activity Monitor read 4% here — nobody
+        // compares against the gauge, they compare against the tool they
+        // know. The first refresh has no previous sample and reads every
+        // process at zero, which the filter drops rather than showing ten
+        // idle rows.
+        let top = if tick.is_multiple_of(PROCS_EVERY) {
+            sys.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::nothing().with_cpu().with_memory(),
+            );
+            let row = |p: &sysinfo::Process| TopProc {
+                pid: p.pid().as_u32(),
+                name: p.name().to_string_lossy().into_owned(),
+                cpu_pct: p.cpu_usage(),
+                mem: p.memory(),
+            };
+            let mut all: Vec<TopProc> = sys.processes().values().map(row).collect();
+            // The union of the top ten by CPU and the top ten by memory:
+            // the panel sorts by whichever column is chosen, and either
+            // answer has to be in the list for that to mean anything.
+            all.sort_by(|a, b| b.cpu_pct.total_cmp(&a.cpu_pct));
+            let mut top: Vec<TopProc> = all
+                .iter()
+                .filter(|p| p.cpu_pct > 0.0)
+                .take(TOP_PROCS)
+                .cloned()
+                .collect();
+            all.sort_by_key(|p| std::cmp::Reverse(p.mem));
+            for p in all.iter().filter(|p| p.mem > 0).take(TOP_PROCS) {
+                if !top.iter().any(|t| t.pid == p.pid) {
+                    top.push(p.clone());
+                }
+            }
+            let own = sys
+                .process(sysinfo::Pid::from_u32(std::process::id()))
+                .map(row);
+            Some((top, own))
+        } else {
+            None
+        };
+        let uptime = System::uptime();
         tick = tick.wrapping_add(1);
 
         let mut s = state.lock().unwrap();
+        if let Some((top, own)) = top {
+            s.vitals.top_procs = top;
+            s.vitals.own = own;
+        }
+        s.vitals.uptime_secs = uptime;
         s.vitals.cpu_pct = cpu;
         s.vitals.cores = cores;
         s.vitals.mem_used = used;

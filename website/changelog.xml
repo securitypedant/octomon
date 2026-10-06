@@ -7,6 +7,19 @@
   <description>Every octomon release, newest first, with what changed and why.</description>
   <language>en</language>
   <item>
+    <title>octomon 0.11.4</title>
+    <link>https://octomon.dev/changelog#v0.11.4</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.11.4</guid>
+    <pubDate>Mon, 05 Oct 2026 00:00:00 GMT</pubDate>
+    <description>What is eating the CPU, and a demo mode that hides only what places you.</description>
+    <content:encoded><![CDATA[<p>What is eating the CPU, and a demo mode that hides only what places you.</p>
+<ul>
+<li>Machine panel, full screen: the busiest processes, up to ten, with CPU and memory, beside the summary lines. <code>←</code>/<code>→</code> pick the cpu or mem column and <code>Enter</code> sorts by it or flips the direction, as in the talkers tables. The CPU figure is per core, the convention of Activity Monitor, top and htop, so it reads the same as the tool you would check it against. The &quot;machine under load&quot; finding names the busiest three, and the doctor and bundle text carry them too.</li>
+<li>Three more lines under the gauges in full screen: octomon&#39;s own footprint (so a monitor on a struggling machine can show it is not the problem), the connection count (remotes active now, remotes seen this session, processes talking), and the uptime.</li>
+<li><code>--demo</code> hides only the things that place you: the public IPv4 and IPv6 addresses (and the global IPv6 on the interface and its router), the MAC addresses, and the SSID, wherever they appear. The LAN, the resolvers, every hop, the remote addresses the machine talks to and their whois records stay real. It used to rewrite all of those, and a demo of &quot;which server is the game on&quot; showed a TEST-NET address whose whois said Example Networks.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
     <title>octomon 0.11.3</title>
     <link>https://octomon.dev/changelog#v0.11.3</link>
     <guid isPermaLink="false">https://octomon.dev/changelog/v0.11.3</guid>

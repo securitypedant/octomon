@@ -344,8 +344,18 @@
       "url": "https://octomon.dev/images/octomon-icon-tile.png"
     }
   },
-  "dateModified": "2026-09-26",
+  "dateModified": "2026-10-05",
   "hasPart": [
+    {
+      "@type": "SoftwareApplication",
+      "name": "octomon",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "macOS, Linux, Windows",
+      "softwareVersion": "0.11.4",
+      "datePublished": "2026-10-05",
+      "releaseNotes": "https://octomon.dev/changelog#v0.11.4",
+      "url": "https://github.com/securitypedant/octomon/releases/tag/v0.11.4"
+    },
     {
       "@type": "SoftwareApplication",
       "name": "octomon",
@@ -840,7 +850,7 @@
         binaries for macOS, Linux and Windows.</p>
       </div>
       <ul class="versions">
-        <li class="vgroup"><span class="vlabel">0.11</span><a href="#v0.11.3">0.11.3</a><a href="#v0.11.2">0.11.2</a><a href="#v0.11.1">0.11.1</a><a href="#v0.11.0">0.11.0</a></li>
+        <li class="vgroup"><span class="vlabel">0.11</span><a href="#v0.11.4">0.11.4</a><a href="#v0.11.3">0.11.3</a><a href="#v0.11.2">0.11.2</a><a href="#v0.11.1">0.11.1</a><a href="#v0.11.0">0.11.0</a></li>
         <li class="vgroup"><span class="vlabel">0.10</span><a href="#v0.10.1">0.10.1</a><a href="#v0.10.0">0.10.0</a></li>
         <li class="vgroup"><span class="vlabel">0.9</span><a href="#v0.9.8">0.9.8</a><a href="#v0.9.7">0.9.7</a><a href="#v0.9.6">0.9.6</a><a href="#v0.9.5">0.9.5</a><a href="#v0.9.4">0.9.4</a><a href="#v0.9.3">0.9.3</a><a href="#v0.9.2">0.9.2</a><a href="#v0.9.1">0.9.1</a><a href="#v0.9.0">0.9.0</a></li>
         <li class="vgroup"><span class="vlabel">0.8</span><a href="#v0.8.2">0.8.2</a><a href="#v0.8.1">0.8.1</a><a href="#v0.8.0">0.8.0</a></li>
@@ -858,6 +868,17 @@
   <section>
     <div class="wrap">
       <div class="post">
+
+        <article class="release" id="v0.11.4">
+          <h2><a href="#v0.11.4">0.11.4</a></h2>
+          <p class="relmeta"><time datetime="2026-10-05">5 October 2026</time> · <a href="https://github.com/securitypedant/octomon/releases/tag/v0.11.4">release on GitHub</a></p>
+          <p class="relsummary">What is eating the CPU, and a demo mode that hides only what places you.</p>
+          <ul>
+          <li>Machine panel, full screen: the busiest processes, up to ten, with CPU and memory, beside the summary lines. <code>←</code>/<code>→</code> pick the cpu or mem column and <code>Enter</code> sorts by it or flips the direction, as in the talkers tables. The CPU figure is per core, the convention of Activity Monitor, top and htop, so it reads the same as the tool you would check it against. The &quot;machine under load&quot; finding names the busiest three, and the doctor and bundle text carry them too.</li>
+          <li>Three more lines under the gauges in full screen: octomon&#39;s own footprint (so a monitor on a struggling machine can show it is not the problem), the connection count (remotes active now, remotes seen this session, processes talking), and the uptime.</li>
+          <li><code>--demo</code> hides only the things that place you: the public IPv4 and IPv6 addresses (and the global IPv6 on the interface and its router), the MAC addresses, and the SSID, wherever they appear. The LAN, the resolvers, every hop, the remote addresses the machine talks to and their whois records stay real. It used to rewrite all of those, and a demo of &quot;which server is the game on&quot; showed a TEST-NET address whose whois said Example Networks.</li>
+          </ul>
+        </article>
 
         <article class="release" id="v0.11.3">
           <h2><a href="#v0.11.3">0.11.3</a></h2>

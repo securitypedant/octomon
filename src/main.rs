@@ -2333,6 +2333,21 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     // Both tables have seven columns; see `AppState::bw_col`.
                     s.bw_col = (s.bw_col + 1).min(6);
                 }
+                // Machine: the busiest-processes table sorts by cpu or mem,
+                // the same ←/→ + Enter the talkers tables use.
+                KeyCode::Left if s.focus == Panel::Vitals => {
+                    s.proc_col = 0;
+                }
+                KeyCode::Right if s.focus == Panel::Vitals => {
+                    s.proc_col = 1;
+                }
+                KeyCode::Enter if s.focus == Panel::Vitals => {
+                    let col = s.proc_col;
+                    s.proc_sort = match s.proc_sort {
+                        (c, desc) if c == col => (c, !desc),
+                        _ => (col, true),
+                    };
+                }
                 // Bandwidth: one key walks every lower pane — processes, the
                 // remote addresses they talk to, and (full-screen) the speed
                 // history. Moving between the two talkers tables resets the
@@ -3201,6 +3216,15 @@ fn snapshot_text(s: &AppState) -> String {
     );
     if let Some((i, pct)) = v.hottest_core() {
         println!("  hottest core: {} at {pct:.0}%", i + 1);
+    }
+    if !v.top_procs.is_empty() {
+        let busiest: Vec<String> = v
+            .top_procs
+            .iter()
+            .take(5)
+            .map(|p| format!("{} {:.0}%", p.name, p.cpu_pct))
+            .collect();
+        println!("  busiest: {}", busiest.join(", "));
     }
     if !v.thermal.is_empty() || !v.power_source.is_empty() {
         println!(
