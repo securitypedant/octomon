@@ -48,8 +48,16 @@ jobs:
       # v0.11.3, 14,593 commits behind) even though it is a clean
       # fast-forward. Doing it here first, with the same token, keeps the
       # fork current and the submission reliable.
+      #
+      # Best-effort: when upstream's new commits touch workflow files, GitHub
+      # refuses the merge unless the token carries the `workflow` scope
+      # (v0.11.4: "Upstream commits contain workflow changes, which require
+      # the `workflow` scope"). The submission step still runs; wingetcreate
+      # syncs the fork itself when it is not too far behind. To make this
+      # step reliable, grant WINGET_TOKEN the `workflow` scope.
       - name: Sync the winget-pkgs fork with upstream
         shell: pwsh
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
         run: gh repo sync securitypedant/winget-pkgs
