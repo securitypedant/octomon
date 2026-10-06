@@ -9,11 +9,10 @@ binaries for macOS, Linux and Windows.
 
 ## 0.11.4 · 2026-10-05
 
-What is eating the CPU, and a demo mode that hides only what places you.
+What is eating the CPU.
 
 - Machine panel, full screen: the busiest processes, up to ten, with CPU and memory, beside the summary lines. `←`/`→` pick the cpu or mem column and `Enter` sorts by it or flips the direction, as in the talkers tables. The CPU figure is per core, the convention of Activity Monitor, top and htop, so it reads the same as the tool you would check it against. The "machine under load" finding names the busiest three, and the doctor and bundle text carry them too.
 - Three more lines under the gauges in full screen: octomon's own footprint (so a monitor on a struggling machine can show it is not the problem), the connection count (remotes active now, remotes seen this session, processes talking), and the uptime.
-- `--demo` hides only the things that place you: the public IPv4 and IPv6 addresses (and the global IPv6 on the interface and its router), the MAC addresses, and the SSID, wherever they appear. The LAN, the resolvers, every hop, the remote addresses the machine talks to and their whois records stay real. It used to rewrite all of those, and a demo of "which server is the game on" showed a TEST-NET address whose whois said Example Networks.
 
 ## 0.11.3 · 2026-09-26
 
