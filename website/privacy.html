@@ -289,6 +289,45 @@
     </div>
   </section>
 
+  <section id="code-signing">
+    <div class="wrap">
+      <h2>Code signing</h2>
+      <p>Windows binaries of octomon are signed. <strong>Free code signing
+      provided by <a href="https://signpath.io">SignPath.io</a>, certificate
+      by <a href="https://signpath.org">SignPath Foundation</a>.</strong>
+      Every release is built by GitHub Actions from the public repository,
+      and the signing request is made from inside that build, so what is
+      signed is what the published source produces. Each release's signature
+      is approved by hand before it is issued.</p>
+      <p>The people involved, by role:</p>
+      <ul>
+        <li><strong>Author</strong>, who writes the code: Simon Thorpe
+        (<a href="https://github.com/securitypedant">securitypedant</a>).</li>
+        <li><strong>Reviewer</strong>, who reviews changes before they are
+        merged: Simon Thorpe.</li>
+        <li><strong>Approver</strong>, who approves each release for signing:
+        Simon Thorpe.</li>
+      </ul>
+      <p>On data, the statement SignPath asks every signed project to make,
+      and which this whole page exists to back up: <strong>This program will
+      not transfer any information to other networked systems unless
+      specifically requested by the user or the person installing or
+      operating it.</strong> Running a network monitor is that request: the
+      pings, DNS queries and connectivity checks it sends are the
+      measurements you started it to take, every one is listed in the
+      <a href="https://github.com/securitypedant/octomon#network--privacy">README's
+      network table</a>, and the only endpoint we operate is described above.
+      Nothing about you is sent anywhere, and nothing is sent at all unless
+      octomon is running.</p>
+      <p>To check a download yourself: every release on GitHub publishes a
+      <code>.sha256</code> beside each archive, the Windows installer verifies
+      the archive it downloads against that checksum before unpacking it, and
+      winget verifies the same hash from its manifest. A signed
+      <code>octomon.exe</code> shows SignPath Foundation as the publisher in
+      its file properties.</p>
+    </div>
+  </section>
+
   <section>
     <div class="wrap">
       <h2>Your own data, on your own disk</h2>
