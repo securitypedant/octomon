@@ -351,3 +351,12 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  custom-windows-installer:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/windows-installer.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit

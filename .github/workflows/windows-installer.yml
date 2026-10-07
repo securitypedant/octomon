@@ -1,0 +1,65 @@
+# Windows installer: make `irm … | iex` verify what it downloads.
+#
+# dist's shell installer embeds each archive's SHA-256 and refuses to unpack
+# a download that does not match. Its PowerShell installer (dist 0.32, and
+# the template on main) performs no integrity check at all. This runs as a
+# dist post-announce job, inside the Release run once the GitHub release
+# exists: it fetches the installer and the Windows archives from the
+# release, hashes the archives, patches the check into the installer, and
+# uploads the result over the original. The patch script fails loudly if
+# dist's template has changed under it, so a release can never quietly ship
+# an unverified installer.
+#
+# The hashes are taken from the archives as published — not from
+# dist-manifest.json — so a future signing step that replaces the archives
+# need only run this job again. workflow_dispatch exists for exactly that,
+# and for patching a release that has already shipped.
+name: Windows installer
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag whose installer to patch (e.g. v0.11.4)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || fromJson(inputs.plan).announcement_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch the installer and the Windows archives from the release
+        run: |
+          mkdir -p work && cd work
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" \
+            -p 'octomon-installer.ps1' -p 'octomon-*-pc-windows-msvc.zip'
+          ls -la
+      - name: Embed the archive checksums and the verification step
+        run: |
+          python3 .github/scripts/patch-installer-checksums.py \
+            work/octomon-installer.ps1 work/octomon-*-pc-windows-msvc.zip
+      - name: Parse the patched installer
+        shell: pwsh
+        run: |
+          $tokens = $null; $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "$PWD/work/octomon-installer.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.ToString() }; exit 1 }
+          Select-String -Path work/octomon-installer.ps1 -Pattern 'Get-FileHash' | Out-Null
+          "parsed cleanly"
+      - name: Upload it over the original
+        run: |
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" work/octomon-installer.ps1 --clobber

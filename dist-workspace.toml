@@ -29,6 +29,10 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
+# After the GitHub release exists: make the PowerShell installer verify the
+# archives it downloads (dist's shell installer does, its PowerShell one
+# does not). See .github/workflows/windows-installer.yml.
+post-announce-jobs = ["./windows-installer"]
 
 # Build ARM64 Windows on ARM64 hardware. ring compiles its C with clang on
 # Windows AArch64 and fails without it, which is easier to satisfy on a native
