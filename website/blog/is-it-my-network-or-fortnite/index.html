@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>octomon: Four terminals, several tools, and no easy answer</title>
-<meta name="description" content="Every time my Internet connection wavered, ping, traceroute and btop each gave me a glimpse of the problem and never the answer. So I built octomon.">
+<title>octomon: Monitor Fortnite (or any game) lag during gaming in real time</title>
+<meta name="description" content="Lag has two suspects, your connection and the game's servers. Here is how to use octomon to work out which one it is, in about the time it takes to respawn.">
 <meta name="author" content="Simon Thorpe">
-<link rel="canonical" href="https://octomon.dev/blog/why-i-built-octomon/">
+<link rel="canonical" href="https://octomon.dev/blog/is-it-my-network-or-fortnite/">
 <link rel="alternate" type="application/rss+xml" title="octomon blog" href="/blog/feed.xml">
 <link rel="alternate" type="application/rss+xml" title="octomon releases" href="/changelog.xml">
 <link rel="icon" type="image/png" sizes="32x32" href="/images/octomon-logo-32.png">
@@ -15,18 +15,18 @@
 <meta property="og:site_name" content="octomon">
 <meta property="og:locale" content="en_GB">
 <meta property="og:type" content="article">
-<meta property="og:url" content="https://octomon.dev/blog/why-i-built-octomon/">
-<meta property="og:title" content="Four terminals, several tools, and no easy answer">
-<meta property="og:description" content="Every time my Internet connection wavered, ping, traceroute and btop each gave me a glimpse of the problem and never the answer. So I built octomon.">
-<meta property="og:image" content="https://octomon.dev/blog/why-i-built-octomon/card.png">
+<meta property="og:url" content="https://octomon.dev/blog/is-it-my-network-or-fortnite/">
+<meta property="og:title" content="Monitor Fortnite (or any game) lag during gaming in real time">
+<meta property="og:description" content="Lag has two suspects, your connection and the game's servers. Here is how to use octomon to work out which one it is, in about the time it takes to respawn.">
+<meta property="og:image" content="https://octomon.dev/blog/is-it-my-network-or-fortnite/card.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="Four terminals, several tools, and no easy answer">
+<meta property="og:image:alt" content="Monitor Fortnite (or any game) lag during gaming in real time">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Four terminals, several tools, and no easy answer">
-<meta name="twitter:description" content="Every time my Internet connection wavered, ping, traceroute and btop each gave me a glimpse of the problem and never the answer. So I built octomon.">
-<meta name="twitter:image" content="https://octomon.dev/blog/why-i-built-octomon/card.png">
-<meta property="article:published_time" content="2026-08-28">
+<meta name="twitter:title" content="Monitor Fortnite (or any game) lag during gaming in real time">
+<meta name="twitter:description" content="Lag has two suspects, your connection and the game's servers. Here is how to use octomon to work out which one it is, in about the time it takes to respawn.">
+<meta name="twitter:image" content="https://octomon.dev/blog/is-it-my-network-or-fortnite/card.png">
+<meta property="article:published_time" content="2026-10-07">
 <meta property="article:author" content="Simon Thorpe">
 <link rel="stylesheet" href="/tokens.css">
 <style>
@@ -281,16 +281,16 @@
 {
   "@context": "https://schema.org",
   "@type": "BlogPosting",
-  "@id": "https://octomon.dev/blog/why-i-built-octomon/",
+  "@id": "https://octomon.dev/blog/is-it-my-network-or-fortnite/",
   "mainEntityOfPage": {
     "@type": "WebPage",
-    "@id": "https://octomon.dev/blog/why-i-built-octomon/"
+    "@id": "https://octomon.dev/blog/is-it-my-network-or-fortnite/"
   },
-  "url": "https://octomon.dev/blog/why-i-built-octomon/",
-  "headline": "Four terminals, several tools, and no easy answer",
-  "description": "Every time my Internet connection wavered, ping, traceroute and btop each gave me a glimpse of the problem and never the answer. So I built octomon.",
-  "datePublished": "2026-08-28",
-  "dateModified": "2026-08-28",
+  "url": "https://octomon.dev/blog/is-it-my-network-or-fortnite/",
+  "headline": "Monitor Fortnite (or any game) lag during gaming in real time",
+  "description": "Lag has two suspects, your connection and the game's servers. Here is how to use octomon to work out which one it is, in about the time it takes to respawn.",
+  "datePublished": "2026-10-07",
+  "dateModified": "2026-10-07",
   "author": {
     "@type": "Person",
     "name": "Simon Thorpe",
@@ -305,8 +305,8 @@
       "url": "https://octomon.dev/images/octomon-icon-tile.png"
     }
   },
-  "image": "https://octomon.dev/blog/why-i-built-octomon/card.png",
-  "wordCount": 1597,
+  "image": "https://octomon.dev/blog/is-it-my-network-or-fortnite/card.png",
+  "wordCount": 1552,
   "inLanguage": "en-GB",
   "isPartOf": {
     "@type": "Blog",
@@ -360,142 +360,125 @@
 <main>
   <div class="pagehead">
     <div class="wrap">
-      <h1>Four terminals, several tools, and no easy answer</h1>
-      <p class="postmeta"><time datetime="2026-08-28">28 August 2026</time> · 7 min read</p>
-      <p class="lede">Every time my Internet connection wavered, ping, traceroute and btop each gave me a glimpse of the problem and never the answer. So I built octomon.</p>
+      <h1>Monitor Fortnite (or any game) lag during gaming in real time</h1>
+      <p class="postmeta"><time datetime="2026-10-07">7 October 2026</time> · 7 min read</p>
+      <p class="lede">Lag has two suspects, your connection and the game's servers. Here is how to use octomon to work out which one it is, in about the time it takes to respawn.</p>
     </div>
   </div>
 
   <section>
     <div class="wrap">
       <article class="post">
-        <p>I run my own DNS at home as part of an Active Directory deployment. I don&#39;t know
-        if I even need it anymore, or if I could do something better, but it helps my 
-        family authenticate to the local NAS, I can apply some simple group policy and
-        a few other AD benefits. The domain controller runs in Proxmox, and sometimes
-        the server just hangs. I&#39;ve not had time to really diagnose why, but when it does,
-        Internet connectivity is impacted (It&#39;s always DNS, am I right?). Then last month mice decided to chew through
-        the fiber cables for my Sonic fiber Internet connection and from my backyard office to the house.</p>
+        <p>I hear it a lot from my kids... &quot;Agghhh the lag!&quot; I&#39;m a networking professional
+        and have spent a lot of time making my home network run smoothly (along with
+        an unhealthy addiction to UniFi gear). So when my sons blame the network, I 
+        have to prove it&#39;s not MY network, but something on the Internet.</p>
+        <p>This is the thing octomon is for. Not to make the game faster, it cannot do
+        that, but to answer one question quickly: is the lag on my network or is it 
+        closer to the game servers? It works for any online game,
+        Fortnite is just the one that gets played the most in our house.</p>
+        <p>Before we get into the details of the tool, it&#39;s important to understand the different parts of the network path and where lag can occur.</p>
         <figure>
-          <img src="mice-eating-fiber.png" alt="The corner of a painted interior wall with the plaster gnawed away along the base, rubble and chewed debris heaped on the floor, and a pale green fiber cable bitten clean through, its severed end hanging loose beside the intact white cables">
-          <figcaption>Mice ate my fiber connection</figcaption>
+          <img src="path-to-fortnite.svg" alt="The path from your PC up to a Fortnite server, bottom to top: your PC connects over Wi-Fi or a cable to your gateway at hop 1, then your ISP's routers at hops 2 to 4, then the Internet at hops 5 and up where some hops stay silent, then the Fortnite server inside AWS at the top, which ignores pings. octomon's built-in targets, 1.1.1.1, 8.8.8.8 and 9.9.9.9, hang off the Internet and answer pings from anywhere. A strip down the left divides the path into your side in green, your ISP in amber, and the Internet and Epic's game servers in magenta.">
+          <figcaption>Every packet in the match crosses all of this. The question is which stretch is losing them.</figcaption>
         </figure>
 
-        <p>Within a minute I had four terminals open: ping to the
-        gateway, ping to 1.1.1.1, a traceroute crawling out somewhere past my ISP, a few dig lookups and
-        btop, because it is always worth ruling out my own laptop before blaming
-        anything else. Between them they gave me about nine numbers. None of them
-        answered the question I actually had, which was whether to keep waiting or give
-        up and tether to my phone.</p>
-        <p>I have been doing that for thirty years. So has everybody else.</p>
-        <p>So I created octomon: a btop-style terminal dashboard that puts
-        your whole Internet connection on one screen and names the layer at fault,
-        whether that is your Wi-Fi, your ISP or the Internet.</p>
-        <h2>The gap is not measurement</h2>
-        <p>Every one of those tools is excellent, and every one of them is clear about a
-        narrow thing. <code>ping</code> tells you the round-trip time to one address. <code>traceroute</code>
-        gives you the path as it looked thirty seconds ago, with a wall of asterisks
-        where routers were told not to answer. <code>btop</code> reveals if your CPU is the problem.
-        <code>bandwhich</code> tells you which process is using the bandwidth. All true, all correct,
-        and all relied on me to connect the dots about what was going on with my Internet 
-        connectivity.</p>
-        <p>Over the years I&#39;ve put together little Bash or Powershell scripts to combine 
-        these tools into some sort of analysis. The scripts were pretty good, 
-        but they were brittle and OS dependant. Then I turned to Python and started 
-        my own <a href="https://github.com/securitypedant/ispmonitor">homegrown ISP monitor</a>.
-        I wanted something to send to my ISP when things went wrong. But it wasn&#39;t 
-        really what I wanted and I had to deploy a whole webstack and expose access 
-        to it... it never went anywhere.</p>
-        <p>Recently I wanted to learn Rust. I started a few little projects with Claude Code
-        helping me learn as I built. Then the Internet went down again (Damn Proxmox server!) 
-        and I decided to combine my learning of Rust with the desire to build a decent CLI
-        based Internet connectivity tool.</p>
-        <h2>Introducing octomon</h2>
-        <p>I love <code>btop</code>. One glance and I can see what&#39;s going on with my machine. I wanted
-        to recreate something similar, but to show everything related to my Internet connection.
-        A quick search of github, brew, Google, the usual places I go to find software, 
-        and I couldn&#39;t find an existing tool. So I started to create one. (Oh and also use AI to help me build it and learn Rust at the same time.)</p>
-        <p>I wanted to focus on two goals.</p>
-        <ul>
-        <li>Quickly display a summary of my Internet connectivity</li>
-        <li>Triage the data collected and maybe generate a single opinion</li>
-        </ul>
-        <h2>One screen instead of four</h2>
-        <p>What replaced the four terminals is not all that clever. Connection quality, bandwidth,
-        network and machine performance, all on screen at once, each panel probing and grading its
-        own layer, with the analysis sitting on top and composing them into one answer. In
-        my 30 years of working in the technology industry, I&#39;ve been a passionate UX designer (My first real job was designing game interfaces, anyone ever play <a href="https://en.wikipedia.org/wiki/Championship_Manager">Championship Manager</a>?).
-        So I wanted the dashboard to look good and be easy to read. Note, when I say &quot;easy
-        to read&quot; I mean by a network or IT admin. octomon is built for people who already
-        know what a gateway, a resolver and a p95 are.</p>
+        <p>So how do you use this tool? Typically, you want to run it on the computer you are playing on. If you are a console user, you can run this on a PC or laptop at the same time, but it won&#39;t be quite as useful.</p>
+        <p>Watch a video of me explaining how this whole thing works.</p>
+        <iframe class="video-frame"
+          src="https://www.youtube-nocookie.com/embed/bH9Jj0i5hDw"
+          title="Is Fortnite lag your network or their servers? Find out with octomon"
+          loading="lazy"
+          allow="encrypted-media; picture-in-picture; fullscreen"
+          allowfullscreen
+          referrerpolicy="strict-origin-when-cross-origin"></iframe>
+
+        <h2>1. Start octomon before you start the game</h2>
+        <p>octomon learns what your network normally looks like, so start it first for 
+        10 mins before you start playing.
+        Open a terminal, run <code>octomon</code>, and look at the title of the Network panel.
+        It will say something like &quot;Network · learning 2/5m&quot;. After five 
+        minutes (without any network issues) it drops the &quot;learning&quot; and from then on its network analysis is judged against <em>your</em> normal. While it learns, press <code>N</code> and give the network a name, e.g. &quot;Home&quot;. </p>
+        <h2>2. Start the game and find its traffic</h2>
+        <p>Start Fortnite and get into a match. Now look at the Bandwidth panel in
+        octomon and press <code>f</code> to make it full screen. 
+        Below the graphs is the talkers table, the processes on your machine
+        that are moving packets. Press <code>/</code> and type <code>fortnite</code> to filter it, or just
+        find <code>FortniteClient</code> in the list. Put the cursor on it and press <code>p</code> to pin
+        it. A pinned row stays at the top while everything else churns. </p>
+        <p>Press <code>n</code> to switch the table from processes to remotes. Now you are looking at
+        the addresses the game is talking to. There will be a handful: a few HTTPS
+        connections to Epic&#39;s services, and one address with a high port number, often
+        around 9000, carrying most of the traffic. That is the game server for the
+        match you are in. Use the same search with <code>/</code> and pin that one too. You want to find the address that has the most active network traffic.</p>
+        <p>When you have an address selected, press <code>W</code> to do a whois search. This gives you 
+        information about who the IP address is owned by. In my experience so far, 
+        Fortnite servers run on Amazon (AWS). So if your whois returns Amazon, you have the right one.</p>
         <figure>
-          <img src="united-wifi.png" alt="The octomon dashboard on United WiFi, four panels at once. Connection quality shows every anchor sitting around 650ms with 0 to 13% loss and the gateway at 100%; the path table has more unresponsive hops than answering ones; the network panel names the ISP as ViaSat and the nearest Cloudflare PoP as Newark; bandwidth and machine graphs run down the right. The status line reads connection healthy, performance poor">
-          <figcaption>United Airlines WiFi connection summary as I write this article.</figcaption>
+          <img src="aws-whois.png" alt="octomon's whois overlay, titled who owns this address, for 18.239.199.123: network 18.238.0.0/15, name AMAZON-CF, type ALLOCATION, registrant Amazon.com, Inc., abuse trustandsafety@support.aws.com, ASN AS16509 AMAZON-02, prefix 18.239.196.0/22, source rdap.arin.net.">
+          <figcaption>Press W on the busy address. Amazon as the registrant means you have found the game server.</figcaption>
         </figure>
 
-        <p>The graphs deliver the raw data and are redrawn every second. The analysis is
-        deliberately slower than they are, because one dropped ping is not an outage,
-        and a verdict that repainted itself every second would be noise rather than
-        judgement.</p>
-        <h2>Making sense of the data</h2>
-        <p>Your gateway might be dropping pings while every hop past it is clean: that&#39;s a
-        router with a policy, not an outage, and airport, hotel and office networks do
-        it constantly. Your resolver is slow but a public reference resolver answers
-        instantly from the same machine: that&#39;s a DNS problem, not a connectivity one,
-        and the fix is switching resolvers rather than phoning your ISP. Your CPU is
-        pinned and your throughput is down: the machine is a caveat printed next to the
-        network finding, not a reason to hide it. You are downloading an ISO: the
-        saturation is yours. Blaming the network for your own ISO download helps nobody.</p>
-        <p>I wanted something akin to the triage nurse in the ER (or A&amp;E for my family back home). 
-        So I built some simple logic to try and rank the impact of the data points. 
-        No, this isn&#39;t some AI powered summary, it&#39;s just me hacking together some 
-        basic opinions. It&#39;s not perfect, but it&#39;s getting better and it&#39;s a lot better 
-        than my collection of scripts.</p>
+        <h2>3. Add the game server to Connection Quality</h2>
+        <p>With the cursor on the busiest remote IP address, press <code>a</code>. octomon offers that address as a new target for the Connection Quality panel. Press Enter and it appears
+        in the table with the built-in targets.</p>
+        <p>Sometimes the server might be shown in red, and that&#39;s fine. 
+        Game servers might never answer pings. They may ignore ICMP by policy, and the game works regardless. octomon knows this. I&#39;ve found that most Fortnite game servers
+        do reply to pings.</p>
+        <p>The useful part is the path. Put the cursor on the game server row and press
+        <code>m</code>. octomon traces the route to it and then keeps pinging every hop along the
+        way, once a second, with a latency and loss graph per hop. Some hops
+        between your network and the server will likely be silent, that is the same ICMP policy at work, but the hops that matter are the ones you can see: your router, your ISP&#39;s first routers, the handoff into the cloud provider&#39;s network.</p>
         <figure>
-          <img src="analysis.png" alt="The octomon analysis overlay: a ticked list covering machine, link, gateway, DNS, ISP path, internet, web and destinations, then checks for discovery, edge, public IP, NAT, clock, proxy, path MTU and DNS honesty. Gateway loss of 100% and internet loss of 11% are both annotated as normal here. Performance reads poor, latency 672ms, jitter 55ms, loss 15%, and the one finding says Cloudflare is degraded at 25% loss while your connection is fine">
-          <figcaption>Still amazed how good Internet on a plane can be.</figcaption>
+          <img src="aws-trace.png" alt="octomon's Path panel monitoring 18.239.199.123 over ICMP, live. Hop 1 is the gateway 192.168.1.1 at 10ms average, hops 2 to 4 are the ISP's routers at 14 to 38ms average with 0% loss, hops 5 to 11 are seven hops not responsive, hop 12 answers at 16ms, hops 13 to 20 are eight hops not responsive, and the destination answers at 20ms average with 0% loss. Each answering hop has a latency bar graph to its right, mostly green with a few amber and red spikes.">
+          <figcaption>The path to the game server, monitored once a second. The silent stretches are routers that ignore pings; the hops that answer are the ones that matter.</figcaption>
         </figure>
 
-        <p>I designed octomon to rank a symptom below its cause rather than letting it shout over
-        the top, it reports simultaneous causes rather than picking a favourite, and treats
-        a busy machine or an active VPN as a caveat instead of an excuse. Every finding
-        carries how long it has been going on, because &quot;for six seconds&quot; and &quot;for forty
-        minutes&quot; are different problems with different answers.</p>
-        <p>I&#39;m on a plane right now and the analysis says
-        <span style="color: var(--octo-green)">● connection healthy</span> ·
-        <span style="color: var(--octo-red)">performance poor</span>.
-        That&#39;s pretty much my experience.</p>
-        <h2>The thing four terminals cannot know</h2>
-        <p>I then realized another problem I didn&#39;t envisage. None of those tools knows where you are
-        sitting. <code>ping</code> does not know that 200 ms is a disaster on office fiber and a
-        good day on a plane, so it prints the number and leaves the arithmetic to you.
-        Get that math wrong and you spend an hour blaming an ISP that is fine.</p>
-        <p>octomon learns a normal for every network it joins and grades against that, with
-        absolute floors so that &quot;relative to normal&quot; cannot quietly excuse a network
-        that has been bad since you arrived. I actually think that argument needs its own 
-        post, so I wrote <a href="/blog/plane-wifi-is-not-broken/">one</a>.</p>
-        <h2>Why it lives in a terminal</h2>
-        <p>Timing. Because I designed this primarily for people like me who understand networking.
-        I typically reach for a tool like this when something is already wrong, and that
-        is usually the worst possible moment to be asking for anything: somebody else&#39;s
-        network, a work laptop where you do not have admin, an SSH session into a box
-        you would rather not escalate on. A tool that demands root right then is a tool
-        you do not run. octomon runs unprivileged by design, never asks for a password,
-        and <a href="/understand">tells you at startup</a> what that costs on your machine. I&#39;ve been able to get
-        the vast majority of the functionality into running unprivileged, Linux and Windows
-        have a few quirks and I suspect most people might run these with sudo anyway.
-        But I wanted to try and avoid admin rights where I could.</p>
-        <p>The same reasoning covers what it refuses to be and the reason my Python Flask based
-        ISP monitor never really went anywhere. It is not an observability
-        platform and it does not want weeks of your network data. It answers one
-        question: how is this connection right now, and is that normal for where I am
-        sitting. What it keeps on disk exists to answer that question better tomorrow,
-        it stays on your disk, and <a href="/privacy">the whole list is written down</a>.</p>
-        <p>I did not want more numbers. There were already plenty of numbers. I wanted
-        something that would read them.</p>
-        <hr>
-        <p>If you find octomon useful, a
-        <a href="https://github.com/securitypedant/octomon">GitHub star</a> is much appreciated.</p>
+        <h2>4. Play</h2>
+        <p>Now play. If you have a second monitor, put octomon on it, and you will find
+        yourself glancing at it the way you glance at a clock. With one screen it is
+        harder, but the routine still works: leave octomon running behind the game,
+        and when the lag hits, alt-tab and look.</p>
+        <p>You do not need to have been watching. The bar along the bottom is a
+        timeline of the whole session, green, amber and red, and the analysis keeps a
+        history. Press <code>y</code> for the analysis, or <code>e</code> for the events timeline, and you
+        can see what octomon saw at the moment the game stuttered, even if that was
+        two minutes ago.</p>
+        <h2>5. Reading the answer</h2>
+        <p><strong>Everything green, path clean, and the game still lagged.</strong> The footer says
+        connection healthy, the built-in targets are at their usual few milliseconds, the
+        monitored path to the game server shows no loss on any hop that answers. This
+        is the most common one at my house and it means the problem is not on your
+        side of the Internet. It is the server, the match, or the game. Nothing to
+        fix here and it&#39;s Epic&#39;s problem to solve.</p>
+        <p><strong>The gateway goes amber, or hop 1 shows loss.</strong> The trouble is inside
+        your house. On Wi-Fi the Network panel shows the signal and the rate, and a
+        weak radio or a crowded channel will show as jitter and loss at the very first hop.
+        Move closer or plug in.</p>
+        <p><strong>Loss that begins at hop 2, 3 or 4 and carries through.</strong> That is your ISP&#39;s
+        segment. octomon will say so in the analysis, &quot;ISP path degraded, loss begins at
+        hop 3&quot;, because loss that starts at an ISP router and persists to every hop
+        after it means packets are going missing. This is the one you screenshot and send to your ISP.</p>
+        <p><strong>The built-in targets are fine but the path to the game server loses packets
+        deep in.</strong> Your Internet is up, Cloudflare and Google answer perfectly, but
+        somewhere past your ISP the route to that particular server is dropping
+        packets. That is between the providers and the game&#39;s host, and there is
+        nothing to fix at home. Sometimes a new match lands you on a different server
+        and it goes away.</p>
+        <p><strong>The Machine panel is at 96% CPU.</strong> Not the network at all. octomon shows
+        CPU, memory and the hottest core, and the analysis says &quot;machine under load&quot;
+        before it says anything about the connection. A game competing with a browser
+        full of tabs stutters without a single packet lost.</p>
+        <p><strong>Bandwidth spiking on a process that is not the game.</strong> Something on your machine 
+        is downloading or uploading something. A backup to Google Drive maybe or a large Windows update. A saturated uplink turns into latency for
+        everything, and octomon names the process.</p>
+        <h2>What you end up with</h2>
+        <p>Not a faster connection. What you get is the argument settled in the time it
+        takes to respawn. When the answer is &quot;your side&quot;, octomon usually says which
+        part, and when the answer is &quot;their side&quot;, maybe it&#39;s time to switch to another game.</p>
+        <p>The routine again, short version: start octomon and let it learn; start the
+        game; pin the game process in Bandwidth, switch to remotes, pin the busy one;
+        <code>a</code> to add it as a target; <code>m</code> to monitor the path; play; when it lags, look.</p>
       </article>
       <p class="backlink"><a href="/blog/">← all posts</a></p>
     </div>

@@ -7,6 +7,13 @@
   <description>Notes on building octomon.</description>
   <language>en</language>
   <item>
+    <title>Monitor Fortnite (or any game) lag during gaming in real time</title>
+    <link>https://octomon.dev/blog/is-it-my-network-or-fortnite/</link>
+    <guid isPermaLink="true">https://octomon.dev/blog/is-it-my-network-or-fortnite/</guid>
+    <pubDate>Wed, 07 Oct 2026 00:00:00 GMT</pubDate>
+    <description>Lag has two suspects, your connection and the game's servers. Here is how to use octomon to work out which one it is, in about the time it takes to respawn.</description>
+  </item>
+  <item>
     <title>Filtered is not down &amp; let's go IPv6!</title>
     <link>https://octomon.dev/blog/filtered-is-not-down/</link>
     <guid isPermaLink="true">https://octomon.dev/blog/filtered-is-not-down/</guid>

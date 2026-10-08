@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 960" width="640" height="960" role="img" aria-labelledby="t d">
+  <title id="t">The path from your PC up to a Fortnite server</title>
+  <desc id="d">Bottom to top: your PC connects over Wi-Fi or a cable to your gateway, which is hop 1. Your ISP's routers are hops 2 to 4. The Internet beyond them is hops 5 and up, some of which stay silent. The Fortnite server sits in AWS at the top and does not answer pings. octomon's built-in targets, 1.1.1.1, 8.8.8.8 and 9.9.9.9, hang off the Internet and answer pings from anywhere. A strip down the left divides the path into your side, your ISP, and the Internet and Epic's game servers.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#A8B2BD"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace; fill: #F4F7FA; }
+    .sub { fill: #8A96A4; font-size: 12px; }
+    .small { fill: #8A96A4; font-size: 11px; }
+    .name { font-size: 14px; font-weight: 700; }
+    .tag { font-size: 12px; }
+    .node { fill: #3A4350; stroke: #98A3AF; stroke-width: 1.5; }
+    .link { stroke: #A8B2BD; stroke-width: 2; fill: none; }
+  </style>
+
+  <!-- backdrop -->
+  <rect x="0.75" y="0.75" width="638.5" height="958.5" rx="14" fill="#0B0D11" stroke="#98A3AF" stroke-width="1.5"/>
+
+  <!-- who to blame: three stretches down the left -->
+  <g>
+    <path d="M44 60 V 410" stroke="#B249B9" stroke-width="6" stroke-linecap="round"/>
+    <text x="60" y="230" class="name" fill="#B249B9">the Internet &amp;</text>
+    <text x="60" y="248" class="name" fill="#B249B9">Epic game servers</text>
+
+    <path d="M44 500 V 610" stroke="#E8B03A" stroke-width="6" stroke-linecap="round"/>
+    <text x="60" y="560" class="name" fill="#E8B03A">your ISP</text>
+
+    <path d="M44 676 V 900" stroke="#3FCF5C" stroke-width="6" stroke-linecap="round"/>
+    <text x="60" y="793" class="name" fill="#3FCF5C">your side</text>
+  </g>
+
+  <!-- AWS + the Fortnite server, at the top -->
+  <g transform="translate(280 40)">
+    <rect x="0" y="0" width="200" height="142" rx="10" fill="none" stroke="#98A3AF" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text x="100" y="20" text-anchor="middle" class="name">AWS</text>
+    <rect x="60" y="28" width="80" height="50" rx="6" class="node"/>
+    <g fill="#98A3AF">
+      <rect x="70" y="36" width="60" height="8" rx="2"/>
+      <rect x="70" y="49" width="60" height="8" rx="2"/>
+      <rect x="70" y="62" width="60" height="8" rx="2"/>
+    </g>
+    <circle cx="125" cy="40" r="2.5" fill="#3FCF5C"/>
+    <circle cx="125" cy="53" r="2.5" fill="#3FCF5C"/>
+    <circle cx="125" cy="66" r="2.5" fill="#E0524D"/>
+    <text x="100" y="100" text-anchor="middle" class="name">Fortnite server</text>
+    <text x="100" y="117" text-anchor="middle" class="sub">34.x.x.x:9012 · UDP</text>
+    <text x="100" y="133" text-anchor="middle" class="sub">ignores pings</text>
+  </g>
+
+  <path d="M380 304 V 188" class="link" marker-end="url(#arrow)"/>
+
+  <!-- the Internet -->
+  <g transform="translate(295 296)">
+    <path d="M40 90 C 10 90, 5 60, 30 52 C 22 28, 55 18, 70 34 C 80 12, 120 14, 125 40 C 150 36, 165 62, 145 78 C 155 96, 130 106, 115 96 C 100 112, 60 108, 55 92 Z" class="node"/>
+    <text x="85" y="66" text-anchor="middle" class="name">the Internet</text>
+  </g>
+  <text x="394" y="440" class="sub">hops 5+ · some stay silent</text>
+
+  <!-- anchors hang off the Internet, to the right -->
+  <path d="M458 340 H 494" class="link" stroke="#3FCF5C" stroke-width="1.5"/>
+  <g transform="translate(496 300)">
+    <rect x="0" y="0" width="112" height="82" rx="7" fill="#0B0D11" stroke="#3FCF5C" stroke-width="1"/>
+    <text x="56" y="19" text-anchor="middle" class="tag" fill="#3FCF5C">targets</text>
+    <text x="56" y="39" text-anchor="middle" class="tag">1.1.1.1</text>
+    <text x="56" y="55" text-anchor="middle" class="tag">8.8.8.8</text>
+    <text x="56" y="71" text-anchor="middle" class="tag">9.9.9.9</text>
+    <text x="56" y="100" text-anchor="middle" class="small" fill="#3FCF5C">answer pings</text>
+    <text x="56" y="115" text-anchor="middle" class="small" fill="#3FCF5C">from anywhere</text>
+  </g>
+
+  <path d="M380 498 V 414" class="link" marker-end="url(#arrow)"/>
+
+  <!-- ISP -->
+  <g transform="translate(270 500)">
+    <rect x="0" y="0" width="220" height="110" rx="10" fill="none" stroke="#98A3AF" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text x="110" y="22" text-anchor="middle" class="name">your ISP</text>
+    <text x="110" y="38" text-anchor="middle" class="sub">hops 2–4 · their routers</text>
+    <g fill="#3A4350" stroke="#98A3AF" stroke-width="1.5">
+      <circle cx="40" cy="80" r="16"/>
+      <circle cx="110" cy="80" r="16"/>
+      <circle cx="180" cy="80" r="16"/>
+    </g>
+    <g class="link" stroke-width="1.5">
+      <path d="M56 80 H94"/>
+      <path d="M126 80 H164"/>
+    </g>
+    <g fill="#A8B2BD" font-size="11" text-anchor="middle">
+      <text x="40" y="84">2</text>
+      <text x="110" y="84">3</text>
+      <text x="180" y="84">4</text>
+    </g>
+  </g>
+
+  <path d="M380 674 V 614" class="link" marker-end="url(#arrow)"/>
+
+  <!-- gateway -->
+  <g transform="translate(338 690)">
+    <rect x="0" y="0" width="84" height="54" rx="8" class="node"/>
+    <circle cx="20" cy="27" r="4" fill="#3FCF5C"/>
+    <circle cx="36" cy="27" r="4" fill="#3FCF5C"/>
+    <circle cx="52" cy="27" r="4" fill="#3FCF5C"/>
+    <circle cx="68" cy="27" r="4" fill="#98A3AF"/>
+    <line x1="14" y1="-14" x2="14" y2="0" stroke="#8A96A4" stroke-width="2"/>
+    <line x1="70" y1="-14" x2="70" y2="0" stroke="#8A96A4" stroke-width="2"/>
+  </g>
+  <text x="436" y="712" class="name">gateway</text>
+  <text x="436" y="729" class="sub">192.168.1.1 · hop 1</text>
+
+  <!-- two ways onto the LAN: Wi-Fi on the left, cable on the right -->
+  <path d="M358 838 V 746" class="link" stroke-dasharray="6 5"/>
+  <text x="344" y="800" text-anchor="end" class="sub">Wi-Fi</text>
+  <g stroke="#8A96A4" stroke-width="2" fill="none" stroke-linecap="round">
+    <path d="M316 782 a 12 12 0 0 1 20 0"/>
+    <path d="M310 776 a 20 20 0 0 1 32 0"/>
+  </g>
+  <path d="M402 838 V 746" class="link"/>
+  <text x="416" y="796" class="sub">wired</text>
+
+  <!-- your PC, at the bottom -->
+  <g transform="translate(342 840)">
+    <rect x="0" y="0" width="76" height="50" rx="6" class="node"/>
+    <rect x="8" y="8" width="60" height="30" rx="2" fill="#0B0D11" stroke="#98A3AF"/>
+    <rect x="28" y="50" width="20" height="6" fill="#98A3AF"/>
+    <rect x="16" y="56" width="44" height="4" rx="2" fill="#98A3AF"/>
+  </g>
+  <text x="432" y="862" class="name">your PC</text>
+  <text x="432" y="879" class="sub">FortniteClient.exe</text>
+</svg>

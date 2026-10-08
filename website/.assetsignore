@@ -7,4 +7,5 @@
 # Whole folders for posts still marked `draft: true`, so their screenshots are
 # not fetchable either. Managed by `npm run blog`, do not edit by hand.
 # drafts:start
+blog/technical-paper/
 # drafts:end

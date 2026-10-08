@@ -337,6 +337,14 @@ const CSS = `  /* Every colour on this page is a token from tokens.css, no hex h
     border-radius: var(--octo-radius-card);
   }
   .post figure { margin: 1.8em 0; }
+  /* video embed in a post: 16:9, framed like the figures */
+  .post .video-frame {
+    display: block; aspect-ratio: 16 / 9; width: 100%;
+    margin: 1.8em 0;
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+    background: var(--octo-deep);
+  }
   .post figcaption {
     font-family: var(--octo-mono); font-size: 0.82rem;
     color: var(--octo-muted); margin-top: 10px;

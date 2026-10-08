@@ -213,6 +213,14 @@
     border-radius: var(--octo-radius-card);
   }
   .post figure { margin: 1.8em 0; }
+  /* video embed in a post: 16:9, framed like the figures */
+  .post .video-frame {
+    display: block; aspect-ratio: 16 / 9; width: 100%;
+    margin: 1.8em 0;
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+    background: var(--octo-deep);
+  }
   .post figcaption {
     font-family: var(--octo-mono); font-size: 0.82rem;
     color: var(--octo-muted); margin-top: 10px;
@@ -291,6 +299,20 @@
     }
   },
   "blogPost": [
+    {
+      "@type": "BlogPosting",
+      "@id": "https://octomon.dev/blog/is-it-my-network-or-fortnite/",
+      "url": "https://octomon.dev/blog/is-it-my-network-or-fortnite/",
+      "headline": "Monitor Fortnite (or any game) lag during gaming in real time",
+      "description": "Lag has two suspects, your connection and the game's servers. Here is how to use octomon to work out which one it is, in about the time it takes to respawn.",
+      "datePublished": "2026-10-07",
+      "author": {
+        "@type": "Person",
+        "name": "Simon Thorpe",
+        "url": "https://github.com/securitypedant"
+      },
+      "image": "https://octomon.dev/blog/is-it-my-network-or-fortnite/card.png"
+    },
     {
       "@type": "BlogPosting",
       "@id": "https://octomon.dev/blog/filtered-is-not-down/",
@@ -390,6 +412,13 @@
   <section>
     <div class="wrap">
       <div class="postlist">
+
+      <article class="card">
+        <p class="postmeta"><time datetime="2026-10-07">7 October 2026</time> · 7 min read</p>
+        <h2><a href="/blog/is-it-my-network-or-fortnite/">Monitor Fortnite (or any game) lag during gaming in real time</a></h2>
+        <p>Lag has two suspects, your connection and the game's servers. Here is how to use octomon to work out which one it is, in about the time it takes to respawn.</p>
+        <p class="more"><a href="/blog/is-it-my-network-or-fortnite/">read →</a></p>
+      </article>
 
       <article class="card">
         <p class="postmeta"><time datetime="2026-09-03">3 September 2026</time> · 8 min read</p>
