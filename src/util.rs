@@ -151,6 +151,50 @@ fn is_bidi_control(c: char) -> bool {
     matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
+/// A duration typed on the command line, as seconds: `900`, `900s`, `15m`,
+/// `1h`, or a sum of those (`1h30m`). The unit is optional because the flag
+/// took bare seconds for a long time and scripts still pass them; it is
+/// accepted because "run it for 15 minutes" is what a forum reply says, and
+/// `15m` is what the person reading it will type.
+pub fn parse_duration_secs(text: &str) -> Result<u64, String> {
+    let bad = || format!("expected seconds or a time like 90s, 15m or 1h, not {text:?}");
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(bad());
+    }
+    let mut total: u64 = 0;
+    let mut digits = String::new();
+    let mut units_seen = false;
+    for c in text.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        let n: u64 = digits.parse().map_err(|_| bad())?;
+        digits.clear();
+        let mul = match c.to_ascii_lowercase() {
+            's' => 1,
+            'm' => 60,
+            'h' => 3600,
+            _ => return Err(bad()),
+        };
+        units_seen = true;
+        total = n
+            .checked_mul(mul)
+            .and_then(|v| total.checked_add(v))
+            .ok_or_else(bad)?;
+    }
+    if !digits.is_empty() {
+        // Trailing bare digits: plain seconds, whether alone (`900`) or after
+        // a unit (`1m30`).
+        let n: u64 = digits.parse().map_err(|_| bad())?;
+        total = total.checked_add(n).ok_or_else(bad)?;
+    } else if !units_seen {
+        return Err(bad());
+    }
+    Ok(total)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -158,6 +202,31 @@ mod tests {
         let hostile = "cafe\x1b]0;pwned\x07\u{202E}evil\nnext";
         assert_eq!(super::strip_control(hostile), "cafe]0;pwnedevil\nnext");
         assert_eq!(super::strip_control("plain ☕ text"), "plain ☕ text");
+    }
+
+    #[test]
+    fn observe_window_accepts_seconds_and_units() {
+        use super::parse_duration_secs as p;
+        assert_eq!(p("900"), Ok(900));
+        assert_eq!(p("90s"), Ok(90));
+        assert_eq!(p("15m"), Ok(900));
+        assert_eq!(p("15M"), Ok(900));
+        assert_eq!(p("1h"), Ok(3600));
+        assert_eq!(p("1h30m"), Ok(5400));
+        assert_eq!(p("1m30"), Ok(90));
+        assert_eq!(p(" 20 "), Ok(20));
+        for bad in [
+            "",
+            "m",
+            "15 m",
+            "15min",
+            "1.5h",
+            "-5",
+            "abc",
+            "99999999999999999999h",
+        ] {
+            assert!(p(bad).is_err(), "{bad:?} should be rejected");
+        }
     }
 
     #[test]

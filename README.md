@@ -84,11 +84,20 @@ What it looks for beyond the graphs:
   3s after a Wi-Fi roam`"), on the timeline, in the analysis and in alerts.
   Correlation stated as correlation: it says when it started, not why.
 
-**Doctor mode** — `octomon --doctor` observes headless for ~20s (longer with `--observe`) and prints the
+**Doctor mode** — `octomon --doctor` observes headless for ~20s and prints the
 analysis, this network's normal, its history, the measurements and recent
 events; `--json` for machines. Redacted by default (SSID, IPs, MACs) so it is
 safe to paste into a forum or ISP ticket; `--full` prints everything. Exit
-codes: `0` healthy, `1` problems found, `3` couldn't measure.
+codes: `0` healthy, `1` problems found, `3` couldn't measure. Twenty seconds
+catches a hard fault, not an intermittent one, so when asking for help run it
+longer, while the problem is happening:
+
+```sh
+octomon --observe 15m --doctor
+```
+
+That is the report to paste. `--observe` takes seconds or a time with a unit
+(`90s`, `15m`, `1h`), up to an hour.
 
 **Watch mode** — `octomon --watch` runs headless until Ctrl-C and prints each
 finding as it raises and again when it ends; the intermittent dropout that
@@ -183,7 +192,7 @@ complete list.
 **Modes** — each observes, prints, and exits:
 
 ```sh
-octomon --doctor [--json] [--full] [--speedtest] [--observe SECS]
+octomon --doctor [--json] [--full] [--speedtest] [--observe TIME]   # TIME: 90s, 15m, 1h
 octomon --bundle [PATH]      # write the [D] support zip and print where it landed
 octomon --check              # a one-shot text snapshot (no TUI)
 octomon --log                # record to CSV immediately (headless recorder)

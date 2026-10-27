@@ -105,11 +105,18 @@ struct Cli {
     watch: bool,
 
     // ---- Report options --------------------------------------------------
-    /// Seconds to observe before reporting [default: 20, or 45 with --speedtest]
+    /// How long to observe before reporting [default: 20s, or 45s with --speedtest]
     ///
-    /// Longer windows give better loss statistics. Applies to --doctor and
-    /// --bundle.
-    #[arg(long, value_name = "SECS", help_heading = "Report options")]
+    /// Seconds, or a time with a unit: 90s, 15m, 1h (up to 1h). Longer
+    /// windows give better loss statistics and catch the intermittent fault a
+    /// 20s look misses; `--observe 15m --doctor` is the report to paste when
+    /// asking for help. Applies to --doctor and --bundle.
+    #[arg(
+        long,
+        value_name = "TIME",
+        value_parser = util::parse_duration_secs,
+        help_heading = "Report options"
+    )]
     observe: Option<u64>,
 
     /// Also run a speed test (observation takes ~45s)
@@ -625,10 +632,12 @@ async fn main() -> Result<()> {
         }
         // 2s of discovery already elapsed; the rest is the observation window.
         let speedtest_wanted = cli.speedtest && !cli.no_speedtest;
+        // Capped at an hour: beyond that the right tool is --watch or the
+        // dashboard, whose history --doctor then reports anyway.
         let observe = cli
             .observe
             .unwrap_or(if speedtest_wanted { 45 } else { 20 })
-            .clamp(5, 600)
+            .clamp(5, 3600)
             .saturating_sub(2);
         if speedtest_wanted {
             tokio::time::sleep(Duration::from_secs(3)).await;

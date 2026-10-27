@@ -14,9 +14,17 @@ Steps to reproduce the behaviour.
 **Expected behaviour**
 What you expected to happen.
 
-**`octomon --check` output**
-Run `octomon --check` and paste the (sanitised) output — it captures a snapshot
-of every panel and is very helpful.
+**What octomon saw**
+If the bug is about what octomon reported, run it for fifteen minutes while
+the problem is happening and paste the result. It is redacted (no SSID, IPs or
+MACs) and is the most useful thing you can attach:
+
+```sh
+octomon --observe 15m --doctor
+```
+
+For a display or crash bug, `octomon --check` captures a snapshot of every
+panel instead.
 
 ```
 paste here

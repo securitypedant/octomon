@@ -12,7 +12,7 @@ so a change only has to compile everywhere, not be developed everywhere.
 cargo build            # build
 cargo run              # run the dashboard
 cargo run -- --check   # one-shot text snapshot (handy for issue reports)
-cargo run -- --doctor  # observe ~20s, print a diagnosis with evidence
+cargo run -- --doctor  # observe ~20s (--observe 15m for longer), print a diagnosis with evidence
 cargo run -- --demo    # real measurements, fake identifying details — safe to screen-record
 cargo test             # unit tests
 cargo fmt --all        # format
