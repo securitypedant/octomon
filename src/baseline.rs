@@ -205,6 +205,20 @@ fn mac_is_known(mac: &str) -> bool {
     mac.chars().any(|c| c.is_ascii_hexdigit() && c != '0')
 }
 
+/// Self-hosted protocols (WireGuard, OpenVPN) name the software, not the
+/// server: two configs for two different exits would share one location.
+/// Their tunnel address is fixed per config, so it tells them apart where the
+/// vendor alone cannot.
+fn self_hosted_tunnel_addr<'a>(n: &'a NetInfo, vendor: &str) -> Option<&'a str> {
+    if !matches!(vendor, "WireGuard" | "OpenVPN") {
+        return None;
+    }
+    n.ipv4
+        .first()
+        .map(|a| a.split('/').next().unwrap_or(a))
+        .filter(|a| !a.is_empty())
+}
+
 /// Fingerprint "which network is this" → (stable key, human label).
 ///
 /// Wi-Fi keys on SSID + gateway MAC: the pair survives DHCP renewals and mesh
@@ -248,9 +262,11 @@ pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
         let (vkey, vshown) = if vendor.is_empty() {
             // Unidentified tunnels fall back to the device name — less stable
             // (utun4 today, utun6 tomorrow) but better than no location.
-            (n.tunnel_iface.as_str(), "VPN")
+            (n.tunnel_iface.clone(), "VPN".to_string())
+        } else if let Some(addr) = self_hosted_tunnel_addr(n, vendor) {
+            (format!("{vendor}|{addr}"), format!("{vendor} {addr}"))
         } else {
-            (vendor, vendor)
+            (vendor.to_string(), vendor.to_string())
         };
         let u_mac = mac_is_known(&n.underlay_gateway_mac);
         let u_ip = !n.underlay_gateway_ip.is_empty() && n.underlay_gateway_ip != "-";
@@ -280,10 +296,7 @@ pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
                 format!("VPN ({})", n.tunnel_iface),
             )
         } else {
-            (
-                format!("vpn|{vendor}|{}", n.medium as u8),
-                vendor.to_string(),
-            )
+            (format!("vpn|{vkey}|{}", n.medium as u8), vshown)
         }
     } else if n.medium == LinkMedium::WiFi && !ssid.is_empty() {
         (
@@ -578,6 +591,41 @@ mod tests {
         let (ukey, ulabel) = fingerprint(&unknown).unwrap();
         assert_ne!(key, ukey);
         assert_eq!(ulabel, "VPN (CloudflareWARP)");
+    }
+
+    /// Two WireGuard configs from the same LAN are two exits, not one: the
+    /// tunnel address separates them, and reconnecting the same config on a
+    /// renumbered utun comes back to the same location.
+    #[test]
+    fn self_hosted_tunnels_key_on_their_address() {
+        let wg = |iface: &str, addr: &str| NetInfo {
+            iface: iface.into(),
+            ipv4: vec![addr.into()],
+            gateway_ip: "-".into(),
+            gateway_mac: "-".into(),
+            medium: LinkMedium::Tunnel,
+            tunnel: Some("WireGuard".into()),
+            tunnel_iface: iface.into(),
+            underlay_gateway_ip: "192.168.10.1".into(),
+            underlay_gateway_mac: "00:e0:67:1b:1b:67".into(),
+            underlay_medium: LinkMedium::WiFi,
+            ..Default::default()
+        };
+        let (home, label) = fingerprint(&wg("utun10", "10.9.8.10/32")).unwrap();
+        assert_eq!(label, "192.168.10.1 via WireGuard 10.9.8.10");
+        let (vps, _) = fingerprint(&wg("utun10", "10.13.13.2/32")).unwrap();
+        assert_ne!(home, vps, "different exit, different location");
+        assert_eq!(home, fingerprint(&wg("utun6", "10.9.8.10/32")).unwrap().0);
+
+        let mut no_underlay = wg("utun10", "10.9.8.10/32");
+        no_underlay.underlay_gateway_ip = String::new();
+        no_underlay.underlay_gateway_mac = String::new();
+        let mut other = no_underlay.clone();
+        other.ipv4 = vec!["10.13.13.2/32".into()];
+        assert_ne!(
+            fingerprint(&no_underlay).unwrap().0,
+            fingerprint(&other).unwrap().0
+        );
     }
 
     /// A full tunnel with a visible physical network underneath keys on that
