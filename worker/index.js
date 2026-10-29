@@ -98,15 +98,28 @@ async function edgeAnswer(request, url, env, ctx) {
 }
 
 // The public aggregate behind the /privacy graph: daily request counts per
-// octomon version for the last 30 days, queried from Analytics Engine and
-// cached for an hour. Day buckets keep it coarse in time; the version names
-// a public software build, not a person.
-async function edgeStats(env) {
-  if (!env.AE_QUERY_TOKEN || !env.CF_ACCOUNT_ID) {
-    return new Response(JSON.stringify({ series: [] }) + "\n", {
-      headers: { "content-type": "application/json; charset=utf-8" },
-    });
-  }
+// octomon version for the last 30 days, queried from Analytics Engine. Day
+// buckets keep it coarse in time; the version names a public software build,
+// not a person.
+//
+// The query runs on AE_QUERY_TOKEN, and the endpoint is public, so the
+// answer is memoized in the isolate like latestVersion() (same reasoning
+// for not using the Cache API). The response's cache-control header does
+// NOT do this job: Cloudflare runs a Worker before its cache and only
+// caches the Worker's own responses with the opt-in "cache" setting, which
+// wrangler.jsonc doesn't enable — so without the memo every hit on
+// /edge/stats would spend the token's quota. A good answer is kept for an
+// hour; a failed query only for a minute, so a hiccup neither sticks for
+// the hour nor lets a burst of requests retry upstream each time, and the
+// last good series keeps being served meanwhile. Concurrent misses share one
+// in-flight query. The memo holds only the aggregate every caller gets
+// anyway — nothing about who asked.
+const STATS_TTL_MS = 60 * 60 * 1000;
+const STATS_FAIL_TTL_MS = 60 * 1000;
+let statsMemo = { series: [], ok: false, at: 0 };
+let statsInflight = null;
+
+async function queryEdgeStats(env) {
   const sql = `
     SELECT toStartOfInterval(timestamp, INTERVAL '1' DAY) AS day,
            blob1 AS version,
@@ -116,33 +129,49 @@ async function edgeStats(env) {
     WHERE timestamp > now() - INTERVAL '30' DAY
     GROUP BY day, version, why
     ORDER BY day, version, why`;
-  const resp = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/analytics_engine/sql`,
-    {
-      method: "POST",
-      headers: { authorization: `Bearer ${env.AE_QUERY_TOKEN}` },
-      body: sql,
-    },
-  );
-  if (!resp.ok) {
+  try {
+    const resp = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/analytics_engine/sql`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.AE_QUERY_TOKEN}` },
+        body: sql,
+      },
+    );
+    if (!resp.ok) return { series: [], ok: false, at: Date.now() };
+    const data = await resp.json();
+    const series = (data.data ?? []).map((r) => ({
+      day: r.day,
+      version: r.version,
+      why: r.why ?? "",
+      calls: Math.round(Number(r.calls) || 0),
+    }));
+    return { series, ok: true, at: Date.now() };
+  } catch {
+    return { series: [], ok: false, at: Date.now() };
+  }
+}
+
+async function edgeStats(env) {
+  if (!env.AE_QUERY_TOKEN || !env.CF_ACCOUNT_ID) {
     return new Response(JSON.stringify({ series: [] }) + "\n", {
-      status: 200,
       headers: { "content-type": "application/json; charset=utf-8" },
     });
   }
-  const data = await resp.json();
-  const series = (data.data ?? []).map((r) => ({
-    day: r.day,
-    version: r.version,
-    why: r.why ?? "",
-    calls: Math.round(Number(r.calls) || 0),
-  }));
-  return new Response(JSON.stringify({ series }) + "\n", {
+  const ttl = statsMemo.ok ? STATS_TTL_MS : STATS_FAIL_TTL_MS;
+  if (Date.now() - statsMemo.at >= ttl) {
+    statsInflight ??= queryEdgeStats(env).then((m) => {
+      statsMemo = m.ok ? m : { ...m, series: statsMemo.series };
+      statsInflight = null;
+    });
+    await statsInflight;
+  }
+  return new Response(JSON.stringify({ series: statsMemo.series }) + "\n", {
     headers: {
       "content-type": "application/json; charset=utf-8",
-      // One aggregate an hour is plenty; the cache also shields the API
-      // token path from being hammered through the public page.
-      "cache-control": "public, max-age=3600",
+      // For browsers only (see above). After a failed refresh the series
+      // may be stale, so don't let a browser hold on to it.
+      "cache-control": statsMemo.ok ? "public, max-age=3600" : "no-store",
     },
   });
 }
