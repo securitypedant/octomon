@@ -2,9 +2,10 @@
 //! (unprivileged: UDP probes on macOS/Linux). Hops are parsed and pushed into
 //! the shared state as they arrive, so the panel fills in live.
 
+use parking_lot::Mutex;
 use std::net::IpAddr;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -19,7 +20,7 @@ const MAX_HOPS: usize = 20;
 pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr, label: String) {
     tokio::spawn(async move {
         {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             s.traceroute = Some(Traceroute {
                 target: format!("{label} ({addr})"),
                 running: true,
@@ -59,7 +60,7 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr, label: String) {
                     // time-exceeded from 1.1.1.1 itself, so the raw output
                     // would list the destination twice.
                     let done = hop.addr.as_deref() == Some(addr.to_string().as_str());
-                    let mut s = state.lock().unwrap();
+                    let mut s = state.lock();
                     if let Some(tr) = s.traceroute.as_mut() {
                         tr.hops.push(hop);
                     }
@@ -76,7 +77,7 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr, label: String) {
 }
 
 fn finish(state: &Arc<Mutex<AppState>>, err: Option<String>) {
-    let mut s = state.lock().unwrap();
+    let mut s = state.lock();
     if let Some(tr) = s.traceroute.as_mut() {
         tr.running = false;
     }

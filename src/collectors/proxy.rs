@@ -11,7 +11,8 @@
 //! System level only, deliberately: Firefox and some apps carry their own
 //! settings, and chasing them is a different tool.
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::app::{AppState, ProxyConfig, ProxyKind};
@@ -25,7 +26,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, changed: Arc<tokio::sync::Notify>)
         let cfg = tokio::task::spawn_blocking(detect)
             .await
             .unwrap_or_default();
-        state.lock().unwrap().proxy = cfg;
+        state.lock().proxy = cfg;
         tokio::select! {
             _ = changed.notified() => { tokio::time::sleep(Duration::from_secs(3)).await; }
             _ = tokio::time::sleep(PERIOD) => {}

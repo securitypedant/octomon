@@ -1727,6 +1727,7 @@ dependencies = [
  "objc2",
  "objc2-core-wlan",
  "objc2-foundation",
+ "parking_lot",
  "ratatui",
  "reqwest",
  "rustls",

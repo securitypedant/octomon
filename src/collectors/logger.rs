@@ -8,8 +8,9 @@
 //! Recording is toggled from the UI; this task owns the file so no file I/O
 //! happens on the key-press path or under the state lock.
 
+use parking_lot::Mutex;
 use std::fmt::Write as _;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tokio::io::AsyncWriteExt;
 
@@ -28,7 +29,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
 
     loop {
         ticker.tick().await;
-        let wanted = state.lock().unwrap().logging_requested;
+        let wanted = state.lock().logging_requested;
 
         match (wanted, file.is_some()) {
             // Start recording.
@@ -36,7 +37,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
                 match open().await {
                     Ok((f, path)) => {
                         file = Some(f);
-                        let mut s = state.lock().unwrap();
+                        let mut s = state.lock();
                         // The recording covers from now on; history that predates
                         // it belongs to the events overlay, not this file.
                         events_seen = s.events_total;
@@ -57,7 +58,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
                     }
                     Err(e) => {
                         crate::errlog::log("recording", format!("could not open the CSV: {e}"));
-                        let mut s = state.lock().unwrap();
+                        let mut s = state.lock();
                         s.logging_requested = false;
                         s.notice_event(
                             crate::verdict::Severity::Info,
@@ -73,7 +74,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
                 if let Some(mut f) = file.take() {
                     let _ = f.flush().await;
                 }
-                let mut s = state.lock().unwrap();
+                let mut s = state.lock();
                 if let Some(status) = s.log.take() {
                     s.push_event(
                         crate::verdict::Severity::Info,
@@ -93,7 +94,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
 
         // Snapshot and format under the lock, write outside it.
         let (body, rows) = {
-            let s = state.lock().unwrap();
+            let s = state.lock();
             let stamp = chrono::Local::now().to_rfc3339();
             let mut body = format_rows(&s, &stamp);
             body.push_str(&format_speedtests(&s, &stamp, &mut speed_seen));
@@ -108,13 +109,13 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
                     "recording",
                     format!("write failed, recording stopped: {e} ({rows} rows lost)"),
                 );
-                let mut s = state.lock().unwrap();
+                let mut s = state.lock();
                 s.logging_requested = false;
                 s.notice = Some("recording failed — write error".to_string());
                 continue;
             }
             let _ = f.flush().await;
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             if let Some(status) = s.log.as_mut() {
                 status.rows += rows;
             }

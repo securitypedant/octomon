@@ -4402,7 +4402,7 @@ pub fn session_state(v: &Verdict) -> crate::session::SessionState {
     }
 }
 
-pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::config::Config) {
+pub async fn run(state: std::sync::Arc<parking_lot::Mutex<AppState>>, cfg: crate::config::Config) {
     let mut tick = tokio::time::interval(cfg.sample_interval());
     let sinks = cfg.alert.sinks();
     // Consecutive fully-healthy ticks; a fold happens each time this hits 60.
@@ -4418,7 +4418,7 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
         let mut episodes: Vec<crate::history::Episode> = Vec::new();
         let net_changes: Vec<crate::app::NetChange>;
         let io = {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             let triage = evaluate(&s);
             let insufficient = insufficient_reason(&s);
             let network = s.baseline_key.clone();
@@ -4547,7 +4547,7 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
                 .await
                 .ok()
                 .flatten();
-                let mut s = state.lock().unwrap();
+                let mut s = state.lock();
                 // The network may have moved again while we read the file.
                 if crate::baseline::fingerprint(&s.netinfo).map(|f| f.0) == Some(key.clone()) {
                     // A stored baseline means this is a location we have been

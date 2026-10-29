@@ -8,9 +8,10 @@
 //! Hops reuse [`TargetStat`], inheriting the same distribution / jitter / loss
 //! maths as ordinary targets.
 
+use parking_lot::Mutex;
 use std::net::IpAddr;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use surge_ping::{PingIdentifier, PingSequence};
@@ -43,7 +44,7 @@ pub fn start(
     label: String,
 ) {
     let generation = {
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         let generation = s.hop_monitor.as_ref().map_or(1, |m| m.generation + 1);
         s.hop_monitor = Some(HopMonitor {
             target: format!("{label} ({dest})"),
@@ -76,7 +77,7 @@ pub fn start(
                 return;
             }
             // Mark the re-walk so the UI can show it without clearing stats.
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             if let Some(m) = s
                 .hop_monitor
                 .as_mut()
@@ -101,7 +102,6 @@ fn shape_of(m: &HopMonitor) -> PathShape {
 fn shape(state: &Arc<Mutex<AppState>>, generation: u64) -> Option<PathShape> {
     state
         .lock()
-        .unwrap()
         .hop_monitor
         .as_ref()
         .filter(|m| m.generation == generation)
@@ -215,7 +215,7 @@ async fn report_path_change(
                 .ok(),
         )
     };
-    let mut s = state.lock().unwrap();
+    let mut s = state.lock();
     let Some(target) = s
         .hop_monitor
         .as_ref()
@@ -252,7 +252,6 @@ async fn report_path_change(
 fn superseded(state: &Arc<Mutex<AppState>>, generation: u64) -> bool {
     state
         .lock()
-        .unwrap()
         .hop_monitor
         .as_ref()
         .is_none_or(|m| m.generation != generation)
@@ -284,7 +283,7 @@ async fn discover(
                 "hopmon",
                 format!("could not run {program} toward {dest}: {e}"),
             );
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             if let Some(m) = s
                 .hop_monitor
                 .as_mut()
@@ -311,7 +310,7 @@ async fn discover(
             // Applying under the lock keeps the hop list and the probe tasks in
             // agreement about which address each ttl currently has.
             let spawn = {
-                let mut s = state.lock().unwrap();
+                let mut s = state.lock();
                 let Some(m) = s
                     .hop_monitor
                     .as_mut()
@@ -349,7 +348,7 @@ async fn discover(
     // hop's loss only means something next to the destination's, and edges that
     // drop traceroute's UDP probes usually still answer ping.
     let spawn = {
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         let Some(m) = s
             .hop_monitor
             .as_mut()
@@ -448,7 +447,7 @@ fn spawn_probe(
             seq = seq.wrapping_add(1);
             let result = pinger.ping(PingSequence(seq), &payload).await;
 
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             let Some(m) = s
                 .hop_monitor
                 .as_mut()
@@ -678,7 +677,7 @@ mod tests {
         // few ticks before any statistics exist.
         tokio::time::sleep(Duration::from_secs(25)).await;
 
-        let s = state.lock().unwrap();
+        let s = state.lock();
         let m = s.hop_monitor.as_ref().expect("monitor should be running");
         println!("path to {} ({} hops)", m.target, m.hops.len());
         for h in &m.hops {

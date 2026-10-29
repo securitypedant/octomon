@@ -1,7 +1,9 @@
 //! Shared application state written by collectors and read by the renderer.
 //!
-//! All mutation happens under a single [`std::sync::Mutex`]; critical sections are
-//! short and never span an `.await`, so a std mutex is appropriate here.
+//! All mutation happens under a single [`parking_lot::Mutex`]; critical sections are
+//! short and never span an `.await`, so a blocking mutex is appropriate here. It
+//! does not poison: a collector that panics mid-update is restarted by its
+//! supervisor, and every other reader carries on instead of panicking in turn.
 
 use std::collections::VecDeque;
 use std::net::IpAddr;

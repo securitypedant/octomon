@@ -6,8 +6,9 @@
 //! bytes/second. M-Lab NDT7 speaks WebSockets and lives in [`crate::collectors::ndt7`].
 //! Only the selected provider runs (no fallback); on failure the reason is shown.
 
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{StreamExt, stream};
@@ -153,7 +154,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>) {
 
         // Run only the user-selected provider (no fallback).
         let selected = {
-            let s = state.lock().unwrap();
+            let s = state.lock();
             s.speedtest_provider_names
                 .get(s.speedtest_provider_idx)
                 .cloned()
@@ -162,7 +163,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>) {
         // drains events): a latency spike mid-recording that coincides with a
         // speed test should read as the test, not as a mystery.
         if let Some(name) = selected.as_deref() {
-            state.lock().unwrap().push_event(
+            state.lock().push_event(
                 crate::verdict::Severity::Info,
                 crate::app::EventCategory::Speedtest,
                 format!("speed test started ({name})"),
@@ -179,7 +180,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>) {
             None => Err("no provider selected".to_string()),
         };
 
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         s.speedtest.progress = 0.0;
         s.speedtest.live_mbps = 0.0;
         s.speedtest.last_run = Some(Instant::now());
@@ -492,7 +493,7 @@ async fn controller(
                 let (c, r, url) = (client.clone(), rtts.clone(), probe_url.to_string());
                 tokio::spawn(async move {
                     if let Some(ms) = probe_latency(&c, &url).await {
-                        r.lock().unwrap().push(ms);
+                        r.lock().push(ms);
                     }
                 });
             }
@@ -502,7 +503,7 @@ async fn controller(
             let (mt, mb) = measure_start.unwrap_or((start, 0));
             let secs = mt.elapsed().as_secs_f64().max(0.001);
             let mbps = (bytes.saturating_sub(mb)) as f64 * 8.0 / 1_000_000.0 / secs;
-            let out = rtts.lock().unwrap().clone();
+            let out = rtts.lock().clone();
             return (mbps, out);
         }
     }
@@ -616,14 +617,14 @@ fn median(v: &mut [f64]) -> Option<f64> {
 }
 
 pub(crate) fn set_phase(state: &Arc<Mutex<AppState>>, phase: &str) {
-    let mut s = state.lock().unwrap();
+    let mut s = state.lock();
     s.speedtest.phase = phase.to_string();
     s.speedtest.progress = 0.0;
     s.speedtest.live_mbps = 0.0;
 }
 
 pub(crate) fn update(state: &Arc<Mutex<AppState>>, progress: f64, live_mbps: f64) {
-    let mut s = state.lock().unwrap();
+    let mut s = state.lock();
     s.speedtest.progress = progress.clamp(0.0, 1.0);
     s.speedtest.live_mbps = live_mbps;
 }

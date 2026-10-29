@@ -19,9 +19,10 @@
 //! prefix-overview gives that (ASN, holder, announced prefix) for any address,
 //! not only RIPE's, so it is fetched alongside and shown as its own rows.
 
+use parking_lot::Mutex;
 use std::net::IpAddr;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -45,7 +46,7 @@ const MAX_BODY: usize = 256 * 1024;
 /// should not re-query the registry.
 pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr) {
     {
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         if s.whois
             .as_ref()
             .is_some_and(|w| w.addr == addr && !w.running && w.error.is_none())
@@ -65,12 +66,7 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr) {
     // Through the system's fixed proxy when there is one — on a network that
     // requires it, that is the only way out, and a browser on the same
     // machine would use it.
-    let proxy = state
-        .lock()
-        .unwrap()
-        .proxy
-        .as_ref()
-        .and_then(|p| p.https_url());
+    let proxy = state.lock().proxy.as_ref().and_then(|p| p.https_url());
     tokio::spawn(async move {
         // Registration and routing are independent lookups; ask both at once.
         let (reg, asn) = tokio::join!(
@@ -109,7 +105,7 @@ pub fn start(state: Arc<Mutex<AppState>>, addr: IpAddr) {
         let entry = format_log_entry(addr, &outcome, &asn_rows);
         tokio::task::spawn_blocking(move || append_log(&entry));
 
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         // The user may have asked about a different address meanwhile.
         let Some(w) = s.whois.as_mut().filter(|w| w.addr == addr) else {
             return;

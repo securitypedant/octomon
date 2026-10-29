@@ -10,8 +10,9 @@
 //! *late* connect rather than a miss — TCP "loss" here means the handshake
 //! failed outright within the timeout. Latency and jitter are solid.
 
+use parking_lot::Mutex;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::app::AppState;
@@ -29,7 +30,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         ticker.tick().await;
         // Snapshot the anchors under the lock, probe without it.
         let targets: Vec<(u64, IpAddr)> = {
-            let s = state.lock().unwrap();
+            let s = state.lock();
             // Anchors and their v6 twins; never the gateway or the hops.
             s.targets
                 .iter()
@@ -50,7 +51,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
             (id, ok.then(|| started.elapsed().as_secs_f64() * 1000.0))
         });
         let results = futures_util::future::join_all(probes).await;
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         for (id, rtt) in results {
             // Re-find by id: the target may have been deleted mid-probe.
             let Some(t) = s.targets.iter_mut().find(|t| t.id == id) else {

@@ -170,6 +170,11 @@ const BANNER_PREFIX: &str = "\n=== octomon ";
 /// can be erased underneath us (Ctrl+R), and an open handle would go on
 /// writing to an unlinked file for the rest of the session.
 fn append(line: &str) {
+    // A test that exercises a failure path must not write into the real
+    // data directory of whoever runs `cargo test`.
+    if cfg!(test) {
+        return;
+    }
     let Some(path) = path() else { return };
     if let Some(dir) = path.parent()
         && crate::store::create_dir_private(dir).is_err()

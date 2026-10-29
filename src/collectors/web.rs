@@ -13,8 +13,9 @@
 //! nothing back — an IP-literal probe of 9.9.9.9 should measure the handshake,
 //! not fail on a name mismatch.
 
+use parking_lot::Mutex;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::app::{AppState, WebStatus};
@@ -121,7 +122,7 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
         // Snapshot who needs probing. Hops are path infrastructure, not web
         // destinations; the gateway and the user's targets are fair game.
         let candidates: Vec<(u64, Option<String>, IpAddr)> = {
-            let s = state.lock().unwrap();
+            let s = state.lock();
             s.targets
                 .iter()
                 .filter(|t| !t.is_path_hop())
@@ -145,7 +146,7 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
         let results = futures_util::future::join_all(probes).await;
 
         for (id, outcome, ms) in results {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             let Some(t) = s.targets.iter_mut().find(|t| t.id == id) else {
                 continue;
             };

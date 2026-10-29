@@ -10,8 +10,9 @@
 //! [`crate::collectors::http`]. Whichever answered most recently is what the
 //! analysis reads.
 
+use parking_lot::Mutex;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::net::UdpSocket;
@@ -46,7 +47,7 @@ pub async fn run(
     loop {
         let result = consensus(&server).await;
         {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             match result {
                 Ok(r) => {
                     s.clock.ntp_offset_ms = Some(r.offset_ms);

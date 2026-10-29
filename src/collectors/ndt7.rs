@@ -5,7 +5,8 @@
 //! Download throughput is the bytes received; upload is the bytes sent (the
 //! socket applies backpressure, so this tracks what actually goes on the wire).
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};

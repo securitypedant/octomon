@@ -13,8 +13,9 @@
 //! [`rescan`] forces one by hand from [G], and every way a pass can come back
 //! empty writes a line to the error log.
 
+use parking_lot::Mutex;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tokio::process::Command;
 
@@ -113,7 +114,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Confi
         // gateway baseline. (The routing-table gateway itself is probed by
         // the fallback below whenever the walk didn't cover it.)
         let plausibly_gateway = ttl == 1 && {
-            let s = state.lock().unwrap();
+            let s = state.lock();
             s.netinfo.gateway_ip == addr.to_string() || s.netinfo.is_lan_addr(addr)
         };
         let label = if plausibly_gateway {
@@ -124,7 +125,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Confi
 
         hops_found += 1;
         let (id, added) = {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             // Skip if this address is already a target.
             if s.targets.iter().any(|t| t.addr == addr) {
                 (0, false)
@@ -162,7 +163,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Confi
             .ok()
             .and_then(crate::config::v6_twin)
         && clients.v6.is_some()
-        && crate::collectors::http::has_global_v6(&state.lock().unwrap().netinfo.ipv6)
+        && crate::collectors::http::has_global_v6(&state.lock().netinfo.ipv6)
     {
         walk_v6(&state, &clients, &cfg, p6, &probe).await;
         add_v6_gateway_fallback(&state, &clients, &cfg);
@@ -203,10 +204,10 @@ pub enum Outcome {
 /// cadence, so wait briefly for it.
 async fn gateway_only(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Config) -> Outcome {
     for _ in 0..10 {
-        let gw_ip = state.lock().unwrap().netinfo.gateway_ip.clone();
+        let gw_ip = state.lock().netinfo.gateway_ip.clone();
         if let Ok(addr) = gw_ip.parse::<IpAddr>() {
             let (id, added) = {
-                let mut s = state.lock().unwrap();
+                let mut s = state.lock();
                 let have = s
                     .targets
                     .iter()
@@ -249,7 +250,7 @@ fn add_v6_targets(state: &Arc<Mutex<AppState>>, clients: &ping::Clients, cfg: &C
         return;
     }
     let twins: Vec<(String, IpAddr)> = {
-        let s = state.lock().unwrap();
+        let s = state.lock();
         if !crate::collectors::http::has_global_v6(&s.netinfo.ipv6) {
             return;
         }
@@ -266,7 +267,7 @@ fn add_v6_targets(state: &Arc<Mutex<AppState>>, clients: &ping::Clients, cfg: &C
     };
     for (label, addr) in twins {
         let id = {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             let mut t = TargetStat::new(label, addr);
             t.discovered = true;
             let id = t.id;
@@ -283,7 +284,7 @@ fn add_v6_targets(state: &Arc<Mutex<AppState>>, clients: &ping::Clients, cfg: &C
 /// global address, which the plain client pings without any scope games.
 fn add_v6_gateway_fallback(state: &Arc<Mutex<AppState>>, clients: &ping::Clients, cfg: &Config) {
     let (addr, iface_index) = {
-        let s = state.lock().unwrap();
+        let s = state.lock();
         if s.targets.iter().any(|t| t.is_v6_gateway()) {
             return;
         }
@@ -305,7 +306,7 @@ fn add_v6_gateway_fallback(state: &Arc<Mutex<AppState>>, clients: &ping::Clients
     };
     let Some(client) = client else { return };
     let id = {
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         let mut t = TargetStat::new(crate::app::V6_GATEWAY_LABEL.to_string(), addr);
         t.discovered = true;
         let id = t.id;
@@ -372,7 +373,7 @@ async fn walk_v6(
             break;
         }
         let (id, added) = {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             let on_lan = ttl == 1 && s.is_lan_addr(addr);
             let label = if on_lan {
                 crate::app::V6_GATEWAY_LABEL.to_string()
@@ -409,7 +410,7 @@ async fn public_ip6(state: Arc<Mutex<AppState>>, cfg: Config) {
     let url = cfg.public_ip6_url.trim().to_string();
     if url.is_empty()
         || !cfg.probe_ipv6
-        || !crate::collectors::http::has_global_v6(&state.lock().unwrap().netinfo.ipv6)
+        || !crate::collectors::http::has_global_v6(&state.lock().netinfo.ipv6)
     {
         return;
     }
@@ -430,7 +431,7 @@ async fn public_ip6(state: Arc<Mutex<AppState>>, cfg: Config) {
         }
     };
     if let Some(addr) = addr {
-        state.lock().unwrap().public_ipv6 = Some(addr);
+        state.lock().public_ipv6 = Some(addr);
     }
 }
 
@@ -453,7 +454,7 @@ const RETRY_BACKOFF: [u64; 5] = [15, 30, 60, 120, 240];
 /// and the only fix was restarting octomon.
 pub async fn refresh(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Config) {
     forget_discovered(&state);
-    let seq = state.lock().unwrap().net_change_seq;
+    let seq = state.lock().net_change_seq;
     // Each half is retried only until it lands: the public IP usually comes
     // back on the pass where the walk is still blocked, and re-fetching it
     // five more times would be five needless requests to someone else's
@@ -467,7 +468,7 @@ pub async fn refresh(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: C
     // public-IP fetch started before the change lands its result minutes later,
     // and adding those hops to the *new* network's target list is how a stale
     // gateway reappears after a VPN flap.
-    let superseded = || state.lock().unwrap().net_change_seq != seq;
+    let superseded = || state.lock().net_change_seq != seq;
 
     for (attempt, wait) in std::iter::once(0).chain(RETRY_BACKOFF).enumerate() {
         if wait > 0 {
@@ -509,7 +510,7 @@ pub async fn refresh(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: C
         }
     );
     crate::errlog::log("discovery", &message);
-    state.lock().unwrap().push_event(
+    state.lock().push_event(
         crate::verdict::Severity::Info,
         crate::app::EventCategory::Network,
         message,
@@ -519,7 +520,7 @@ pub async fn refresh(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: C
 /// Drop every auto-discovered target, pulling the dependent cursors back into
 /// range — they index into `targets`.
 fn forget_discovered(state: &Arc<Mutex<AppState>>) {
-    let mut s = state.lock().unwrap();
+    let mut s = state.lock();
     s.targets.retain(|t| !t.discovered);
     s.public_ipv6 = None;
     let last = s.targets.len().saturating_sub(1);
@@ -536,7 +537,7 @@ fn forget_discovered(state: &Arc<Mutex<AppState>>) {
 /// automatic attempts had already run out.
 pub async fn rescan(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Config) {
     {
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         s.public_ip_error = None;
         s.notice_event(
             crate::verdict::Severity::Info,
@@ -555,7 +556,7 @@ pub async fn watch(
     cfg: Config,
     changed: Arc<tokio::sync::Notify>,
 ) {
-    let mut seen = state.lock().unwrap().net_change_seq;
+    let mut seen = state.lock().net_change_seq;
     // The refresh currently in flight. A walk runs its backoff for about seven
     // minutes, so a network that flaps every few seconds — a VPN reconnecting
     // in a loop, a laptop roaming between weak APs — would otherwise leave
@@ -571,7 +572,7 @@ pub async fn watch(
             _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => {}
         }
         let (seq, monitoring) = {
-            let s = state.lock().unwrap();
+            let s = state.lock();
             (
                 s.net_change_seq,
                 s.hop_monitor.as_ref().map(|m| (m.dest, m.target.clone())),
@@ -634,7 +635,7 @@ pub async fn public_ip(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg:
             // sentence; the chains go to the events timeline — once per distinct
             // failure, not on every retry of the same one.
             let short = summarize_fetch_errors(&errors);
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             if s.public_ip_error.as_deref() != Some(short.as_str()) {
                 s.push_event(
                     crate::verdict::Severity::Info,
@@ -646,12 +647,12 @@ pub async fn public_ip(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg:
             return false;
         }
     };
-    state.lock().unwrap().public_ip_error = None;
+    state.lock().public_ip_error = None;
     // The v6 side rides along, on its own: it is never a reason to retry.
     tokio::spawn(public_ip6(state.clone(), cfg.clone()));
 
     let (id, added) = {
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         if s.targets.iter().any(|t| t.addr == addr) {
             (0, false)
         } else {
