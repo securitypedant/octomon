@@ -205,27 +205,48 @@ fn mac_is_known(mac: &str) -> bool {
     mac.chars().any(|c| c.is_ascii_hexdigit() && c != '0')
 }
 
-/// Self-hosted protocols (WireGuard, OpenVPN) name the software, not the
-/// server: two configs for two different exits would share one location.
-/// Their tunnel address is fixed per config, so it tells them apart where the
-/// vendor alone cannot. An IPv6-only config is told apart by its first
-/// non-link-local address; macOS gives every utun a link-local of its own,
-/// which says nothing about the config.
-fn self_hosted_tunnel_addr<'a>(n: &'a NetInfo, vendor: &str) -> Option<&'a str> {
-    if !matches!(vendor, "WireGuard" | "OpenVPN") {
-        return None;
-    }
-    let bare = |a: &'a String| a.split('/').next().unwrap_or(a);
-    n.ipv4
-        .first()
-        .map(bare)
-        .filter(|a| !a.is_empty())
+/// The address that names a tunnel config: the first IPv4, else the first
+/// non-link-local IPv6 — macOS gives every utun a link-local of its own,
+/// which says nothing about the config. Prefix lengths are dropped.
+fn tunnel_identity_addr<'a>(addrs: impl IntoIterator<Item = &'a String>) -> Option<&'a str> {
+    let bare: Vec<&str> = addrs
+        .into_iter()
+        .map(|a| a.split('/').next().unwrap_or(a))
+        .collect();
+    bare.iter()
+        .copied()
+        .find(|a| a.parse::<std::net::Ipv4Addr>().is_ok())
         .or_else(|| {
-            n.ipv6.iter().map(bare).find(|a| {
+            bare.iter().copied().find(|a| {
                 a.parse::<std::net::Ipv6Addr>()
                     .is_ok_and(|v6| (v6.segments()[0] & 0xffc0) != 0xfe80)
             })
         })
+}
+
+/// Self-hosted protocols (WireGuard, OpenVPN) name the software, not the
+/// server: two configs for two different exits would share one location.
+/// Their tunnel address is fixed per config, so it tells them apart where the
+/// vendor alone cannot.
+fn self_hosted_tunnel_addr<'a>(n: &'a NetInfo, vendor: &str) -> Option<&'a str> {
+    if !matches!(vendor, "WireGuard" | "OpenVPN") {
+        return None;
+    }
+    tunnel_identity_addr(n.ipv4.iter().chain(&n.ipv6))
+}
+
+/// Identity (key part, label part) for a tunnel no vendor could be named
+/// for. The device name is no identity on macOS: utunN renumbers across
+/// connects, so the same VPN would mint a new location each time — losing its
+/// normals and its name — and a freed utunN reused by another VPN would merge
+/// two places. The tunnel's own address is fixed per config, as for
+/// [`self_hosted_tunnel_addr`]; the device name stays only as the last resort
+/// when the tunnel carries no usable address. The `Option` is that address.
+fn unidentified_tunnel(n: &NetInfo) -> (String, String, Option<&str>) {
+    match tunnel_identity_addr(&n.tunnel_addrs) {
+        Some(addr) => (format!("VPN|{addr}"), format!("VPN {addr}"), Some(addr)),
+        None => (n.tunnel_iface.clone(), "VPN".to_string(), None),
+    }
 }
 
 /// Fingerprint "which network is this" → (stable key, human label).
@@ -268,10 +289,9 @@ pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
 
     let (raw, label) = if full_tunnel {
         let vendor = n.tunnel.as_deref().unwrap_or("");
-        let (vkey, vshown) = if vendor.is_empty() {
-            // Unidentified tunnels fall back to the device name — less stable
-            // (utun4 today, utun6 tomorrow) but better than no location.
-            (n.tunnel_iface.clone(), "VPN".to_string())
+        let unnamed = vendor.is_empty().then(|| unidentified_tunnel(n));
+        let (vkey, vshown) = if let Some((key, shown, _)) = &unnamed {
+            (key.clone(), shown.clone())
         } else if let Some(addr) = self_hosted_tunnel_addr(n, vendor) {
             (format!("{vendor}|{addr}"), format!("{vendor} {addr}"))
         } else {
@@ -299,7 +319,8 @@ pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
                     }
                 ),
             )
-        } else if vendor.is_empty() {
+        } else if matches!(unnamed, Some((_, _, None))) {
+            // Nothing but the device name to go on: say so in the label.
             (
                 format!("vpn|{}|{}", n.tunnel_iface, n.medium as u8),
                 format!("VPN ({})", n.tunnel_iface),
@@ -340,15 +361,15 @@ pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
     // differ in uplink and nearest exit PoP, and mixing their normals would
     // poison both. Hence the LAN identity computed above, suffixed.
     let (raw, label) = if let Some(vendor) = n.tunnel.as_deref().filter(|_| n.tunnel_is_split) {
-        // An unidentified vendor keys on the device name — less stable
-        // (utunN renumbers) but better than folding VPN minutes into the
-        // bare network's normal.
-        let key = if vendor.is_empty() {
-            &n.tunnel_iface
+        // An unidentified vendor keys on the tunnel's own address (see
+        // `unidentified_tunnel`) — still its own place rather than VPN
+        // minutes folded into the bare network's normal.
+        let (key, shown) = if vendor.is_empty() {
+            let (key, shown, _) = unidentified_tunnel(n);
+            (key, shown)
         } else {
-            vendor
+            (vendor.to_string(), vendor.to_string())
         };
-        let shown = if vendor.is_empty() { "VPN" } else { vendor };
         (format!("{raw}|via|{key}"), format!("{label} via {shown}"))
     } else {
         (raw, label)
@@ -594,12 +615,61 @@ mod tests {
         renumbered.ipv4 = vec!["100.96.0.7/32".into()];
         assert_eq!(key, fingerprint(&renumbered).unwrap().0);
 
-        // An unidentified tunnel still gets a location, named by its device.
+        // An unidentified tunnel still gets a location; with no address on
+        // the device to go on, it is named by the device.
         let mut unknown = warp.clone();
         unknown.tunnel = Some(String::new());
         let (ukey, ulabel) = fingerprint(&unknown).unwrap();
         assert_ne!(key, ukey);
         assert_eq!(ulabel, "VPN (CloudflareWARP)");
+    }
+
+    /// A VPN no vendor can be named for keys on its tunnel's own address,
+    /// not the device: macOS renumbers utunN across connects, so the same
+    /// VPN must come back to the same location on utun6, and a utun4 reused
+    /// by a different VPN must not inherit the first one's normals and name.
+    #[test]
+    fn an_unidentified_tunnel_keys_on_its_address_not_its_device() {
+        let vpn = |iface: &str, addrs: &[&str], underlay: &str| NetInfo {
+            iface: iface.into(),
+            ipv4: addrs
+                .iter()
+                .filter(|a| !a.contains(':'))
+                .map(|a| format!("{a}/32"))
+                .collect(),
+            gateway_ip: "-".into(),
+            gateway_mac: "-".into(),
+            medium: LinkMedium::Tunnel,
+            tunnel: Some(String::new()),
+            tunnel_iface: iface.into(),
+            tunnel_addrs: addrs.iter().map(|a| a.to_string()).collect(),
+            underlay_gateway_ip: underlay.into(),
+            ..Default::default()
+        };
+        let (a, label) = fingerprint(&vpn("utun4", &["10.20.0.5"], "")).unwrap();
+        assert_eq!(label, "VPN 10.20.0.5");
+        assert_eq!(a, fingerprint(&vpn("utun6", &["10.20.0.5"], "")).unwrap().0);
+        assert_ne!(a, fingerprint(&vpn("utun4", &["10.77.0.9"], "")).unwrap().0);
+
+        // Over a visible underlay the address rides along after the place.
+        let (home, label) = fingerprint(&vpn("utun4", &["10.20.0.5"], "192.168.10.1")).unwrap();
+        assert_eq!(label, "192.168.10.1 via VPN 10.20.0.5");
+        assert_eq!(
+            home,
+            fingerprint(&vpn("utun9", &["10.20.0.5"], "192.168.10.1"))
+                .unwrap()
+                .0
+        );
+
+        // IPv6-only: the utun's own link-local is skipped.
+        let v6 = |iface: &str| vpn(iface, &["fe80::1234", "fd00:20::5"], "");
+        let (b, label) = fingerprint(&v6("utun4")).unwrap();
+        assert_eq!(label, "VPN fd00:20::5");
+        assert_eq!(b, fingerprint(&v6("utun7")).unwrap().0);
+
+        // Only a link-local: nothing better than the device name.
+        let bare = vpn("utun4", &["fe80::1234"], "");
+        assert_eq!(fingerprint(&bare).unwrap().1, "VPN (utun4)");
     }
 
     /// Two WireGuard configs from the same LAN are two exits, not one: the
@@ -750,13 +820,31 @@ mod tests {
         renumbered.tunnel_iface = "utun7".into();
         assert_eq!(home_warp.0, fingerprint(&renumbered).unwrap().0);
 
-        // An unidentified split tunnel still separates from the bare LAN.
-        let mut unknown = with_warp("HomeNet", "aa:bb:cc:dd:ee:ff");
-        unknown.tunnel = Some(String::new());
-        let (ukey, ulabel) = fingerprint(&unknown).unwrap();
+        // An unidentified split tunnel still separates from the bare LAN,
+        // and keys on the tunnel's own address — not the physical NIC's
+        // (`ipv4` here) and not the renumbering device name.
+        let unknown = |iface: &str, addr: &str| {
+            let mut n = with_warp("HomeNet", "aa:bb:cc:dd:ee:ff");
+            n.tunnel = Some(String::new());
+            n.tunnel_iface = iface.into();
+            n.tunnel_addrs = vec!["fe80::1".into(), addr.into()];
+            n
+        };
+        let (ukey, ulabel) = fingerprint(&unknown("utun4", "10.20.0.5")).unwrap();
         assert_ne!(ukey, home.0);
         assert_ne!(ukey, home_warp.0);
-        assert_eq!(ulabel, "HomeNet via VPN");
+        assert_eq!(ulabel, "HomeNet via VPN 10.20.0.5");
+        assert_eq!(ukey, fingerprint(&unknown("utun7", "10.20.0.5")).unwrap().0);
+        assert_ne!(
+            ukey,
+            fingerprint(&unknown("utun4", "10.77.0.9")).unwrap().0,
+            "a reused utun is a different VPN"
+        );
+
+        // No address on the tunnel: the device name is all there is.
+        let mut unaddressed = unknown("utun4", "10.20.0.5");
+        unaddressed.tunnel_addrs.clear();
+        assert_eq!(fingerprint(&unaddressed).unwrap().1, "HomeNet via VPN");
     }
 
     /// A v6-only carrier hotspot exposes no routable gateway; the SSID alone

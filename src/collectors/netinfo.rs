@@ -173,6 +173,13 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
             let mut devices: Vec<String> = bypassed.clone();
             if info.tunnel.is_some() {
                 devices.push(info.tunnel_iface.clone());
+                let addrs = tunnel_addrs(&ifaces, &info.tunnel_iface);
+                info.tunnel_addrs = addrs
+                    .v4
+                    .iter()
+                    .map(|a| a.to_string())
+                    .chain(addrs.v6.iter().map(|a| a.to_string()))
+                    .collect();
             }
             for dev in &devices {
                 let addrs = tunnel_addrs(&ifaces, dev);
@@ -447,6 +454,7 @@ fn build(iface: &netdev::Interface) -> NetInfo {
         } else {
             String::new()
         },
+        tunnel_addrs: Vec::new(), // filled by the caller with the vendor
         tunnel_is_split: false,
         // Filled by the caller when the tunnel holds the default route.
         underlay_gateway_ip: String::new(),

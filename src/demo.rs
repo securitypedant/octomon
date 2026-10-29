@@ -304,6 +304,14 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
     if global_v6(&v.netinfo.gateway_ipv6) {
         v.netinfo.gateway_ipv6 = d.cidr(&v.netinfo.gateway_ipv6);
     }
+    // A split tunnel's own addresses live apart from the NIC's, and an
+    // unidentified VPN's location label names one ("HomeNet via VPN 2601:…").
+    v.netinfo.tunnel_addrs = v
+        .netinfo
+        .tunnel_addrs
+        .iter()
+        .map(|a| if global_v6(a) { d.cidr(a) } else { a.clone() })
+        .collect();
 
     // Everything else is drawn as measured, with the mapping applied where
     // one of those values turns up again (the router's v6 as a target row,
@@ -807,6 +815,19 @@ mod tests {
             v.baseline.unwrap().label,
             "192.168.10.1 via WireGuard 10.9.8.10"
         );
+
+        // An unidentified split tunnel: the address is the tunnel's own, not
+        // on the NIC, and the network half is disguised as usual.
+        s.netinfo.iface = "en0".into();
+        s.netinfo.ipv4 = vec!["192.168.10.50/24".into()];
+        s.netinfo.tunnel_addrs = vec!["fe80::1".into(), "2601:646:8f00:1234::20".into()];
+        s.baseline = Some(crate::baseline::Baseline {
+            label: "HomeNet via VPN 2601:646:8f00:1234::20".into(),
+            ..Default::default()
+        });
+        let v = disguise(&s, &mut Disguise::new());
+        let label = v.baseline.unwrap().label;
+        assert!(label.starts_with("DemoNet via VPN 2001:db8:"), "{label}");
     }
 
     /// Whois is the point of asking about a server; about our own address
