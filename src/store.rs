@@ -532,8 +532,8 @@ impl FileLock {
         }
     }
 
-    /// Windows has no `flock`, and std's `File::lock` postdates the MSRV, but
-    /// a handle opened with no sharing is the same thing: while it is open,
+    /// Windows has no `flock`, but a handle opened with no sharing is the same
+    /// thing: while it is open,
     /// every other open of the file fails with a sharing violation, and the
     /// OS closes it if the process dies.
     #[cfg(windows)]

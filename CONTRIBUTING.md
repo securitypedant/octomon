@@ -4,7 +4,7 @@ Thanks for your interest! Issues and pull requests are welcome.
 
 ## Development
 
-octomon is a Rust project (edition 2024, Rust 1.88+) supporting **macOS**,
+octomon is a Rust project (edition 2024, Rust 1.95+) supporting **macOS**,
 **Linux** and **Windows**. CI builds and tests all three (x86-64 and ARM64),
 so a change only has to compile everywhere, not be developed everywhere.
 

@@ -178,7 +178,7 @@ recommended.
 ### crates.io / from source
 
 ```sh
-cargo install octomon            # needs Rust 1.88+
+cargo install octomon            # needs Rust 1.95+
 # or
 git clone https://github.com/securitypedant/octomon && cd octomon && cargo build --release
 ```

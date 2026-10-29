@@ -9,7 +9,7 @@ readme = "README.md"
 license = "MIT OR Apache-2.0"
 keywords = ["network", "monitoring", "tui", "bandwidth", "latency"]
 categories = ["command-line-utilities", "network-programming"]
-rust-version = "1.88"
+rust-version = "1.95"
 # An allowlist rather than `exclude`: anything added to the repo later stays out
 # of the crate unless it is deliberately let in. Cargo.toml and Cargo.lock are
 # always included. Keeps CI config, release tooling and the multi-megabyte
