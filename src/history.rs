@@ -11,9 +11,9 @@
 //! Down finding — the cause, the summary, when it started and how long it
 //! lasted — keyed by the network fingerprint the baselines use. Nothing is
 //! written for an episode still in progress; the live view has that. The file
-//! is `history.jsonl` beside `baselines.json`, pruned to 90 days on read.
+//! is `history.jsonl` beside `baselines.json`, pruned to 90 days on read and
+//! hourly while a run keeps appending.
 
-use std::io::Write as _;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -88,33 +88,37 @@ fn path() -> Option<PathBuf> {
     crate::store::data_dir().map(|d| d.join("history.jsonl"))
 }
 
+/// When history.jsonl was last checked for expired episodes.
+static PRUNED: crate::store::PruneClock = crate::store::PruneClock::new();
+
 /// Append one finished episode (best-effort; ignored on error, logged so a
-/// gap in the incident history has an explanation).
+/// gap in the incident history has an explanation). Every
+/// [`crate::store::PRUNE_EVERY`] it also drops what has aged out, as the
+/// startup load does — a `--watch` service can go weeks without a restart.
 pub fn append(ep: &Episode) {
     let Some(p) = path() else {
         crate::errlog::log("history", "no data directory — incident not saved");
         return;
     };
-    if let Some(dir) = p.parent() {
-        let _ = crate::store::create_dir_private(dir);
-    }
-    match (
-        crate::store::private_options()
-            .create(true)
-            .append(true)
-            .open(&p),
-        serde_json::to_string(ep),
-    ) {
-        (Ok(mut f), Ok(line)) => {
-            if let Err(e) = writeln!(f, "{line}") {
-                crate::errlog::log("history", format!("incident not saved: {e}"));
-            }
+    let line = match serde_json::to_string(ep) {
+        Ok(l) => l + "\n",
+        Err(e) => {
+            crate::errlog::log("history", format!("incident not serializable: {e}"));
+            return;
         }
-        (Err(e), _) => crate::errlog::log(
+    };
+    if let Err(e) = crate::store::append_locked(&p, &line) {
+        crate::errlog::log(
             "history",
-            format!("could not open {}: {e} — incident not saved", p.display()),
-        ),
-        (_, Err(e)) => crate::errlog::log("history", format!("incident not serializable: {e}")),
+            format!(
+                "could not append to {}: {e} — incident not saved",
+                p.display()
+            ),
+        );
+        return;
+    }
+    if PRUNED.due(crate::store::PRUNE_EVERY) {
+        prune(&p);
     }
 }
 
@@ -128,21 +132,48 @@ pub fn load() -> Vec<Episode> {
     let Ok(text) = std::fs::read_to_string(&p) else {
         return Vec::new();
     };
-    let cutoff = chrono::Utc::now().timestamp() - RETAIN_DAYS * 86_400;
+    PRUNED.mark();
+    let (kept, rewrite) = retained(&text, cutoff());
+    // The rewrite re-reads under the lock rather than writing `rewrite`
+    // as-is: an episode another octomon process appended since the read
+    // above would otherwise be lost to the rename.
+    if rewrite.is_some() {
+        prune(&p);
+    }
+    kept
+}
+
+/// The oldest start time still retained, as of now.
+fn cutoff() -> i64 {
+    chrono::Utc::now().timestamp() - RETAIN_DAYS * 86_400
+}
+
+/// Drop expired episodes from the file, under the store lock and from a
+/// fresh read.
+fn prune(p: &std::path::Path) {
+    let cutoff = cutoff();
+    if let Err(e) = crate::store::rewrite_locked(p, |text| retained(text, cutoff).1) {
+        crate::errlog::log("history", format!("could not prune {}: {e}", p.display()));
+    }
+}
+
+/// The episodes in `text` that started at or after `cutoff`, plus — only when
+/// any were dropped — the body to rewrite the file with. A file with nothing
+/// expired is left alone, so the periodic check costs a read, not a write.
+fn retained(text: &str, cutoff: i64) -> (Vec<Episode>, Option<String>) {
     let all: Vec<Episode> = text
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
-    let kept: Vec<Episode> = all.iter().filter(|e| e.at >= cutoff).cloned().collect();
-    if kept.len() != all.len() {
-        let body: String = kept
-            .iter()
+    let total = all.len();
+    let kept: Vec<Episode> = all.into_iter().filter(|e| e.at >= cutoff).collect();
+    let rewrite = (kept.len() != total).then(|| {
+        kept.iter()
             .filter_map(|e| serde_json::to_string(e).ok())
             .map(|l| l + "\n")
-            .collect();
-        let _ = crate::store::write_private(&p, body);
-    }
-    kept
+            .collect()
+    });
+    (kept, rewrite)
 }
 
 /// Something worth saying about one network's recent history.
@@ -342,6 +373,32 @@ mod tests {
         assert_eq!(n, 4);
         assert!((19..=21).contains(&start), "window starting {start}");
         assert!(s.line().contains("4 of 6 start"), "{}", s.line());
+    }
+
+    /// The periodic prune reads every hour but must only write when an
+    /// episode has actually aged out — and then keep everything else.
+    #[test]
+    fn only_expired_episodes_are_pruned_and_only_then_is_the_file_rewritten() {
+        let line = |e: &Episode| serde_json::to_string(e).unwrap() + "\n";
+        let old = ep("home", 100, 60, "internet", Severity::Down);
+        let new = ep("home", 300, 60, "gateway", Severity::Degraded);
+        let text = line(&old) + "not json\n" + &line(&new);
+
+        // Nothing expired: everything parseable comes back, no rewrite.
+        let (kept, rewrite) = retained(&text, 100);
+        assert_eq!(kept.len(), 2);
+        assert!(rewrite.is_none());
+
+        // One expired: it goes, the rest is the new body.
+        let (kept, rewrite) = retained(&text, 200);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].at, 300);
+        assert_eq!(rewrite.as_deref(), Some(line(&new).as_str()));
+
+        // All expired: an empty file, not a skipped rewrite.
+        let (kept, rewrite) = retained(&text, 1_000);
+        assert!(kept.is_empty());
+        assert_eq!(rewrite.as_deref(), Some(""));
     }
 
     #[test]

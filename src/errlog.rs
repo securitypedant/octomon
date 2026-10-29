@@ -181,6 +181,11 @@ fn append(line: &str) {
     {
         return;
     }
+    // Held across the roll and the write: with two octomon processes
+    // logging, both can see the file past the limit, and the second rename
+    // would then roll the first one's fresh, near-empty log over the
+    // generation it just kept. Unlocked is still better than unlogged.
+    let _held = crate::store::FileLock::acquire(&path);
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_BYTES) {
         // One generation back is enough to cover "it happened before the
         // roll"; more would be an archive nobody reads.
