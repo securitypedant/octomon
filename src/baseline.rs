@@ -208,15 +208,24 @@ fn mac_is_known(mac: &str) -> bool {
 /// Self-hosted protocols (WireGuard, OpenVPN) name the software, not the
 /// server: two configs for two different exits would share one location.
 /// Their tunnel address is fixed per config, so it tells them apart where the
-/// vendor alone cannot.
+/// vendor alone cannot. An IPv6-only config is told apart by its first
+/// non-link-local address; macOS gives every utun a link-local of its own,
+/// which says nothing about the config.
 fn self_hosted_tunnel_addr<'a>(n: &'a NetInfo, vendor: &str) -> Option<&'a str> {
     if !matches!(vendor, "WireGuard" | "OpenVPN") {
         return None;
     }
+    let bare = |a: &'a String| a.split('/').next().unwrap_or(a);
     n.ipv4
         .first()
-        .map(|a| a.split('/').next().unwrap_or(a))
+        .map(bare)
         .filter(|a| !a.is_empty())
+        .or_else(|| {
+            n.ipv6.iter().map(bare).find(|a| {
+                a.parse::<std::net::Ipv6Addr>()
+                    .is_ok_and(|v6| (v6.segments()[0] & 0xffc0) != 0xfe80)
+            })
+        })
 }
 
 /// Fingerprint "which network is this" → (stable key, human label).
@@ -626,6 +635,18 @@ mod tests {
             fingerprint(&no_underlay).unwrap().0,
             fingerprint(&other).unwrap().0
         );
+
+        // IPv6-only configs: the utun's own link-local is skipped, the
+        // config's address keys the location.
+        let v6 = |addr: &str| {
+            let mut n = wg("utun10", "");
+            n.ipv4 = Vec::new();
+            n.ipv6 = vec!["fe80::1234/64".into(), addr.into()];
+            n
+        };
+        let (a, label) = fingerprint(&v6("fd00:9::10/128")).unwrap();
+        assert_eq!(label, "192.168.10.1 via WireGuard fd00:9::10");
+        assert_ne!(a, fingerprint(&v6("fd00:13::2/128")).unwrap().0);
     }
 
     /// A full tunnel with a visible physical network underneath keys on that

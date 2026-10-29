@@ -519,9 +519,11 @@ impl Disguise {
     fn ssid_or_text(&mut self, label: &str) -> String {
         // Split-tunnel locations read "HomeNet via Cloudflare WARP": the
         // network half identifies the place and gets disguised; the vendor
-        // half identifies software and stays.
+        // half identifies software and stays — except a self-hosted tunnel's
+        // address ("WireGuard 2001:…"), which gets the same substitutions as
+        // that address anywhere else.
         if let Some((net, vpn)) = label.split_once(" via ") {
-            return format!("{} via {vpn}", self.ssid_or_text(net));
+            return format!("{} via {}", self.ssid_or_text(net), self.text(vpn));
         }
         if label.parse::<IpAddr>().is_ok() || self.subs.contains_key(label) {
             return self.text(label);
@@ -773,6 +775,38 @@ mod tests {
         );
         // The live state is untouched.
         assert_eq!(s.netinfo.mac, "de:ad:be:ef:00:01");
+    }
+
+    /// A self-hosted tunnel's location label carries its address. A public
+    /// one is hidden the way it is in the Network panel; the LAN half and a
+    /// private tunnel address stay, like every other private address.
+    #[test]
+    fn a_tunnel_location_label_hides_only_a_public_address() {
+        let mut s = AppState::new(vec![]);
+        s.netinfo.iface = "utun10".into();
+        s.netinfo.ipv6 = vec!["2601:646:8f00:1234::10/128".into()];
+        s.baseline = Some(crate::baseline::Baseline {
+            label: "192.168.10.1 via WireGuard 2601:646:8f00:1234::10".into(),
+            ..Default::default()
+        });
+        let v = disguise(&s, &mut Disguise::new());
+        let label = v.baseline.unwrap().label;
+        assert!(
+            label.starts_with("192.168.10.1 via WireGuard 2001:db8:"),
+            "{label}"
+        );
+
+        s.netinfo.ipv6 = Vec::new();
+        s.netinfo.ipv4 = vec!["10.9.8.10/32".into()];
+        s.baseline = Some(crate::baseline::Baseline {
+            label: "192.168.10.1 via WireGuard 10.9.8.10".into(),
+            ..Default::default()
+        });
+        let v = disguise(&s, &mut Disguise::new());
+        assert_eq!(
+            v.baseline.unwrap().label,
+            "192.168.10.1 via WireGuard 10.9.8.10"
+        );
     }
 
     /// Whois is the point of asking about a server; about our own address

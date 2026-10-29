@@ -15,9 +15,11 @@ use crate::app::{AppState, BypassedTunnel, LinkMedium, NetInfo};
 pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc<Notify>) {
     let mut ticker = tokio::time::interval(Duration::from_secs(5));
     // Identifying the VPN behind a tunnel can fall back to scanning the process
-    // table, so the answer is cached per tunnel device rather than redone every
-    // tick — for the tunnel carrying the traffic and for any sitting beside it.
-    let mut vendor_cache: HashMap<String, String> = HashMap::new();
+    // table, so the answer is cached per tunnel rather than redone every tick
+    // — for the tunnel carrying the traffic and for any sitting beside it.
+    // Keyed on the device *and* its addresses: macOS hands a freed utunN to
+    // whichever VPN connects next, and a name-only key kept the old vendor.
+    let mut vendor_cache: HashMap<String, (TunnelAddrs, String)> = HashMap::new();
     // The DHCP server behind the current lease barely ever changes, so it is
     // asked for once per attachment (a lease-file read or one-line shell-out)
     // and cached — keyed on interface + gateway, which is what a new
@@ -173,22 +175,26 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
                 devices.push(info.tunnel_iface.clone());
             }
             for dev in &devices {
-                if !vendor_cache.contains_key(dev) {
-                    let name = dev.clone();
-                    let v = tokio::task::spawn_blocking(move || tunnel_vendor(name))
+                let addrs = tunnel_addrs(&ifaces, dev);
+                if vendor_cache.get(dev).is_none_or(|(had, _)| *had != addrs) {
+                    let key = addrs.clone();
+                    let v = tokio::task::spawn_blocking(move || tunnel_vendor(&key))
                         .await
                         .unwrap_or_default();
-                    vendor_cache.insert(dev.clone(), v);
+                    vendor_cache.insert(dev.clone(), (addrs, v));
                 }
             }
             vendor_cache.retain(|dev, _| devices.contains(dev));
             if info.tunnel.is_some() {
-                info.tunnel = vendor_cache.get(&info.tunnel_iface).cloned();
+                info.tunnel = vendor_cache.get(&info.tunnel_iface).map(|(_, v)| v.clone());
             }
             info.bypassed_tunnels = bypassed
                 .into_iter()
                 .map(|iface| BypassedTunnel {
-                    vendor: vendor_cache.get(&iface).cloned().unwrap_or_default(),
+                    vendor: vendor_cache
+                        .get(&iface)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default(),
                     iface,
                 })
                 .collect();
@@ -918,20 +924,30 @@ fn vendor_from_addrs(v4: &[Ipv4Addr], v6: &[Ipv6Addr]) -> Option<&'static str> {
         .map(|vpn| vpn.display)
 }
 
-/// Identify the VPN carrying `iface_name`. Returns an empty string when nothing
+/// A tunnel device and the addresses on it right now.
+#[derive(Clone, Default, PartialEq)]
+struct TunnelAddrs {
+    v4: Vec<Ipv4Addr>,
+    v6: Vec<Ipv6Addr>,
+}
+
+fn tunnel_addrs(ifaces: &[netdev::Interface], iface_name: &str) -> TunnelAddrs {
+    ifaces
+        .iter()
+        .find(|i| counter_name(i) == iface_name)
+        .map(|iface| TunnelAddrs {
+            v4: iface.ipv4.iter().map(|n| n.addr()).collect(),
+            v6: iface.ipv6.iter().map(|n| n.addr()).collect(),
+        })
+        .unwrap_or_default()
+}
+
+/// Identify the VPN carrying a tunnel. Returns an empty string when nothing
 /// can be pinned down — the tunnel is still reported, just unnamed, which beats
 /// naming the wrong one.
-fn tunnel_vendor(iface_name: String) -> String {
+fn tunnel_vendor(t: &TunnelAddrs) -> String {
     // The live tunnel's own addresses are the first signal.
-    let by_addr = netdev::get_interfaces()
-        .into_iter()
-        .find(|i| counter_name(i) == iface_name)
-        .and_then(|iface| {
-            let v4: Vec<Ipv4Addr> = iface.ipv4.iter().map(|n| n.addr()).collect();
-            let v6: Vec<Ipv6Addr> = iface.ipv6.iter().map(|n| n.addr()).collect();
-            let vendor = vendor_from_addrs(&v4, &v6)?;
-            Some((vendor, addr_match(&v4)))
-        });
+    let by_addr = vendor_from_addrs(&t.v4, &t.v6).map(|v| (v, addr_match(&t.v4)));
 
     // The process table is the other: every VPN client whose process is
     // resident, which several can be at once.
