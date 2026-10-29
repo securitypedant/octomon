@@ -40,7 +40,8 @@ pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Confi
     if probe.is_empty() {
         return Outcome::Disabled;
     }
-    let walk = Command::new(tr::PROGRAM)
+    let program = tr::program(&probe);
+    let walk = Command::new(program)
         .args(tr::args(MAX_HOPS, &probe))
         .stdin(std::process::Stdio::null())
         // The timeout below drops the future; without this the traceroute
@@ -56,7 +57,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Confi
         Ok(Err(e)) => {
             crate::errlog::log(
                 "discovery",
-                format!("could not run {}: {e} — no hops discovered", tr::PROGRAM),
+                format!("could not run {program}: {e} — no hops discovered"),
             );
             return gateway_only(state, clients, cfg).await;
         }
@@ -65,7 +66,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Confi
                 "discovery",
                 format!(
                     "{} did not finish within {}s toward {probe} — no hops discovered",
-                    tr::PROGRAM,
+                    program,
                     WALK_TIMEOUT.as_secs()
                 ),
             );
@@ -81,7 +82,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Confi
             "discovery",
             format!(
                 "{} exited {} toward {probe}{}",
-                tr::PROGRAM,
+                program,
                 out.status.code().unwrap_or(-1),
                 if why.trim().is_empty() {
                     String::new()
@@ -147,7 +148,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, clients: ping::Clients, cfg: Confi
             "discovery",
             format!(
                 "{} toward {probe} answered no hops — the path is filtered, or a captive portal is in the way",
-                tr::PROGRAM
+                program
             ),
         );
     }
