@@ -193,6 +193,7 @@ fn append_log(entry: &str) {
         .create(true)
         .append(true)
         .open(&path)
+        .inspect(crate::store::hand_back)
     {
         let _ = f.write_all(entry.as_bytes());
     }

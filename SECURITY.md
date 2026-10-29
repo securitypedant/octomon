@@ -39,12 +39,22 @@ no different code path — the same calls simply see more: every process's
 sockets rather than your own, and ICMP on a Linux box whose ping-socket range
 is closed. Details per platform are in [PRIVILEGES.md](PRIVILEGES.md).
 
-Two things an elevated run does differently, both because `sudo` can leave
+Three things an elevated run does differently, all because `sudo` can leave
 `$HOME` pointing at the invoking user's directories (macOS does by default):
 it never writes through a symlink or re-permissions a file or directory root
 does not own, and it ignores an `[alert] command` from a `config.toml` root
 does not own (`--alert-cmd` on root's own command line still runs). Otherwise
-a link or a line planted in the user's home would have root act on it.
+a link or a line planted in the user's home would have root act on it. And
+under `sudo` (`SUDO_UID` set, running as root) it gives what it creates in
+its own data and config directories back to the invoking user, along with
+any `~/.local/share`-style parent it had to create on the way, so a later
+unprivileged run can still read and append them. That is an `fchown` of the
+open descriptor, only for something root owns, never for a file with more
+than one hard link, and only after the descriptor itself (`F_GETPATH` on
+macOS, `/proc/self/fd` on Linux) places it under the invoking user's home as
+recorded in the password database — not `$HOME` — and inside octomon's own
+directories. A `config.toml` named with `--config` outside those stays
+root's.
 
 **Network.** octomon listens on no port and runs no service. Everything it
 contacts is listed, with why and how often, in the README's

@@ -142,6 +142,8 @@ async fn open() -> Result<(tokio::fs::File, std::path::PathBuf), String> {
         }
     }
     let mut f = opts.open(&path).await.map_err(|e| e.to_string())?;
+    // Under `sudo`, the recording is the invoking user's, not root's.
+    crate::store::hand_back(&f);
     f.write_all(HEADER.as_bytes())
         .await
         .map_err(|e| e.to_string())?;

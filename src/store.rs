@@ -102,17 +102,276 @@ pub fn owned_by_me(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// The account a `sudo` run is acting for, as `(uid, gid)`: set only when the
+/// effective uid is 0 and sudo's `SUDO_UID` / `SUDO_GID` name somebody other
+/// than root. That is the run whose `$HOME` can still be the invoking user's
+/// (macOS keeps it; `sudo -E` keeps it on Linux), so the files it creates
+/// there would otherwise be root-owned and owner-only — and the next
+/// unprivileged run could neither read nor append its own baselines, history
+/// or logs, failing as quietly as every other best-effort write here.
+/// Computed once: none of the inputs change for the life of the process.
+#[cfg(unix)]
+fn invoker() -> Option<(u32, u32)> {
+    static INVOKER: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    *INVOKER.get_or_init(|| {
+        // SAFETY: geteuid() takes no arguments, cannot fail, and only reads the
+        // calling process's own credentials.
+        let euid = unsafe { libc::geteuid() };
+        invoker_from(
+            euid,
+            std::env::var("SUDO_UID").ok().as_deref(),
+            std::env::var("SUDO_GID").ok().as_deref(),
+        )
+    })
+}
+
+/// [`invoker`]'s decision, apart from the process it reads. A `SUDO_UID` of 0
+/// (root sudo-ing to root) has nobody to hand anything back to, and a value
+/// that does not parse is not guessed at: the files simply stay root's, which
+/// is what happened before this existed.
+#[cfg(unix)]
+fn invoker_from(euid: u32, uid: Option<&str>, gid: Option<&str>) -> Option<(u32, u32)> {
+    if euid != 0 {
+        return None;
+    }
+    let uid: u32 = uid?.trim().parse().ok()?;
+    let gid: u32 = gid?.trim().parse().ok()?;
+    (uid != 0).then_some((uid, gid))
+}
+
+/// The invoking user's home directory, from the password database rather than
+/// `$HOME` — the environment is exactly what is in question under `sudo` —
+/// and with symlinks resolved, so it compares against the resolved path of an
+/// open file. Computed once.
+#[cfg(unix)]
+fn invoker_home(uid: u32) -> Option<&'static std::path::Path> {
+    static HOME: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        use std::os::unix::ffi::OsStrExt as _;
+        // SAFETY: an all-zero `passwd` is a valid value for getpwuid_r to fill
+        // in (every field is an integer or a pointer).
+        let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut buf = vec![0 as libc::c_char; 16 * 1024];
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: every pointer is to a live local of the size passed, and the
+        // strings it fills in point into `buf`, which outlives their use below.
+        let rc =
+            unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut found) };
+        if rc != 0 || found.is_null() || pwd.pw_dir.is_null() {
+            return None;
+        }
+        // SAFETY: getpwuid_r succeeded, so pw_dir is a NUL-terminated string
+        // inside `buf`.
+        let dir = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) };
+        std::fs::canonicalize(std::ffi::OsStr::from_bytes(dir.to_bytes())).ok()
+    })
+    .as_deref()
+}
+
+/// Where an open file or directory actually is, asked of the descriptor rather
+/// than worked out from the path it was opened by. The path's directories sit
+/// in the invoking user's home, where anything running as that user can swap
+/// one for a symlink between a check and a use; the descriptor's own answer
+/// cannot be redirected that way. Platforms without a way to ask return
+/// `None`, and nothing is handed back there.
+#[cfg(target_os = "macos")]
+fn real_path(fd: std::os::fd::RawFd) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes at most MAXPATHLEN (== PATH_MAX) bytes,
+    // NUL-terminated, into the buffer, which is that size.
+    if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } == -1 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0)?;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..end])))
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn real_path(fd: std::os::fd::RawFd) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/self/fd/{fd}")).ok()
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "linux", target_os = "android"))
+))]
+fn real_path(_fd: std::os::fd::RawFd) -> Option<PathBuf> {
+    None
+}
+
+/// What a resolved path is to octomon, for deciding whether a `sudo` run may
+/// give it to the invoking user.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Scope {
+    /// One of octomon's own directories, or something inside one.
+    Own,
+    /// A directory between the home directory and one of octomon's own that
+    /// this very call had to create (`~/.local/share` on a Mac that never had
+    /// one). Left root-owned, it would break every other program that keeps
+    /// its data there, not just octomon.
+    CreatedParent,
+}
+
+/// Whether `real` — a resolved path, from [`real_path`] — may be chowned to the
+/// invoking user. Never the home directory itself and never anything outside
+/// it: that is the line that keeps a planted link from turning "give the user
+/// back their file" into "give the user a file of root's". And within the
+/// home, only octomon's own directories (`roots`, also resolved) and what is
+/// in them, or a parent of one that octomon just created. A home of `/` would
+/// make every path qualify, so it disqualifies everything instead.
+#[cfg(unix)]
+fn may_hand_back(
+    real: &std::path::Path,
+    home: &std::path::Path,
+    roots: &[PathBuf],
+    scope: Scope,
+) -> bool {
+    use std::path::Component;
+    let plain = |p: &std::path::Path| {
+        p.is_absolute()
+            && p.components()
+                .all(|c| !matches!(c, Component::ParentDir | Component::CurDir))
+    };
+    if !plain(real) || !plain(home) || home.parent().is_none() {
+        return false;
+    }
+    if real == home || !real.starts_with(home) {
+        return false;
+    }
+    roots
+        .iter()
+        .filter(|r| plain(r) && r.starts_with(home) && r.as_path() != home)
+        .any(|r| match scope {
+            Scope::Own => real.starts_with(r),
+            Scope::CreatedParent => r.starts_with(real),
+        })
+}
+
+/// octomon's own directories, resolved: the data directory and the default
+/// config directory. A `--config` file elsewhere is not among them — its
+/// directory is whatever the user named, and is not octomon's to give away.
+#[cfg(unix)]
+fn own_roots() -> Vec<PathBuf> {
+    [data_dir(), crate::config::Config::dir()]
+        .into_iter()
+        .flatten()
+        .filter_map(|d| std::fs::canonicalize(d).ok())
+        .collect()
+}
+
+/// Give a file or directory octomon holds open back to the user who ran
+/// `sudo octomon` (see [`invoker`]). A no-op unprivileged, and for anything
+/// not owned by root: a file that already belongs to the user stays theirs,
+/// and one that belongs to some third account is not ours to give away.
+///
+/// Everything is decided from the descriptor — `fstat` for what it is and who
+/// owns it, [`real_path`] for where it is — and the change is an `fchown` of
+/// that same descriptor, so no symlink planted along the path can point it at
+/// anything else. A regular file with more than one link is left alone: a
+/// hard link to a root file (macOS does not stop a user making one) would
+/// otherwise hand the user that file.
+#[cfg(unix)]
+fn hand_back_fd(fd: std::os::fd::BorrowedFd<'_>, scope: Scope) {
+    use std::os::fd::AsRawFd as _;
+    let Some((uid, gid)) = invoker() else { return };
+    let raw = fd.as_raw_fd();
+    // SAFETY: an all-zero `stat` is a valid value for fstat to overwrite.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `raw` is a descriptor borrowed for this call, and `st` is a
+    // live local of the right type.
+    if unsafe { libc::fstat(raw, &mut st) } != 0 || st.st_uid != 0 {
+        return;
+    }
+    let kind = st.st_mode & libc::S_IFMT;
+    let regular = kind == libc::S_IFREG && st.st_nlink == 1;
+    if !regular && kind != libc::S_IFDIR {
+        return;
+    }
+    let Some(home) = invoker_home(uid) else {
+        return;
+    };
+    let Some(real) = real_path(raw) else { return };
+    if !may_hand_back(&real, home, &own_roots(), scope) {
+        return;
+    }
+    // Best-effort, like every write it follows: a failure leaves the file
+    // root-owned, which is no worse than before.
+    // SAFETY: `raw` is a live descriptor for the duration of this call.
+    let _ = unsafe { libc::fchown(raw, uid, gid) };
+}
+
+/// [`hand_back_fd`] for a file just opened in one of octomon's own
+/// directories. Call it on every file octomon creates there — it costs one
+/// `fstat` once the file is already the user's, and nothing at all
+/// unprivileged. Shaped to slot into `open(..).inspect(store::hand_back)`.
+#[cfg(unix)]
+pub fn hand_back<F: std::os::fd::AsFd>(file: &F) {
+    if invoker().is_some() {
+        hand_back_fd(file.as_fd(), Scope::Own);
+    }
+}
+
+#[cfg(not(unix))]
+pub fn hand_back<F>(_file: &F) {}
+
+/// Open `path` without following a symlink and without blocking (a planted
+/// FIFO would otherwise hang the open), for [`hand_back_fd`]. Read-only is
+/// enough: `fchown` needs ownership privileges, not write access.
+#[cfg(unix)]
+fn open_nofollow(path: &std::path::Path, dir: bool) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut flags = libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+    if dir {
+        flags |= libc::O_DIRECTORY;
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)
+        .ok()
+}
+
 /// `create_dir_all`, then make the leaf owner-only — when it is ours. A
 /// directory somebody else owns (their `$XDG_DATA_HOME`, or the user's own
 /// tree seen from a `sudo` run) is not ours to re-permission.
+///
+/// Under `sudo`, the directories this call created are then given to the
+/// invoking user (see [`hand_back`]) — the leaf after it has been made
+/// owner-only, since once it is theirs [`owned_by_me`] no longer lets root
+/// touch its mode.
 pub fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    let created: Vec<PathBuf> = if invoker().is_some() {
+        dir.ancestors()
+            .take_while(|a| std::fs::symlink_metadata(a).is_err())
+            .map(std::path::Path::to_path_buf)
+            .collect()
+    } else {
+        Vec::new()
+    };
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
+        use std::os::fd::AsFd as _;
         use std::os::unix::fs::PermissionsExt as _;
         // Best-effort: failing here would cost the write.
         if owned_by_me(dir) {
             let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(DIR_MODE));
+        }
+        if invoker().is_some() {
+            // The leaf is octomon's own whether or not this call made it, so
+            // one a past `sudo` run left root-owned is repaired here too. Its
+            // parents are handed back only if this call created them.
+            if let Some(f) = open_nofollow(dir, true) {
+                hand_back_fd(f.as_fd(), Scope::Own);
+            }
+            for parent in created.iter().filter(|p| p.as_path() != dir) {
+                if let Some(f) = open_nofollow(parent, true) {
+                    hand_back_fd(f.as_fd(), Scope::CreatedParent);
+                }
+            }
         }
     }
     Ok(())
@@ -148,6 +407,13 @@ pub fn private_options() -> std::fs::OpenOptions {
 /// the previous file intact rather than a truncated one — which, for
 /// config.toml and baselines.json, would read as every setting or every
 /// learned network gone at the next start.
+///
+/// The rename means the target takes the temporary file's owner, so under
+/// `sudo` a file the user owned would come back root's at every save. The
+/// temporary file is handed back (see [`hand_back`]) before the rename for
+/// that reason. It is also always a fresh one: a leftover from a crash is
+/// removed and the new one created exclusively, so a hard link planted under
+/// that name can neither be truncated through nor end up in place.
 pub fn write_private(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
     use std::io::Write as _;
     // A symlinked target (a config.toml kept in a dotfiles repo) is written
@@ -173,11 +439,15 @@ pub fn write_private(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std:
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "octomon".to_string())
     ));
-    let mut f = private_options()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&tmp)?;
+    let fresh = || private_options().write(true).create_new(true).open(&tmp);
+    let mut f = match fresh() {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(&tmp)?;
+            fresh()?
+        }
+        opened => opened?,
+    };
+    hand_back(&f);
     let written = f
         .write_all(contents.as_ref())
         .and_then(|()| f.sync_all())
@@ -243,7 +513,8 @@ impl FileLock {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(lock)?;
+            .open(lock)
+            .inspect(hand_back)?;
         loop {
             // SAFETY: the descriptor is open for the duration of the call (it
             // is borrowed from `file`), and flock only reads its arguments.
@@ -303,7 +574,8 @@ pub fn append_locked(path: &std::path::Path, text: &str) -> std::io::Result<()> 
     private_options()
         .create(true)
         .append(true)
-        .open(path)?
+        .open(path)
+        .inspect(hand_back)?
         .write_all(text.as_bytes())
 }
 
@@ -377,6 +649,11 @@ impl PruneClock {
 /// keep its world-readable history forever without a pass like this. Runs once
 /// at startup, best-effort, and never recurses — the data and config
 /// directories are flat.
+///
+/// Under `sudo` it also gives back to the invoking user whatever an earlier
+/// `sudo` run left root-owned there (see [`hand_back`]) — without that, an
+/// install hit before files were handed back would stay unwritable to its
+/// own user.
 #[cfg(unix)]
 pub fn tighten_permissions() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -384,6 +661,9 @@ pub fn tighten_permissions() {
         .into_iter()
         .flatten()
     {
+        if invoker().is_some() {
+            hand_back_tree(&dir);
+        }
         // Only a directory this user owns, and never through a symlink: an
         // elevated run over the invoking user's home must not chmod whatever
         // a planted link points at (see `owned_by_me`).
@@ -402,6 +682,29 @@ pub fn tighten_permissions() {
             if regular && owned_by_me(&path) {
                 let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(FILE_MODE));
             }
+        }
+    }
+}
+
+/// The `sudo` half of [`tighten_permissions`]: one of octomon's directories
+/// and the regular files directly in it, each opened without following links
+/// and handed back through its descriptor. Flat, like the directories.
+#[cfg(unix)]
+fn hand_back_tree(dir: &std::path::Path) {
+    use std::os::fd::AsFd as _;
+    let Some(d) = open_nofollow(dir, true) else {
+        return;
+    };
+    hand_back_fd(d.as_fd(), Scope::Own);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        if let Some(f) = open_nofollow(&entry.path(), false) {
+            hand_back_fd(f.as_fd(), Scope::Own);
         }
     }
 }
@@ -787,6 +1090,141 @@ mod tests {
         drop(held);
         assert!(rewrite_locked(&path, |_| Some("b\n".into())).unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "b\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only a real `sudo` run hands anything back: root with a non-root
+    /// `SUDO_UID`. An unprivileged process with sudo's variables inherited
+    /// (a shell spawned from a sudo session) has nothing to give away, and a
+    /// mangled variable is not guessed at.
+    #[cfg(unix)]
+    #[test]
+    fn only_root_acting_for_someone_else_has_an_invoker() {
+        assert_eq!(invoker_from(0, Some("501"), Some("20")), Some((501, 20)));
+        assert_eq!(invoker_from(501, Some("501"), Some("20")), None);
+        assert_eq!(invoker_from(0, Some("0"), Some("0")), None);
+        assert_eq!(invoker_from(0, None, Some("20")), None);
+        assert_eq!(invoker_from(0, Some("501"), None), None);
+        assert_eq!(invoker_from(0, Some("-1"), Some("20")), None);
+        assert_eq!(invoker_from(0, Some("alice"), Some("20")), None);
+    }
+
+    /// The line between "give the user back their file" and "give the user a
+    /// file of root's" — every case a planted link could steer a resolved path
+    /// into.
+    #[cfg(unix)]
+    #[test]
+    fn only_octomons_own_files_under_the_home_are_handed_back() {
+        use std::path::Path;
+        let home = Path::new("/Users/alice");
+        let roots = [
+            PathBuf::from("/Users/alice/.local/share/octomon"),
+            PathBuf::from("/Users/alice/.config/octomon"),
+        ];
+        let own = |p: &str| may_hand_back(Path::new(p), home, &roots, Scope::Own);
+        let parent = |p: &str| may_hand_back(Path::new(p), home, &roots, Scope::CreatedParent);
+
+        // octomon's directories and what is in them.
+        assert!(own("/Users/alice/.local/share/octomon"));
+        assert!(own("/Users/alice/.local/share/octomon/baselines.json"));
+        assert!(own("/Users/alice/.config/octomon/.config.toml.tmp"));
+
+        // A link steered the open somewhere else entirely.
+        assert!(!own("/etc/sudoers"));
+        assert!(!own("/Users/bob/.local/share/octomon/history.jsonl"));
+        // A sibling whose name merely starts the same way.
+        assert!(!own("/Users/alice/.local/share/octomon-old/history.jsonl"));
+        assert!(!own("/Users/alicex/.local/share/octomon/history.jsonl"));
+        // In the home, but not octomon's.
+        assert!(!own("/Users/alice/.ssh/authorized_keys"));
+        assert!(!own("/Users/alice"));
+        // Lexical tricks never count as inside.
+        assert!(!own(
+            "/Users/alice/.local/share/octomon/../../../../etc/passwd"
+        ));
+        assert!(!own("relative/octomon/x"));
+
+        // Parents: only directories on the way to one of octomon's own, and
+        // never the home itself.
+        assert!(parent("/Users/alice/.local"));
+        assert!(parent("/Users/alice/.local/share"));
+        assert!(parent("/Users/alice/.config"));
+        assert!(!parent("/Users/alice"));
+        assert!(!parent("/Users"));
+        assert!(!parent("/Users/alice/Library"));
+        // `Own` does not stretch to the parents, nor `CreatedParent` to files.
+        assert!(!own("/Users/alice/.local/share"));
+        assert!(!parent("/Users/alice/.local/share/octomon/errors.log"));
+    }
+
+    /// A home or a root that would make the containment checks vacuous
+    /// disqualifies rather than qualifies.
+    #[cfg(unix)]
+    #[test]
+    fn a_degenerate_home_or_root_hands_back_nothing() {
+        use std::path::Path;
+        let anywhere = [PathBuf::from("/etc")];
+        assert!(!may_hand_back(
+            Path::new("/etc/sudoers"),
+            Path::new("/"),
+            &anywhere,
+            Scope::Own
+        ));
+        // An `$XDG_DATA_HOME` pointing outside the home is not octomon's to
+        // hand out, even though it is octomon's directory.
+        let home = Path::new("/Users/alice");
+        assert!(!may_hand_back(
+            Path::new("/etc/sudoers"),
+            home,
+            &anywhere,
+            Scope::Own
+        ));
+        // The home named as a root does not make the whole home fair game.
+        let whole = [PathBuf::from("/Users/alice")];
+        assert!(!may_hand_back(
+            Path::new("/Users/alice/.ssh/id_ed25519"),
+            home,
+            &whole,
+            Scope::Own
+        ));
+    }
+
+    /// Everything [`hand_back_fd`] decides rests on the descriptor reporting
+    /// where it really is: through a symlinked directory, the resolved path,
+    /// not the one it was opened by.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_descriptor_reports_its_resolved_path() {
+        use std::os::fd::AsRawFd as _;
+        let dir = std::env::temp_dir().join(format!("octomon-realpath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+        std::fs::write(dir.join("real/f"), "x").unwrap();
+
+        let f = std::fs::File::open(dir.join("link/f")).unwrap();
+        let want = std::fs::canonicalize(dir.join("real/f")).unwrap();
+        assert_eq!(real_path(f.as_raw_fd()), Some(want));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The temporary file `write_private` renames into place is created fresh
+    /// even when a stale one is lying there — a hard link under that name must
+    /// be replaced, not truncated through. Runs in a scratch directory, never
+    /// the real data directory.
+    #[test]
+    fn a_stale_temporary_file_is_replaced_not_written_through() {
+        let dir = std::env::temp_dir().join(format!("octomon-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "keep me").unwrap();
+        let target = dir.join("baselines.json");
+        std::fs::hard_link(&victim, dir.join(".baselines.json.tmp")).unwrap();
+
+        write_private(&target, "{}").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{}");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
