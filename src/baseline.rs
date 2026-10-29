@@ -397,10 +397,11 @@ fn path() -> Option<std::path::PathBuf> {
 /// normal would be gone for good over one bad byte. Moved aside, it can be
 /// repaired by hand.
 pub fn load() -> Store {
-    let Some(p) = path() else {
-        return Store::new();
-    };
-    let text = match std::fs::read_to_string(&p) {
+    path().map(|p| load_from(&p)).unwrap_or_default()
+}
+
+fn load_from(p: &std::path::Path) -> Store {
+    let text = match std::fs::read_to_string(p) {
         Ok(t) => t,
         Err(_) => return Store::new(),
     };
@@ -408,7 +409,7 @@ pub fn load() -> Store {
         Ok(store) => store,
         Err(e) => {
             let aside = p.with_extension("json.corrupt");
-            let moved = std::fs::rename(&p, &aside);
+            let moved = std::fs::rename(p, &aside);
             crate::errlog::log(
                 "baseline",
                 match moved {
@@ -428,17 +429,50 @@ pub fn load() -> Store {
     }
 }
 
-/// Best-effort whole-file rewrite — a handful of networks × ~200 bytes.
-/// A failure here means every learned normal is lost at exit, which shows up
-/// much later as "it forgot my networks", so it goes on the record.
-pub fn save(store: &Store) {
+/// Change the stored baselines in place: load, `edit`, save, all under the
+/// file's [`crate::store::FileLock`]. Two octomon processes (the dashboard and
+/// a `--watch` service, or two watchers) save at the same moments — startup,
+/// a network change — and unlocked they share one temporary file, so one
+/// rename fails, and whichever save lands last drops the network the other
+/// just learned. Loading after the lock is taken keeps both.
+fn update(edit: impl FnOnce(&mut Store)) {
     let Some(p) = path() else {
         crate::errlog::log("baseline", "no data directory — learned networks not saved");
         return;
     };
+    if !update_at(&p, edit) {
+        crate::errlog::log(
+            "baseline",
+            format!(
+                "another octomon process is holding {} — learned networks not saved",
+                p.display()
+            ),
+        );
+    }
+}
+
+/// `false` when the lock stayed busy and nothing was written.
+fn update_at(p: &std::path::Path, edit: impl FnOnce(&mut Store)) -> bool {
+    if let Some(dir) = p.parent() {
+        let _ = crate::store::create_dir_private(dir);
+    }
+    let Some(_held) = crate::store::FileLock::acquire(p) else {
+        return false;
+    };
+    let mut all = load_from(p);
+    edit(&mut all);
+    save_to(p, &all);
+    true
+}
+
+/// Best-effort whole-file rewrite — a handful of networks × ~200 bytes.
+/// A failure here means every learned normal is lost at exit, which shows up
+/// much later as "it forgot my networks", so it goes on the record. Only
+/// [`update_at`] calls this, with the file's lock held.
+fn save_to(p: &std::path::Path, store: &Store) {
     // If `load` could not move a corrupt file aside, it is still there and
     // still somebody's history: do not write over it.
-    if let Ok(text) = std::fs::read_to_string(&p)
+    if let Ok(text) = std::fs::read_to_string(p)
         && serde_json::from_str::<Store>(&text).is_err()
     {
         crate::errlog::log(
@@ -450,12 +484,9 @@ pub fn save(store: &Store) {
         );
         return;
     }
-    if let Some(dir) = p.parent() {
-        let _ = crate::store::create_dir_private(dir);
-    }
     match serde_json::to_string_pretty(store) {
         Ok(json) => {
-            if let Err(e) = crate::store::write_private(&p, json) {
+            if let Err(e) = crate::store::write_private(p, json) {
                 crate::errlog::log(
                     "baseline",
                     format!(
@@ -476,33 +507,33 @@ pub fn load_one(key: &str) -> Option<Baseline> {
 
 /// Merge one network's baseline back in and persist (blocking — off the lock).
 pub fn save_one(key: &str, b: &Baseline) {
-    let mut all = load();
-    all.insert(key.to_string(), b.clone());
-    save(&all);
+    update(|all| {
+        all.insert(key.to_string(), b.clone());
+    });
 }
 
 /// Remove one network's stored baseline (blocking — off the lock). Its
 /// incident history is deliberately kept: if the network is ever visited
 /// again, "3 outages this week" is still true and still useful.
 pub fn forget(key: &str) {
-    let mut all = load();
-    all.remove(key);
-    save(&all);
+    update(|all| {
+        all.remove(key);
+    });
 }
 
 /// Set the user's name for a network, keeping any learned stats.
 pub fn name_network(key: &str, label: &str, name: &str) {
-    let mut all = load();
-    let entry = all.entry(key.to_string()).or_insert_with(|| Baseline {
-        label: label.to_string(),
-        ..Default::default()
+    update(|all| {
+        let entry = all.entry(key.to_string()).or_insert_with(|| Baseline {
+            label: label.to_string(),
+            ..Default::default()
+        });
+        entry.name = if name.trim().is_empty() {
+            None
+        } else {
+            Some(name.trim().to_string())
+        };
     });
-    entry.name = if name.trim().is_empty() {
-        None
-    } else {
-        Some(name.trim().to_string())
-    };
-    save(&all);
 }
 
 /// "current is way above normal": the abnormality test used for confidence
@@ -918,5 +949,66 @@ mod tests {
         assert!(!well_above(25.0, 9.0), "under the ratio");
         assert!(well_above(41.0, 9.0));
         assert!(well_above(400.0, 100.0));
+    }
+
+    /// Two watchers starting together both save their network at once.
+    /// Unlocked, they shared one temporary file (a rename failed with ENOENT)
+    /// and the last save dropped the other's network. Threads stand in for
+    /// processes: each takes the lock through its own open, which flock
+    /// treats as a separate holder. Runs in a scratch directory, never the
+    /// real data directory.
+    #[test]
+    fn concurrent_saves_keep_every_network() {
+        let dir = std::env::temp_dir().join(format!("octomon-baseline-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let p = dir.join("baselines.json");
+
+        let writers: Vec<_> = (0..4)
+            .map(|i| {
+                let p = p.clone();
+                std::thread::spawn(move || {
+                    for j in 0..5 {
+                        assert!(update_at(&p, |all| {
+                            all.insert(
+                                format!("net-{i}-{j}"),
+                                Baseline {
+                                    label: format!("Net {i}"),
+                                    ..Default::default()
+                                },
+                            );
+                        }));
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+
+        assert_eq!(load_from(&p).len(), 20);
+        assert!(!dir.join(".baselines.json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_save_never_runs_while_someone_else_holds_the_lock() {
+        let dir =
+            std::env::temp_dir().join(format!("octomon-baseline-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("baselines.json");
+
+        let held = crate::store::FileLock::acquire(&p).expect("free to start with");
+        assert!(!update_at(&p, |all| {
+            all.insert("blocked".into(), Baseline::default());
+        }));
+        assert!(!p.exists(), "wrote without the lock");
+        drop(held);
+
+        assert!(update_at(&p, |all| {
+            all.insert("after".into(), Baseline::default());
+        }));
+        assert!(load_from(&p).contains_key("after"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
