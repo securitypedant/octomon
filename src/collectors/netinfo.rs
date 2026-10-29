@@ -929,8 +929,7 @@ fn tunnel_vendor(iface_name: String) -> String {
             let v4: Vec<Ipv4Addr> = iface.ipv4.iter().map(|n| n.addr()).collect();
             let v6: Vec<Ipv6Addr> = iface.ipv6.iter().map(|n| n.addr()).collect();
             let vendor = vendor_from_addrs(&v4, &v6)?;
-            // Only an RFC1918 address could belong to anyone's VPN.
-            Some((vendor, v4.iter().any(Ipv4Addr::is_private)))
+            Some((vendor, addr_match(&v4)))
         });
 
     // The process table is the other: every VPN client whose process is
@@ -955,22 +954,54 @@ fn tunnel_vendor(iface_name: String) -> String {
         .to_string()
 }
 
-/// Weigh the two signals. A tunnel address in a vendor's own CGNAT or v6
-/// block (WARP's 100.96/12, Tailscale's fd7a:115c:a1e0::/48) names it
-/// outright. One in a private 10.x block the vendor happens to use (Mullvad's
-/// 10.64/10, NordVPN's 10.5/16) is the same address space every corporate
-/// VPN hands out, so it only counts with that vendor's client running: an
-/// openfortivpn tunnel on 10.99.0.2 is not Mullvad. With no address to go on,
-/// the process table decides only when it is unambiguous — two clients
-/// resident say nothing about which one is up.
+/// How far an address match on a tunnel can be trusted on its own.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AddrMatch {
+    /// A v6 block, or a v4 one outside the shared spaces below: the vendor's
+    /// own, so the address names it outright.
+    Own,
+    /// 100.64.0.0/10, carrier-grade NAT space that several clients carve
+    /// tunnel addresses from: Tailscale owns the whole /10 in [`KNOWN_VPNS`],
+    /// WARP a /12 inside it, and Zscaler Client Connector a configurable /16
+    /// anywhere in it. The match stands unless one other client is running.
+    Shared,
+    /// A private 10.x block a vendor happens to use (Mullvad's 10.64/10,
+    /// NordVPN's 10.5/16) is the address space every corporate VPN hands out,
+    /// so it only counts with that vendor's client running.
+    Private,
+}
+
+fn addr_match(v4: &[Ipv4Addr]) -> AddrMatch {
+    if v4.iter().any(Ipv4Addr::is_private) {
+        AddrMatch::Private
+    } else if v4
+        .iter()
+        .any(|a| in_v4(*a, Ipv4Addr::new(100, 64, 0, 0), 10))
+    {
+        AddrMatch::Shared
+    } else {
+        AddrMatch::Own
+    }
+}
+
+/// Weigh the two signals: the tunnel's address, and the VPN clients whose
+/// processes are resident. A vendor's own block names it outright (see
+/// [`AddrMatch`]); a shared or private match stands when its client runs. A
+/// shared match otherwise yields to the one other client running, or stands
+/// alone when none is (an openfortivpn tunnel on 10.99.0.2 is not Mullvad;
+/// Zscaler's 100.64.0.1 is not Tailscale). With no address to go on, the
+/// process table decides only when it is unambiguous — two clients resident
+/// say nothing about which one is up.
 fn pick_vendor(
-    by_addr: Option<(&'static str, bool)>,
+    by_addr: Option<(&'static str, AddrMatch)>,
     running: &std::collections::BTreeSet<&'static str>,
 ) -> Option<&'static str> {
+    let sole = (running.len() == 1).then(|| *running.iter().next().unwrap());
     match by_addr {
-        Some((vendor, false)) => Some(vendor),
-        Some((vendor, true)) if running.contains(vendor) => Some(vendor),
-        _ => (running.len() == 1).then(|| *running.iter().next().unwrap()),
+        Some((vendor, AddrMatch::Own)) => Some(vendor),
+        Some((vendor, _)) if running.contains(vendor) => Some(vendor),
+        Some((vendor, AddrMatch::Shared)) => sole.or(Some(vendor)),
+        _ => sole,
     }
 }
 
@@ -980,6 +1011,27 @@ mod tests {
         BypassedTunnel, IpAddr, Ipv4Addr, Ipv6Addr, bypassed_changes, bypassed_tunnels,
         iface_changes, iface_with_addr, is_tunnel_name, pick_vendor, vendor_from_addrs,
     };
+
+    /// Zscaler ZPA puts 100.64.0.1 on its utun, inside Tailscale's range.
+    #[test]
+    fn a_shared_cgnat_address_defers_to_the_running_client() {
+        use super::{AddrMatch, addr_match};
+        use std::collections::BTreeSet;
+        let v4 = [Ipv4Addr::new(100, 64, 0, 1)];
+        assert_eq!(addr_match(&v4), AddrMatch::Shared);
+        let addr = vendor_from_addrs(&v4, &[]).map(|v| (v, addr_match(&v4)));
+        assert_eq!(addr, Some(("Tailscale", AddrMatch::Shared)));
+        let run = |names: &[&'static str]| names.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(pick_vendor(addr, &run(&["Zscaler"])), Some("Zscaler"));
+        assert_eq!(pick_vendor(addr, &run(&["Tailscale"])), Some("Tailscale"));
+        assert_eq!(
+            pick_vendor(addr, &run(&["Tailscale", "Zscaler"])),
+            Some("Tailscale")
+        );
+        assert_eq!(pick_vendor(addr, &run(&[])), Some("Tailscale"));
+        assert_eq!(pick_vendor(None, &run(&["Zscaler"])), Some("Zscaler"));
+        assert_eq!(pick_vendor(None, &run(&["Mullvad", "Zscaler"])), None);
+    }
 
     /// An up interface named `name` carrying `v4`, typed by its name alone.
     fn up(name: &str, v4: &str) -> netdev::Interface {
@@ -1154,26 +1206,33 @@ mod tests {
     /// 10.x addresses can do the same. Private-range matches need the client.
     #[test]
     fn a_private_address_match_needs_the_vendors_client_running() {
+        use super::AddrMatch;
         use std::collections::BTreeSet;
         let none = BTreeSet::new();
         let mullvad: BTreeSet<&'static str> = ["Mullvad"].into();
         let others: BTreeSet<&'static str> = ["Tailscale", "openfortivpn"].into();
         // CGNAT / v6 blocks are the vendor's own: the address alone decides.
         assert_eq!(
-            pick_vendor(Some(("Cloudflare WARP", false)), &none),
+            pick_vendor(Some(("Cloudflare WARP", AddrMatch::Shared)), &none),
             Some("Cloudflare WARP")
         );
         // A 10.x match stands only with the client resident...
         assert_eq!(
-            pick_vendor(Some(("Mullvad", true)), &mullvad),
+            pick_vendor(Some(("Mullvad", AddrMatch::Private)), &mullvad),
             Some("Mullvad")
         );
         // ...otherwise the process table decides, unambiguous or not at all.
-        assert_eq!(pick_vendor(Some(("Mullvad", true)), &none), None);
-        assert_eq!(pick_vendor(Some(("Mullvad", true)), &others), None);
+        assert_eq!(
+            pick_vendor(Some(("Mullvad", AddrMatch::Private)), &none),
+            None
+        );
+        assert_eq!(
+            pick_vendor(Some(("Mullvad", AddrMatch::Private)), &others),
+            None
+        );
         let forti: BTreeSet<&'static str> = ["openfortivpn"].into();
         assert_eq!(
-            pick_vendor(Some(("Mullvad", true)), &forti),
+            pick_vendor(Some(("Mullvad", AddrMatch::Private)), &forti),
             Some("openfortivpn")
         );
         assert_eq!(pick_vendor(None, &forti), Some("openfortivpn"));

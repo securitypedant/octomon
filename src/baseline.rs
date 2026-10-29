@@ -200,6 +200,11 @@ impl Baseline {
     }
 }
 
+/// netdev reports an unresolved neighbour as 00:00:00:00:00:00, which must not key a location.
+fn mac_is_known(mac: &str) -> bool {
+    mac.chars().any(|c| c.is_ascii_hexdigit() && c != '0')
+}
+
 /// Fingerprint "which network is this" → (stable key, human label).
 ///
 /// Wi-Fi keys on SSID + gateway MAC: the pair survives DHCP renewals and mesh
@@ -216,7 +221,7 @@ impl Baseline {
 /// found beneath the tunnel, falling back to one per-vendor location when no
 /// underlay is visible at all.
 pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
-    let mac_known = !n.gateway_mac.is_empty() && n.gateway_mac != "-";
+    let mac_known = mac_is_known(&n.gateway_mac);
     let ip_known = !n.gateway_ip.is_empty() && n.gateway_ip != "-";
     // macOS returns the literal "<redacted>" without Location Services; that is
     // not an identity.
@@ -247,7 +252,7 @@ pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
         } else {
             (vendor, vendor)
         };
-        let u_mac = !n.underlay_gateway_mac.is_empty() && n.underlay_gateway_mac != "-";
+        let u_mac = mac_is_known(&n.underlay_gateway_mac);
         let u_ip = !n.underlay_gateway_ip.is_empty() && n.underlay_gateway_ip != "-";
         if u_mac || u_ip {
             // The physical network underneath is known: this VPN *here* is
@@ -579,6 +584,27 @@ mod tests {
     /// underlay: the same VPN over the office Ethernet and over hotel Wi-Fi
     /// is two places with two normals. The vendor-only bucket above is only
     /// the fallback for setups where no underlay is discoverable.
+    #[test]
+    fn an_unresolved_underlay_mac_falls_back_to_the_gateway_ip() {
+        let over = |gw_ip: &str| NetInfo {
+            iface: "utun8".into(),
+            ipv4: vec!["100.64.0.1/16".into()],
+            gateway_ip: "-".into(),
+            gateway_mac: "-".into(),
+            medium: LinkMedium::Tunnel,
+            tunnel: Some("Zscaler".into()),
+            tunnel_iface: "utun8".into(),
+            underlay_gateway_ip: gw_ip.into(),
+            underlay_gateway_mac: "00:00:00:00:00:00".into(),
+            underlay_medium: LinkMedium::WiFi,
+            ..Default::default()
+        };
+        let home = fingerprint(&over("192.168.10.1")).unwrap();
+        let class = fingerprint(&over("10.21.21.1")).unwrap();
+        assert_ne!(home.0, class.0, "zero MAC must not merge networks");
+        assert_eq!(home.1, "192.168.10.1 via Zscaler");
+    }
+
     #[test]
     fn a_full_tunnel_keys_on_the_underlay_when_one_is_visible() {
         let over = |gw_ip: &str, gw_mac: &str, medium: LinkMedium| NetInfo {
