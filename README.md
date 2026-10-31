@@ -40,7 +40,10 @@ The panels:
   Auto-discovers the gateway and next hops, traceroutes (`t`), monitors every
   hop MTR-style (`m`), and find out who owns an address (`W`).
 - **Bandwidth** — live throughput, an on-demand speed test (`s`), and
-  per-process talkers or the same traffic by remote address.
+  per-process talkers or the same traffic by remote address. Docker and
+  Podman containers are talkers too, one row each (`app (docker)`), read
+  from their own interface counters; on Linux that works without root and
+  for every user's containers.
 - **Network** — interface, connection type (Wi-Fi / Ethernet / cellular / VPN
   tunnel), addresses, gateway (v4 and v6), each DNS resolver timed, Wi-Fi
   SSID/channel/signal and airspace congestion, and when notable, proxy,
@@ -240,6 +243,7 @@ Press **`?`** in the app for the complete, always-current list. The essentials:
 | `e` · `c` · `T` · `M` | Events · outbound port scan · routing table · marker |
 | `l` · `D` | Record session to CSV · write a support-bundle zip |
 | `P` · `?` · `Esc` · `q` | Pause the display · help · back · quit |
+| `#` | Plain ↔ fine graph glyphs, for a font without braille or block characters (saved) |
 | `↑`/`↓` (or `j`/`k`) · `PgUp`/`PgDn` | Move the cursor · by ten |
 | `←` `→` · `Enter` | Move sort column · sort / flip direction |
 | `⇧R` · `Ctrl+R` | Reset this panel · erase **all** config and stored data |
@@ -308,7 +312,7 @@ at startup what that costs on your machine.
 | Platform | Unprivileged | To get everything |
 |---|---|---|
 | macOS | everything (path MTU can't be measured — the OS fragments regardless of the DF flag, and octomon says so rather than guessing) | nothing to do |
-| Linux | latency often needs a one-line sysctl; per-process bandwidth sees only your own processes | open the ping-socket range once, and `sudo octomon` for the full process view |
+| Linux | latency often needs a one-line sysctl; per-process bandwidth sees only your own processes (containers are seen regardless) | open the ping-socket range once, and `sudo octomon` for the full process view |
 | Windows | everything except per-process bandwidth; path MTU not measured yet | join Performance Log Users once |
 
 Linux also leans on a few external tools (`traceroute`, `ss`, `nmcli`, `iw`)

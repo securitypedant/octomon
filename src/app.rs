@@ -624,6 +624,19 @@ pub enum ProcStatus {
     NeedsPrivilege,
 }
 
+/// What a container row of the processes table is, beyond its name. Set only
+/// on rows the container source produced; `pid` on those is the container's
+/// init process on Linux and 0 where the containers run inside a VM.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct ContainerInfo {
+    /// The runtime's full id.
+    pub id: String,
+    /// "docker", "podman", "containerd"…
+    pub runtime: String,
+    /// Image name, when a runtime API supplied it.
+    pub image: String,
+}
+
 /// One process's network use, accumulated over the session (so the table
 /// answers "what has been using the link", not "who happened to move bytes in
 /// the last two seconds"), plus its rate this interval and a connection-health
@@ -652,6 +665,8 @@ pub struct ProcBandwidth {
     /// match, which is what the stacked bandwidth graph sums.
     pub down_hist: Vec<u64>,
     pub up_hist: Vec<u64>,
+    /// Present when this row is a container rather than a process.
+    pub container: Option<ContainerInfo>,
 }
 
 /// Bandwidth to one remote address, summed over every socket and process
@@ -2658,6 +2673,9 @@ pub enum EventCategory {
     /// meeting room", "call dropped here" — so the timeline can be read
     /// against what the person was experiencing at the time.
     Marker,
+    /// A container started or stopped: a change in who can be using the
+    /// link, and an onset candidate for a finding that follows it.
+    Container,
 }
 
 impl EventCategory {
@@ -2670,6 +2688,7 @@ impl EventCategory {
             EventCategory::Path => "path",
             EventCategory::Logging => "logging",
             EventCategory::Marker => "marker",
+            EventCategory::Container => "container",
         }
     }
 }
@@ -2827,6 +2846,9 @@ pub struct AppState {
     pub follow_remote: Option<IpAddr>,
     /// Availability of per-process attribution on this platform.
     pub proc_status: ProcStatus,
+    /// Containers on this machine, for the Machine panel's presence line;
+    /// `None` when there is nothing to say (see `containers::Source::presence`).
+    pub containers: Option<crate::collectors::containers::Presence>,
     /// Column cursor over the top-talkers header, as a sort key. Processes:
     /// 0=name,1=now,2=total,3=↓,4=↑,5=share,6=retx. Remotes:
     /// 0=remote,1=process,2=now,3=total,4=↓,5=↑,6=share. Keys 7 (now↓) and
@@ -3131,6 +3153,7 @@ impl AppState {
             pinned_procs: Vec::new(),
             pinned_remotes: Vec::new(),
             proc_status: ProcStatus::Probing,
+            containers: None,
             bw_col: 1,
             // Both talker tables open sorted by "now", biggest first: the
             // question the panel answers is "who is using the link right
@@ -3355,6 +3378,24 @@ impl AppState {
 
     /// Show a transient footer notice *and* keep it in the timeline — the
     /// durable sibling of `notice`, which any key press clears.
+    /// Switch the graphs between the fine glyph set (braille line charts,
+    /// eighth-block bars) and the plain one every monospace font has. The
+    /// [#] key; the choice is persisted by the caller.
+    pub fn set_glyphs(&mut self, plain: bool) {
+        if plain {
+            self.graph_marker = ratatui::symbols::Marker::HalfBlock;
+            self.bar_set = crate::config::COARSE_BARS;
+        } else {
+            self.graph_marker = ratatui::symbols::Marker::Braille;
+            self.bar_set = ratatui::symbols::bar::NINE_LEVELS;
+        }
+    }
+
+    /// Whether the plain glyph set is in use.
+    pub fn plain_glyphs(&self) -> bool {
+        self.graph_marker != ratatui::symbols::Marker::Braille
+    }
+
     pub fn notice_event(
         &mut self,
         severity: crate::verdict::Severity,
@@ -3605,10 +3646,15 @@ impl AppState {
         }
     }
 
-    /// Whether the '/' filter keeps this process row: name or pid.
+    /// Whether the '/' filter keeps this process row: name or pid — and,
+    /// for a container row, its image or id.
     fn proc_matches(&self, i: usize, needle: &str) -> bool {
         let p = &self.processes[i];
-        p.name.to_lowercase().contains(needle) || p.pid.to_string().contains(needle)
+        p.name.to_lowercase().contains(needle)
+            || p.pid.to_string().contains(needle)
+            || p.container.as_ref().is_some_and(|c| {
+                c.image.to_lowercase().contains(needle) || c.id.starts_with(needle)
+            })
     }
 
     /// Whether the '/' filter keeps this remote row: address, port, or the

@@ -61,6 +61,12 @@ proxy says so. One deliberate exception to strict TLS: the per-target web
 probe (a `HEAD /`, no body read, redirects not followed) tolerates certificate
 errors, because it times the handshake to an IP literal and sends nothing.
 Nothing is sent to any octomon-operated service and there is no telemetry.
+When a container runtime is present, octomon also reads its local API over
+the Unix socket or named pipe (`DOCKER_HOST`/`CONTAINER_HOST`, else the usual
+Docker, Podman, Colima, OrbStack, Rancher Desktop and Lima paths), read-only
+and two endpoints: the container list and one-shot stats. A `tcp://` endpoint
+is never used, and `containers = false` in config.toml turns the whole thing
+off; on Linux the same figures come from `/proc` without the socket.
 
 **Local files.** octomon writes, under the XDG / `%APPDATA%` directories,
 `config.toml`, `speedtests.jsonl`, `baselines.json`, `history.jsonl`,

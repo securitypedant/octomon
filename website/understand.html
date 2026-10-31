@@ -513,6 +513,59 @@
           </div>
         </details>
 
+        <details>
+          <summary>The borders are garbled, or the graphs are boxes (xterm)</summary>
+          <div class="a">
+            <p>Two different faults, both in the terminal rather than the
+            network. If the screen is a sea of <code>â</code> and
+            <code>Ã</code> with the layout falling apart, the terminal is
+            decoding Latin-1 instead of UTF-8: every border character is three
+            bytes, and each byte is drawn as a letter. This is common with
+            xterm under XQuartz, which starts without <code>LANG</code>
+            (Terminal.app sets it for itself). Fix it in the environment,
+            with <code>export LANG=en_US.UTF-8</code>, or for xterm
+            <code>XTerm*utf8: 1</code> in <code>~/.Xresources</code> or
+            <code>xterm -u8</code>. octomon warns at startup when it sees a
+            locale that is not UTF-8, with the fix in the message.</p>
+            <p>If the borders are fine but the graphs are rows of boxes, the
+            font has box drawing but not the braille and block characters the
+            charts use; xterm's default bitmap font is the usual case. Either
+            pick a font that has them (<code>xterm -fa Menlo -fs 12</code>, or
+            <code>XTerm*faceName: Menlo</code>), or press <kbd>#</kbd> in
+            octomon to switch the graphs to plain glyphs every monospace font
+            has. The choice is saved (<code>graph_marker</code> and
+            <code>bar_glyphs</code> in config.toml).</p>
+          </div>
+        </details>
+
+        <details>
+          <summary>Where do containers show up, and why is my Docker traffic counted twice on a Mac?</summary>
+          <div class="a">
+            <p>Docker and Podman containers appear as rows of the processes
+            table in the Bandwidth panel, named <code>app (docker)</code>,
+            and the Machine panel says how many are running. The figures are
+            the container's own interface counters: how much it moved, not
+            which remote addresses it talked to, so container rows never
+            appear in the remote-addresses table. On Linux they are read from
+            <code>/proc</code>, which works without root and for every user's
+            containers; names and images come from the runtime's socket when
+            you can read it. On a Mac or Windows the containers run inside a
+            VM, and octomon asks Docker Desktop (or Colima, OrbStack, Podman)
+            over its local socket.</p>
+            <p>The double count is a consequence of that VM. Its traffic
+            leaves the Mac through one process (<code>com.docker.backend</code>
+            for Docker Desktop), which the per-process view sees on its own
+            sockets, while the container rows see the same bytes on their
+            interfaces inside. The share column therefore counts container
+            traffic twice. octomon cannot tell which part of the VM's bytes
+            belongs to which container, so it shows both rather than guessing;
+            read the container rows for who, and the VM row for how much
+            crossed the uplink. Linux has no such process. Set
+            <code>containers = false</code> in config.toml to leave containers
+            out.</p>
+          </div>
+        </details>
+
       </div>
     </div>
   </section>

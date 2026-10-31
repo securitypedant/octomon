@@ -12,8 +12,18 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::app::{AppState, ProcBandwidth, ProcStatus, RemoteBandwidth};
+use crate::app::{AppState, ContainerInfo, ProcBandwidth, ProcStatus, RemoteBandwidth};
+use crate::collectors::containers;
 use crate::platform;
+
+/// What a row of the processes table is keyed by: a pid, or a container id
+/// for the rows the container source produces (whose init pid is 0 when the
+/// containers run in a VM, and is a process in its own right when not).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum Key {
+    Pid(u32),
+    Container(String),
+}
 
 /// Rows published to the UI. More than any view shows, so a sort by a live
 /// column (rate) can surface a small-total process that is busy right now.
@@ -38,6 +48,9 @@ fn on_the_wire(addr: IpAddr) -> bool {
 #[derive(Default)]
 struct ProcAgg {
     name: String,
+    /// Container rows only: the init pid and what the row is.
+    pid: u32,
+    container: Option<ContainerInfo>,
     down: u64,
     up: u64,
     retx: u64,
@@ -73,43 +86,63 @@ fn busiest<K: Clone>(m: &HashMap<K, u64>) -> Option<K> {
 
 /// Turn the session's per-process aggregates into the ranked list the UI shows.
 fn rank_processes(
-    agg: &HashMap<u32, ProcAgg>,
+    agg: &HashMap<Key, ProcAgg>,
     names: &HashMap<u32, String>,
     secs: f64,
 ) -> Vec<ProcBandwidth> {
     let all: u64 = agg.values().map(|a| a.down + a.up).sum();
-    let mut list: Vec<ProcBandwidth> = agg
+    let mut list: Vec<(&Key, ProcBandwidth)> = agg
         .iter()
-        .map(|(&pid, a)| ProcBandwidth {
-            name: names.get(&pid).cloned().unwrap_or_else(|| a.name.clone()),
-            pid,
-            down_bytes: a.down,
-            up_bytes: a.up,
-            total_bytes: a.down + a.up,
-            share: if all > 0 {
-                (a.down + a.up) as f64 / all as f64
-            } else {
-                0.0
-            },
-            retx: a.retx,
-            down_bps: a.d_in as f64 / secs,
-            up_bps: a.d_out as f64 / secs,
-            retx_per_sec: a.d_retx as f64 / secs,
-            down_hist: Vec::new(),
-            up_hist: Vec::new(),
+        .map(|(key, a)| {
+            let (pid, name) = match key {
+                Key::Pid(pid) => (
+                    *pid,
+                    names.get(pid).cloned().unwrap_or_else(|| a.name.clone()),
+                ),
+                Key::Container(_) => (a.pid, a.name.clone()),
+            };
+            (
+                key,
+                ProcBandwidth {
+                    name,
+                    pid,
+                    container: a.container.clone(),
+                    down_bytes: a.down,
+                    up_bytes: a.up,
+                    total_bytes: a.down + a.up,
+                    share: if all > 0 {
+                        (a.down + a.up) as f64 / all as f64
+                    } else {
+                        0.0
+                    },
+                    retx: a.retx,
+                    down_bps: a.d_in as f64 / secs,
+                    up_bps: a.d_out as f64 / secs,
+                    retx_per_sec: a.d_retx as f64 / secs,
+                    down_hist: Vec::new(),
+                    up_hist: Vec::new(),
+                },
+            )
         })
         .collect();
-    list.sort_by(|a, b| b.total_bytes.cmp(&a.total_bytes).then(a.pid.cmp(&b.pid)));
+    list.sort_by(|(_, a), (_, b)| {
+        b.total_bytes
+            .cmp(&a.total_bytes)
+            .then(a.pid.cmp(&b.pid))
+            .then(a.name.cmp(&b.name))
+    });
     list.truncate(TOP_N);
     // Only the published rows carry their history: it is the one per-row
     // field worth copying, and the '/' filter can only ever match these rows.
-    for r in &mut list {
-        if let Some(a) = agg.get(&r.pid) {
-            r.down_hist = a.down_hist.iter().copied().collect();
-            r.up_hist = a.up_hist.iter().copied().collect();
-        }
-    }
-    list
+    list.into_iter()
+        .map(|(key, mut r)| {
+            if let Some(a) = agg.get(key) {
+                r.down_hist = a.down_hist.iter().copied().collect();
+                r.up_hist = a.up_hist.iter().copied().collect();
+            }
+            r
+        })
+        .collect()
 }
 
 /// Turn the session's per-remote aggregates into the ranked list the UI shows.
@@ -151,7 +184,7 @@ fn rank_remotes(agg: &HashMap<IpAddr, RemoteAgg>, secs: f64) -> Vec<RemoteBandwi
 /// zero, so a row's history has one slot per tick however quiet it was and
 /// the UI can line rows up by their newest sample.
 fn advance_histories(
-    procs: &mut HashMap<u32, ProcAgg>,
+    procs: &mut HashMap<Key, ProcAgg>,
     remotes: &mut HashMap<IpAddr, RemoteAgg>,
     secs: f64,
 ) {
@@ -244,9 +277,13 @@ async fn full_names() -> HashMap<u32, String> {
     map
 }
 
-pub async fn run(state: Arc<Mutex<AppState>>) {
+pub async fn run(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
+    // Containers come from their own source and need neither `ss` nor ETW,
+    // so a platform without per-socket counters still gets container rows.
+    let mut ct = containers::Source::new(&cfg);
     // Probe support once; mark unsupported (not just "empty") if unavailable.
-    if platform::proc_net_sample().await.is_none() {
+    let sockets_ok = platform::proc_net_sample().await.is_some();
+    if !sockets_ok {
         let needs_privilege = platform::proc_needs_privilege();
         crate::errlog::log(
             "talkers",
@@ -261,9 +298,12 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
         } else {
             ProcStatus::Unsupported
         };
-        return;
+        if !ct.enabled() {
+            return;
+        }
+    } else {
+        state.lock().unwrap().proc_status = ProcStatus::Supported;
     }
-    state.lock().unwrap().proc_status = ProcStatus::Supported;
 
     // Counter key -> (bytes_in, bytes_out, retx) from the previous sample. Keyed
     // by the counter, not the process: on Linux each sample is one socket, and
@@ -272,8 +312,15 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
     // Session aggregates, built from deltas rather than read from the sample,
     // since a per-socket total is not a process total. The name in `ProcAgg`
     // is the last one seen, so an exited process keeps its label.
-    let mut procs: HashMap<u32, ProcAgg> = HashMap::new();
+    let mut procs: HashMap<Key, ProcAgg> = HashMap::new();
     let mut remotes: HashMap<IpAddr, RemoteAgg> = HashMap::new();
+    // Container id → (display name, rx, tx) from the previous sample. The
+    // name is kept so a container that has gone can be named in its event.
+    let mut prev_ct: HashMap<String, (String, u64, u64)> = HashMap::new();
+    // Whether a container sample has been taken before: the first one is a
+    // baseline, and announcing every container in it as "started" would be
+    // wrong on Linux, where they are all seen from the first tick.
+    let mut ct_primed = false;
     let mut prev_at = Instant::now();
     // False until a baseline exists, so the first sample only records counters
     // rather than attributing their history to one interval.
@@ -282,18 +329,28 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
 
     loop {
         ticker.tick().await;
-        let Some(sample) = platform::proc_net_sample().await else {
-            // Supported at startup and failing now: the table quietly freezes
-            // on its last figures rather than going blank, so nothing on
-            // screen distinguishes this from an idle machine.
-            crate::errlog::log(
-                "talkers",
-                "a per-process sample failed — the tables are not advancing",
-            );
-            continue;
+        let sample = if sockets_ok {
+            let Some(sample) = platform::proc_net_sample().await else {
+                // Supported at startup and failing now: the table quietly
+                // freezes on its last figures rather than going blank, so
+                // nothing on screen distinguishes this from an idle machine.
+                crate::errlog::log(
+                    "talkers",
+                    "a per-process sample failed — the tables are not advancing",
+                );
+                continue;
+            };
+            sample
+        } else {
+            Vec::new()
         };
+        let cts = ct.sample().await;
         // nettop truncates process names to ~15 chars; enrich with full names.
-        let full_names = full_names().await;
+        let full_names = if sockets_ok {
+            full_names().await
+        } else {
+            HashMap::new()
+        };
         let now = Instant::now();
         let secs = now.duration_since(prev_at).as_secs_f64().max(0.001);
 
@@ -310,6 +367,55 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
         for a in remotes.values_mut() {
             (a.d_in, a.d_out) = (0, 0);
         }
+
+        // A container's bytes are its own interface's counters, diffed like
+        // a socket's. First sight is a baseline only: on Linux every
+        // container is seen from the first tick, and an API found later
+        // (Docker Desktop started after octomon) must not dump a day's
+        // traffic into one interval.
+        // Starts and stops, for the timeline and as onset context for a
+        // finding that follows one. Not on the tick an API was found: its
+        // containers were already running.
+        let mut ct_events: Vec<String> = Vec::new();
+        if ct_primed && !ct.api_just_connected() {
+            for c in &cts {
+                if !prev_ct.contains_key(&c.id) {
+                    ct_events.push(format!("{} started", c.display_name()));
+                }
+            }
+            for (id, (name, _, _)) in &prev_ct {
+                if !cts.iter().any(|c| &c.id == id) {
+                    ct_events.push(format!("{name} stopped"));
+                }
+            }
+        }
+        for c in &cts {
+            let (d_in, d_out) = match prev_ct.get(&c.id) {
+                Some((_, prx, ptx)) => (c.rx.saturating_sub(*prx), c.tx.saturating_sub(*ptx)),
+                None => (0, 0),
+            };
+            if d_in == 0 && d_out == 0 {
+                continue;
+            }
+            let p = procs.entry(Key::Container(c.id.clone())).or_default();
+            p.name = c.display_name();
+            p.pid = c.pid;
+            p.container = Some(ContainerInfo {
+                id: c.id.clone(),
+                runtime: c.runtime.clone(),
+                image: c.image.clone(),
+            });
+            p.down += d_in;
+            p.up += d_out;
+            p.d_in += d_in;
+            p.d_out += d_out;
+        }
+        prev_ct = cts
+            .iter()
+            .map(|c| (c.id.clone(), (c.display_name(), c.rx, c.tx)))
+            .collect();
+        let presence = ct.presence(cts.len());
+        ct_primed = true;
 
         // Add each counter's delta onto its owning process, and onto the
         // remote it was talking to.
@@ -339,7 +445,7 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
                 .get(&s.pid)
                 .cloned()
                 .unwrap_or_else(|| s.name.clone());
-            let p = procs.entry(s.pid).or_default();
+            let p = procs.entry(Key::Pid(s.pid)).or_default();
             p.name = name.clone();
             p.down += d_in;
             p.up += d_out;
@@ -379,6 +485,25 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
 
         let mut st = state.lock().unwrap();
         st.bw_reset = false;
+        // Presence and lifecycle are facts about the machine, recorded
+        // whether or not the tables are paused.
+        st.containers = presence;
+        for msg in ct_events {
+            st.push_event(
+                crate::verdict::Severity::Info,
+                crate::app::EventCategory::Container,
+                msg,
+            );
+        }
+        // No socket source here, but containers are flowing: the table has
+        // something to show, so let it draw.
+        if !sockets_ok && !proc_list.is_empty() && st.proc_status != ProcStatus::Supported {
+            crate::errlog::log(
+                "talkers",
+                "per-process bandwidth is unavailable, but containers are: the processes table lists them alone",
+            );
+            st.proc_status = ProcStatus::Supported;
+        }
         // Paused means the tables hold still. Aggregation carries on above,
         // so resuming shows the true totals. The screen is drawn from a
         // snapshot while paused, but the key handlers (W, a) act on the *live*
@@ -448,11 +573,11 @@ mod tests {
 
     #[test]
     fn processes_rank_by_session_total_and_keep_idle_rows() {
-        let mut agg: HashMap<u32, ProcAgg> = HashMap::new();
+        let mut agg: HashMap<Key, ProcAgg> = HashMap::new();
         // Exited: no longer in the name map, nothing this interval, but it
         // moved the most bytes and stays at the top under its last name.
         agg.insert(
-            7,
+            Key::Pid(7),
             ProcAgg {
                 name: "rsync".into(),
                 down: 100,
@@ -462,7 +587,7 @@ mod tests {
             },
         );
         agg.insert(
-            8,
+            Key::Pid(8),
             ProcAgg {
                 name: "Firefox".into(),
                 down: 1_000,
@@ -475,37 +600,63 @@ mod tests {
                 ..Default::default()
             },
         );
+        // A container: keyed by id, named by the source, never renamed by
+        // the pid map even when its init pid is a live process.
+        agg.insert(
+            Key::Container("8013eee8".into()),
+            ProcAgg {
+                name: "echoradio (docker)".into(),
+                pid: 8,
+                container: Some(ContainerInfo {
+                    id: "8013eee8".into(),
+                    runtime: "docker".into(),
+                    image: "echoradio:dev".into(),
+                }),
+                down: 400,
+                up: 100,
+                d_in: 100,
+                ..Default::default()
+            },
+        );
         let names = HashMap::from([(8u32, "firefox".to_string())]);
         let list = rank_processes(&agg, &names, 2.0);
-        assert_eq!(list.len(), 2);
+        assert_eq!(list.len(), 3);
         assert_eq!((list[0].pid, list[0].name.as_str()), (7, "rsync"));
         assert_eq!(list[0].total_bytes, 9_100);
         assert_eq!(list[0].down_bps, 0.0);
         assert_eq!(list[0].retx, 3);
         assert_eq!(list[1].name, "firefox", "live name wins over the sample's");
+        assert!(list[1].container.is_none());
         assert!((list[1].down_bps - 250.0).abs() < 1e-9);
         assert!((list[1].retx_per_sec - 1.0).abs() < 1e-9);
-        assert!((list[1].share - 1_100.0 / 10_200.0).abs() < 1e-9);
+        assert!((list[1].share - 1_100.0 / 10_700.0).abs() < 1e-9);
         assert_eq!(
             (list[1].down_hist.as_slice(), list[1].up_hist.as_slice()),
             (&[100, 250][..], &[0, 10][..])
         );
+        assert_eq!(list[2].name, "echoradio (docker)");
+        assert_eq!(list[2].pid, 8);
+        assert_eq!(
+            list[2].container.as_ref().map(|c| c.image.as_str()),
+            Some("echoradio:dev")
+        );
+        assert!((list[2].down_bps - 50.0).abs() < 1e-9);
     }
 
     /// Every aggregate gets one history slot per tick, busy or not, so the
     /// UI can align rows by their newest sample; the ring stays bounded.
     #[test]
     fn histories_advance_for_idle_rows_and_cap() {
-        let mut procs: HashMap<u32, ProcAgg> = HashMap::new();
+        let mut procs: HashMap<Key, ProcAgg> = HashMap::new();
         procs.insert(
-            1,
+            Key::Pid(1),
             ProcAgg {
                 d_in: 900,
                 d_out: 100,
                 ..Default::default()
             },
         );
-        procs.insert(2, ProcAgg::default());
+        procs.insert(Key::Pid(2), ProcAgg::default());
         let mut remotes: HashMap<IpAddr, RemoteAgg> = HashMap::new();
         remotes.insert(
             ip(1),
@@ -517,14 +668,14 @@ mod tests {
         for _ in 0..HIST_TICKS + 5 {
             advance_histories(&mut procs, &mut remotes, 2.0);
         }
-        let busy = &procs[&1];
+        let busy = &procs[&Key::Pid(1)];
         assert_eq!(busy.down_hist.len(), HIST_TICKS, "capped");
         assert_eq!(
             (busy.down_hist.back(), busy.up_hist.back()),
             (Some(&450), Some(&50)),
             "bytes / secs"
         );
-        let idle = &procs[&2];
+        let idle = &procs[&Key::Pid(2)];
         assert_eq!(idle.down_hist.len(), HIST_TICKS, "idle rows keep step");
         assert!(idle.down_hist.iter().all(|&v| v == 0));
         assert_eq!(remotes[&ip(1)].down_hist.back(), Some(&450));

@@ -4358,6 +4358,24 @@ pub fn onset_context(s: &AppState) -> Option<String> {
             format!("{ago}s after {phrase}")
         });
     }
+    // A container starting is a change in who can be using the link, and
+    // a finding that raises seconds later is likely about it.
+    if let Some(e) = s
+        .events
+        .iter()
+        .rev()
+        .filter(|e| e.category == crate::app::EventCategory::Container)
+        .find(|e| e.at <= now && now - e.at <= ONSET_WINDOW_SECS)
+    {
+        // The event text is "name (runtime) started"; the timeline supplies
+        // the word "container" as its category label, this clause says it.
+        let ago = now - e.at;
+        return Some(if ago <= 1 {
+            format!("just after container {}", e.message)
+        } else {
+            format!("{ago}s after container {}", e.message)
+        });
+    }
     matches!(s.speedtest.status, crate::app::SpeedStatus::Running)
         .then(|| "during a speed test".to_string())
 }
@@ -6438,6 +6456,31 @@ mod tests {
 
     /// The context itself: the most recent attachment change inside the
     /// window, then octomon's own speed test, then nothing.
+    #[test]
+    fn onset_context_names_a_container_that_just_started() {
+        let mut s = AppState::new(vec![]);
+        assert_eq!(onset_context(&s), None);
+        s.events.push_back(crate::app::EventItem {
+            at: chrono::Utc::now().timestamp() - 5,
+            severity: Severity::Info,
+            category: crate::app::EventCategory::Container,
+            message: "octo_ul (docker) started".into(),
+        });
+        assert_eq!(
+            onset_context(&s).as_deref(),
+            Some("5s after container octo_ul (docker) started")
+        );
+        // Too old to be the onset.
+        s.events.clear();
+        s.events.push_back(crate::app::EventItem {
+            at: chrono::Utc::now().timestamp() - 600,
+            severity: Severity::Info,
+            category: crate::app::EventCategory::Container,
+            message: "octo_ul (docker) started".into(),
+        });
+        assert_eq!(onset_context(&s), None);
+    }
+
     #[test]
     fn onset_context_names_the_nearest_change() {
         use crate::app::{NetChange, NetChangeKind};

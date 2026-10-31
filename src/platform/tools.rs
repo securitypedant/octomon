@@ -250,3 +250,117 @@ mod tests {
         assert!(required.iter().all(|t| !t.package.is_empty()));
     }
 }
+
+/// Startup warnings about the terminal itself, when there is reason to
+/// think the screen will not come out right. Nothing is changed on the
+/// terminal's behalf: the right fix is in the user's environment, and a
+/// program that switched the terminal's encoding under the shell would leave
+/// every other program disagreeing with it.
+///
+/// - A locale that is not UTF-8 (xterm started from an X session with no
+///   `LANG`, a server with `LANG=C`): the terminal decodes every border and
+///   glyph as three Latin-1 letters and the layout falls apart. Seen in the
+///   field on XQuartz, where Terminal.app sets the locale for itself and
+///   xterm does not.
+/// - xterm itself, which has a bitmap default font with box drawing but no
+///   braille or eighth-block characters: the graphs come out as boxes. A
+///   hint, not a switch — [#] is one key away, and the user can see whether
+///   the boxes are there.
+pub fn terminal_notices() -> Vec<String> {
+    let var = |n: &str| std::env::var(n).ok().filter(|v| !v.is_empty());
+    terminal_notices_for(
+        var("LC_ALL").as_deref(),
+        var("LC_CTYPE").as_deref(),
+        var("LANG").as_deref(),
+        var("XTERM_VERSION").is_some(),
+    )
+}
+
+fn terminal_notices_for(
+    lc_all: Option<&str>,
+    lc_ctype: Option<&str>,
+    lang: Option<&str>,
+    is_xterm: bool,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    // Windows consoles do not take their encoding from these variables.
+    if cfg!(windows) {
+        return out;
+    }
+    // Precedence as libc resolves it: LC_ALL beats LC_CTYPE beats LANG.
+    let locale = lc_all.or(lc_ctype).or(lang);
+    let utf8 = locale.is_some_and(|l| {
+        let l = l.to_ascii_lowercase();
+        l.contains("utf-8") || l.contains("utf8")
+    });
+    if !utf8 {
+        let what = match locale {
+            Some(l) => format!("locale is {l:?}"),
+            None => "LANG is not set".to_string(),
+        };
+        let fix = if is_xterm {
+            "export LANG=en_US.UTF-8, or start xterm with -u8 (XTerm*utf8: 1)"
+        } else {
+            "export LANG=en_US.UTF-8 (or C.UTF-8) in the terminal's environment"
+        };
+        out.push(format!(
+            "terminal is not in UTF-8 mode ({what}) — if the borders look garbled, that is why: {fix}"
+        ));
+    } else if is_xterm {
+        out.push(
+            "xterm: its default font has no braille or block glyphs — if the graphs show boxes, \
+             press # for plainer glyphs, or start xterm with -fa Menlo"
+                .to_string(),
+        );
+    }
+    out
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::terminal_notices_for;
+
+    #[test]
+    fn a_utf8_locale_in_an_ordinary_terminal_says_nothing() {
+        for ok in ["en_US.UTF-8", "C.UTF-8", "de_DE.utf8", "en_GB.UTF-8@euro"] {
+            assert!(
+                terminal_notices_for(None, None, Some(ok), false).is_empty(),
+                "{ok}"
+            );
+        }
+        // LC_ALL wins over a bare LANG, both ways round.
+        assert!(terminal_notices_for(Some("en_US.UTF-8"), None, Some("C"), false).is_empty());
+        assert_eq!(
+            terminal_notices_for(Some("C"), None, Some("en_US.UTF-8"), false).len(),
+            usize::from(!cfg!(windows))
+        );
+    }
+
+    #[test]
+    fn a_missing_or_latin1_locale_is_called_out_with_the_fix() {
+        if cfg!(windows) {
+            return;
+        }
+        let none = terminal_notices_for(None, None, None, true);
+        assert_eq!(none.len(), 1);
+        assert!(none[0].contains("LANG is not set"), "{}", none[0]);
+        assert!(
+            none[0].contains("-u8"),
+            "xterm gets the xterm fix: {}",
+            none[0]
+        );
+        let c = terminal_notices_for(None, None, Some("C"), false);
+        assert!(c[0].contains("locale is \"C\""), "{}", c[0]);
+        assert!(c[0].contains("C.UTF-8"), "{}", c[0]);
+    }
+
+    #[test]
+    fn xterm_with_a_good_locale_gets_the_glyph_hint_only() {
+        if cfg!(windows) {
+            return;
+        }
+        let v = terminal_notices_for(None, None, Some("en_US.UTF-8"), true);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].contains("press #"), "{}", v[0]);
+    }
+}

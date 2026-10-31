@@ -445,6 +445,13 @@ async fn main() -> Result<()> {
         }
         s.privilege_notice = platform::tools::privilege_notice();
         s.notice = platform::tools::missing_notice();
+        // The terminal itself: a non-UTF-8 locale or xterm's bitmap font.
+        // Logged and put on the timeline, so it is still findable after the
+        // first keypress clears the notice.
+        for w in platform::tools::terminal_notices() {
+            errlog::log("terminal", &w);
+            s.notice_event(verdict::Severity::Info, app::EventCategory::Logging, w);
+        }
         // The timeline's opening line: an exported events CSV or a support
         // bundle then names the version and platform that produced it without
         // anyone having to ask.
@@ -564,7 +571,7 @@ async fn main() -> Result<()> {
         netinfo_refresh.clone(),
     ));
     tokio::spawn(collectors::signal::run(state.clone()));
-    tokio::spawn(collectors::procbw::run(state.clone()));
+    tokio::spawn(collectors::procbw::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::web::run(state.clone()));
     tokio::spawn(collectors::tcp::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::egress::monitor(state.clone(), cfg.clone()));
@@ -1765,7 +1772,13 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     s.bw_view = view;
                     s.sub_pane = pane;
                     if s.zoom_view == app::ZoomView::Processes {
-                        side = Side::LoadProcDetails(s.processes.iter().map(|p| p.pid).collect());
+                        side = Side::LoadProcDetails(
+                            s.processes
+                                .iter()
+                                .filter(|p| p.container.is_none())
+                                .map(|p| p.pid)
+                                .collect(),
+                        );
                     }
                 }
                 KeyCode::Up | KeyCode::Char('k') if s.overlay == Overlay::Zoom => {
@@ -1935,6 +1948,21 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 // still. Shift+P everywhere, so plain 'p' stays pin on the
                 // talkers lists without a mode-dependent surprise.
                 KeyCode::Char('P') => s.paused = !s.paused,
+                // [#]: plain ↔ fine graph glyphs, for a font without braille
+                // or eighth-block characters. Saved, so it sticks.
+                KeyCode::Char('#') => {
+                    let plain = !s.plain_glyphs();
+                    s.set_glyphs(plain);
+                    Config::persist_glyphs(plain);
+                    s.notice = Some(
+                        if plain {
+                            "graphs: plain glyphs (saved) · # again for the fine set"
+                        } else {
+                            "graphs: fine glyphs (saved) · # again for the plain set"
+                        }
+                        .to_string(),
+                    );
+                }
                 // Pinning works in the zoomed talkers too — same keys as the
                 // compact lists they magnify.
                 KeyCode::Char('p') | KeyCode::Char('u')
@@ -2205,6 +2233,21 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 // talkers lists, and a key that changes meaning per panel is
                 // the confusion this replaces.
                 KeyCode::Char('P') => s.paused = !s.paused,
+                // [#]: plain ↔ fine graph glyphs, for a font without braille
+                // or eighth-block characters. Saved, so it sticks.
+                KeyCode::Char('#') => {
+                    let plain = !s.plain_glyphs();
+                    s.set_glyphs(plain);
+                    Config::persist_glyphs(plain);
+                    s.notice = Some(
+                        if plain {
+                            "graphs: plain glyphs (saved) · # again for the fine set"
+                        } else {
+                            "graphs: fine glyphs (saved) · # again for the plain set"
+                        }
+                        .to_string(),
+                    );
+                }
                 KeyCode::Char('r') => {
                     s.refresh_at = Some(std::time::Instant::now());
                     side = Side::Refresh;
@@ -2294,7 +2337,13 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     if s.zoom_view == app::ZoomView::Processes {
                         // What the OS knows about each pid arrives async; the
                         // view shows "looking up…" until it lands.
-                        side = Side::LoadProcDetails(s.processes.iter().map(|p| p.pid).collect());
+                        side = Side::LoadProcDetails(
+                            s.processes
+                                .iter()
+                                .filter(|p| p.container.is_none())
+                                .map(|p| p.pid)
+                                .collect(),
+                        );
                     }
                     s.fullscreen = true;
                     s.overlay = Overlay::Zoom;
@@ -2888,13 +2937,14 @@ fn write_bundle_to(path: &std::path::Path, s: &AppState) -> Result<(), String> {
 /// report's table stops at ten.
 fn processes_csv(s: &AppState) -> String {
     use std::fmt::Write as _;
-    let mut out =
-        String::from("name,pid,down_bytes,up_bytes,total_bytes,share_pct,retx,down_bps,up_bps\n");
+    let mut out = String::from(
+        "name,pid,down_bytes,up_bytes,total_bytes,share_pct,retx,down_bps,up_bps,container_id\n",
+    );
     for i in s.process_order_all() {
         let p = &s.processes[i];
         let _ = writeln!(
             out,
-            "{},{},{},{},{},{:.1},{},{:.0},{:.0}",
+            "{},{},{},{},{},{:.1},{},{:.0},{:.0},{}",
             collectors::logger::field(&p.name),
             p.pid,
             p.down_bytes,
@@ -2903,7 +2953,8 @@ fn processes_csv(s: &AppState) -> String {
             p.share * 100.0,
             p.retx,
             p.down_bps,
-            p.up_bps
+            p.up_bps,
+            p.container.as_ref().map(|c| c.id.as_str()).unwrap_or("")
         );
     }
     out
@@ -3103,10 +3154,16 @@ fn snapshot_text(s: &AppState) -> String {
                 println!("    (no talkers yet)");
             }
             for p in s.processes.iter().take(10) {
+                // A container row names its image where a process has a pid.
+                let who = match &p.container {
+                    Some(c) if !c.image.is_empty() => format!("image={}", c.image),
+                    // Without a runtime API the name already is the short id.
+                    Some(_) => "container".to_string(),
+                    None => format!("pid={:<6}", p.pid),
+                };
                 println!(
-                    "    {:<20} pid={:<6} ↓{:>12} ↑{:>12} B  {:>3.0}%  now ↓{:>10.0} ↑{:>10.0} B/s  retx={}",
+                    "    {:<20} {who} ↓{:>12} ↑{:>12} B  {:>3.0}%  now ↓{:>10.0} ↑{:>10.0} B/s  retx={}",
                     p.name,
-                    p.pid,
                     p.down_bytes,
                     p.up_bytes,
                     p.share * 100.0,
@@ -3264,6 +3321,9 @@ fn snapshot_text(s: &AppState) -> String {
             .map(|p| format!("{} {:.0}%", p.name, p.cpu_pct))
             .collect();
         println!("  busiest: {}", busiest.join(", "));
+    }
+    if let Some(c) = &s.containers {
+        println!("  containers: {} running (via {})", c.running, c.via);
     }
     if !v.thermal.is_empty() || !v.power_source.is_empty() {
         println!(

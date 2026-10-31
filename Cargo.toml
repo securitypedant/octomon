@@ -1,6 +1,6 @@
 [package]
 name = "octomon"
-version = "0.11.7"
+version = "0.11.8"
 edition = "2024"
 description = "Btop-style terminal network monitor: latency, bandwidth, and Wi-Fi signal"
 repository = "https://github.com/securitypedant/octomon"
@@ -44,6 +44,12 @@ clap = { version = "4.6.6", features = ["derive", "wrap_help"] }
 crossterm = "0.29.0"
 directories = "6.0.0"
 futures-util = "0.3.33"
+# The container runtime API lives on a Unix socket or named pipe, which
+# reqwest cannot dial; these three are already in the tree underneath it, so
+# driving one HTTP/1.1 request over our own stream costs no new crate.
+http-body-util = "0.1"
+hyper = { version = "1", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 netdev = "0.46.0"
 ratatui = "0.30.2"
 # Both root stores: Mozilla's bundled set, and the OS store — which is where a

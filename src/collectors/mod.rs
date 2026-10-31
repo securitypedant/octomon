@@ -3,6 +3,7 @@
 //! never span an `.await`.
 
 pub mod clock;
+pub mod containers;
 pub mod discovery;
 pub mod dns;
 pub mod edge;

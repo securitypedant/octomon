@@ -169,6 +169,19 @@ pub struct Config {
     /// never call it.
     #[serde(default = "default_edge_check_url")]
     pub edge_check_url: String,
+    /// Containers as rows of the processes table — one per Docker or Podman
+    /// container, from its own interface counters, named `app (docker)`.
+    /// On Linux they are read from /proc; everywhere, a local runtime API
+    /// (Unix socket or named pipe, never TCP) supplies names and, where the
+    /// containers live in a VM, the counters. `false` leaves containers out.
+    #[serde(default = "default_true")]
+    pub containers: bool,
+    /// The runtime API to use, as `unix:///path`, `npipe:////./pipe/name`
+    /// or a bare socket path. Empty means look in the usual places
+    /// (`DOCKER_HOST`, `CONTAINER_HOST`, then the Docker, Podman, Colima,
+    /// OrbStack, Rancher Desktop and Lima sockets).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub container_socket: String,
     /// Where to send analysis findings when nobody is watching the screen.
     #[serde(default)]
     pub alert: AlertConfig,
@@ -299,7 +312,7 @@ fn default_bandwidth_units() -> String {
 /// Unlike ratatui's own three-level set this keeps `one_eighth` visible: the
 /// bandwidth traces promise that any non-zero sample shows at least one
 /// sub-cell, and a blank there would break that.
-const COARSE_BARS: ratatui::symbols::bar::Set<'static> = ratatui::symbols::bar::Set {
+pub(crate) const COARSE_BARS: ratatui::symbols::bar::Set<'static> = ratatui::symbols::bar::Set {
     full: ratatui::symbols::bar::FULL,
     seven_eighths: ratatui::symbols::bar::FULL,
     three_quarters: ratatui::symbols::bar::HALF,
@@ -403,6 +416,8 @@ impl Default for Config {
             theme: default_theme(),
             iperf3_servers: Vec::new(),
             edge_check_url: default_edge_check_url(),
+            containers: true,
+            container_socket: String::new(),
             alert: AlertConfig::default(),
         }
     }
@@ -677,6 +692,17 @@ impl Config {
         Self::update_on_disk(move |cfg| {
             cfg.iperf3_servers.retain(|s| s.name != server.name);
             cfg.iperf3_servers.push(server);
+        });
+    }
+
+    /// Remember the glyph set chosen with [#]: plain (half-block markers,
+    /// half/full bars) for a font without braille or eighth-block glyphs,
+    /// fine otherwise. Written as the explicit names so the choice survives
+    /// a change to what "auto" would pick.
+    pub fn persist_glyphs(plain: bool) {
+        Self::update_on_disk(move |cfg| {
+            cfg.graph_marker = if plain { "halfblock" } else { "braille" }.to_string();
+            cfg.bar_glyphs = if plain { "coarse" } else { "fine" }.to_string();
         });
     }
 

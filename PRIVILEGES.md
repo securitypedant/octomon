@@ -54,7 +54,10 @@ from CoreWLAN and `system_profiler`. Every panel populates without root.
 
 Two limits are worth knowing, and neither is fixed by `sudo`: `nettop` reports
 only your own processes, and it is TCP-only, so QUIC and HTTP/3 traffic is not
-attributed. Neighbouring-network SSIDs additionally need Location Services;
+attributed. Containers (Docker Desktop, Colima, OrbStack, Podman machine) run
+inside a VM and are read through the runtime's local socket instead; the VM's
+own process (`com.docker.backend` and the like) also appears in the table
+carrying the same bytes, so the share column counts container traffic twice. Neighbouring-network SSIDs additionally need Location Services;
 without it macOS redacts them, so airspace congestion counts networks per
 channel but cannot weight them by signal.
 
@@ -67,6 +70,7 @@ broken without it, and only one of them can be fixed by configuration.
 |---|---|---|
 | Latency, path monitor, traceroute targets | Broken on many distributions, fixable — see below | Works |
 | Per-process bandwidth | Your own processes only | Every process |
+| Container traffic | Every container, from `/proc` | Every container |
 | Everything else | Works | Works |
 
 octomon starts by telling you which of these apply on your machine.
@@ -97,6 +101,18 @@ HTTP/3 traffic, which is much of modern browsing, carries no per-socket byte
 counters and cannot be attributed at all. (Windows is the exception here: its
 ETW provider does report UDP — see
 [Windows](#windows).)
+
+**Containers.** The one place unprivileged Linux sees other users' traffic.
+A container on a bridge network has its own network namespace, so its sockets
+never appear in `ss` even under `sudo`; but `/proc/<pid>/cgroup` names the
+container a process belongs to and `/proc/<pid>/net/dev` is that namespace's
+interface counter table, and both are world-readable. octomon reads them for
+every container, whoever started it, and lists each as a row of the processes
+table named `app (docker)`. Without root the row carries the short container
+id; names and images come from the Docker or Podman API when its socket is
+readable (membership of the `docker` group, or rootless Podman's own socket).
+The counters are the container's interface, so they say how much, not to
+whom: container rows never appear in the remote-addresses table.
 
 So: fix the sysctl and run as yourself if you mainly care about latency and the
 path monitor; use `sudo` if you want the full picture.
@@ -131,6 +147,7 @@ Manager's own Network column reads — and Windows gates opening one.
 | Wi-Fi signal, channel, tx rate | full | full |
 | Neighbouring networks / airspace congestion | needs Location services on | same |
 | Per-process bandwidth | unavailable | full, **including QUIC and HTTP/3** |
+| Container traffic (Docker Desktop) | full, through the engine's named pipe | same |
 
 There are two ways to get it, and the first is better:
 

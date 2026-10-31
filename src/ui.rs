@@ -232,12 +232,15 @@ fn zoom_processes(f: &mut Frame, s: &AppState, area: Rect) {
     let rows = order.iter().skip(first).take(visible).map(|&idx| {
         let p = &s.processes[idx];
         let name: String = p.name.chars().take(name_w as usize).collect();
+        // A container in a VM has no pid octomon can see.
+        let pid = if p.container.is_some() && p.pid == 0 {
+            "·".to_string()
+        } else {
+            p.pid.to_string()
+        };
         let mut cells = vec![
             Cell::from(name),
-            Cell::from(Span::styled(
-                p.pid.to_string(),
-                Style::new().fg(theme::text()),
-            )),
+            Cell::from(Span::styled(pid, Style::new().fg(theme::text()))),
             fmt_now(p.down_bps, s.bits_units),
             fmt_now(p.up_bps, s.bits_units),
             fmt_now(p.down_bps + p.up_bps, s.bits_units),
@@ -280,6 +283,44 @@ fn zoom_processes(f: &mut Frame, s: &AppState, area: Rect) {
         return;
     };
     let text_w = da.width as usize;
+    // A container row: what it is, not what the OS knows about a pid. Its
+    // counters are its own interface's, so say where they come from.
+    if let Some(c) = &p.container {
+        let mut lines = vec![
+            selected_rule(text_w),
+            Line::from(vec![
+                Span::styled(p.name.clone(), Style::new().fg(theme::bright()).bold()),
+                Span::styled(
+                    format!(
+                        "  container {}{}",
+                        c.id.chars().take(12).collect::<String>(),
+                        if p.pid > 0 {
+                            format!(" · init pid {}", p.pid)
+                        } else {
+                            String::new()
+                        }
+                    ),
+                    Style::new().fg(theme::text()),
+                ),
+            ]),
+        ];
+        if !c.image.is_empty() {
+            lines.extend(column_lines(
+                vec![Span::styled("image ", Style::new().fg(theme::dim()))],
+                &c.image,
+                Style::new().fg(theme::text()),
+                6,
+                text_w,
+            ));
+        }
+        lines.push(Line::from(Span::styled(
+            "bytes on the container's own interface — not attributed to remote addresses",
+            Style::new().fg(theme::dim()),
+        )));
+        lines.truncate(detail_h as usize);
+        f.render_widget(Paragraph::new(lines), da);
+        return;
+    }
     let mut lines = vec![
         selected_rule(text_w),
         Line::from(vec![
@@ -4984,7 +5025,7 @@ fn help_overlay(f: &mut Frame, s: &AppState, area: Rect) {
             row("f", "full-screen focused panel"),
             row("n", "next sub-pane in panel"),
             row("Esc", "back / exit full-screen"),
-            row("P", "pause / resume the display"),
+            row("P / #", "pause · plain ↔ fine glyphs"),
             row("w", "stats window 30s→15m"),
             row("r / G", "re-probe / rescan the path"),
             row("? / q", "this help / quit (^C too)"),
@@ -6252,7 +6293,9 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
     // the core grid, then the history with whatever is left.
     // Full screen adds three lines under the five: octomon's own footprint,
     // the connection count, and the uptime. The split view stays a summary.
-    let summary_rows: u16 = if s.fullscreen { 8 } else { 5 };
+    // Plus one for the containers line, only when there is something to say.
+    let ct_row = u16::from(s.containers.is_some());
+    let summary_rows: u16 = if s.fullscreen { 8 } else { 5 } + ct_row;
     let bands = Layout::vertical([
         Constraint::Length(summary_rows.max(proc_rows)),
         Constraint::Length(core_rows),
@@ -6373,6 +6416,29 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
             ));
         }
         f.render_widget(Paragraph::new(Line::from(spans)), parts[4]);
+    }
+
+    // Containers: how many are running and where octomon reads them from.
+    // Rows appear in the Bandwidth table only once a container moves bytes,
+    // so this is the one place that says detection worked on an idle box.
+    if let Some(c) = &s.containers {
+        let slot = if s.fullscreen { lines[8] } else { lines[5] };
+        let count = if c.running == 0 {
+            Span::styled("none running", Style::new().fg(theme::dim()))
+        } else {
+            Span::styled(
+                format!("{} running", c.running),
+                Style::new().fg(theme::text()),
+            )
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("containers ", Style::new().fg(theme::dim())),
+                count,
+                Span::styled(format!(" · {}", c.via), Style::new().fg(theme::dim())),
+            ])),
+            slot,
+        );
     }
 
     // Full screen only (the split view's band is five rows, so these rects
@@ -9449,6 +9515,7 @@ mod tests {
                 total_bytes: 5_000_000,
                 share: 0.8,
                 retx: 3,
+                container: None,
                 down_bps: 900_000.0,
                 up_bps: 10_000.0,
                 retx_per_sec: 0.0,

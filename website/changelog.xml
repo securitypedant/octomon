@@ -7,6 +7,23 @@
   <description>Every octomon release, newest first, with what changed and why.</description>
   <language>en</language>
   <item>
+    <title>octomon 0.11.8</title>
+    <link>https://octomon.dev/changelog#v0.11.8</link>
+    <guid isPermaLink="false">https://octomon.dev/changelog/v0.11.8</guid>
+    <pubDate>Fri, 30 Oct 2026 00:00:00 GMT</pubDate>
+    <description>Containers join the processes table and a fix for a terminal that cannot draw the dashboard due to font issues.</description>
+    <content:encoded><![CDATA[<p>Containers join the processes table and a fix for a terminal that cannot draw the dashboard due to font issues.</p>
+<ul>
+<li>Docker and Podman containers are now talkers. Each running container is a row of the Bandwidth panel&#39;s processes table, named <code>app (docker)</code>, with total, down, up and share columns, and everything that works on a process row works on it: sort, the <code>/</code> filter (typing <code>docker</code> keeps every container), pin, follow, the stacked graph and the zoom, whose detail line shows the container&#39;s id, image and, on Linux, init pid. The figures are the container&#39;s own interface counters, so they say how much it moved and not to who. Container rows never appear in the remote-addresses table, and octomon does not split the bytes across connections by guesswork.</li>
+<li>On Linux this needs no root and we see every user&#39;s containers. A container&#39;s processes name it in <code>/proc/&lt;pid&gt;/cgroup</code> and its namespace&#39;s counters are in <code>/proc/&lt;pid&gt;/net/dev</code>, both world-readable; the inode of that file identifies the namespace, so two containers sharing one (<code>--network container:X</code>, a pod) count once and a host-network container, whose counters are the host&#39;s, is skipped. Without the runtime&#39;s socket the row carries the short container id.</li>
+<li>Names and images come from the Docker or Podman API when its Unix socket or Windows named pipe is reachable (<code>DOCKER_HOST</code> and <code>CONTAINER_HOST</code> first, then the Docker, Podman, Colima, OrbStack, Rancher Desktop and Lima paths; never <code>tcp://</code>). On macOS and Windows, where the containers live in a VM, the API also supplies the counters. Two read-only endpoints, the container list and one-shot stats, each a few milliseconds. <code>containers = false</code> in config.toml turns it off; <code>container_socket</code> names an endpoint. One caveat on a Mac: the VM&#39;s own process (<code>com.docker.backend</code>) carries the same bytes on the host side, so the share column counts container traffic twice, it&#39;s mentioned in the FAQ.</li>
+<li>A container starting or stopping is a timeline event, and a finding that raises within a minute of one says so (&quot;8 seconds after container media (docker) started&quot;), as it already does for a Wi-Fi roam or a VPN coming up. The Machine panel and <code>--doctor</code> carry a presence line, <code>containers 3 running · docker</code>, so an idle box still shows that detection worked, and processes.csv in the support bundle gains a <code>container_id</code> column. The speed-test load attribution reads the same table, so a container uploading during a test is named in the finding without any further work.</li>
+<li><code>--observe</code> takes a time with a unit: <code>90s</code>, <code>15m</code>, <code>1h</code>, up to an hour (bare seconds still work). <code>octomon --observe 15m --doctor</code> is now the report to paste when asking for help, in the README, the howto page and the bug-report template: twenty seconds catches a hard fault and misses the intermittent one the person is asking about.</li>
+<li>A terminal that is not in UTF-8 mode is called out at startup, in the notice bar, the timeline and errors.log, with the fix in the message. An xterm started from an X session without <code>LANG</code> decodes every border as three Latin-1 letters and the layout collapses; nothing in octomon can fix that from the inside, but it can say what is wrong. xterm with a good locale gets a softer hint about its default bitmap font, which has box drawing but no braille or block glyphs.</li>
+<li><code>#</code> switches the graphs between the fine glyph set (braille line charts, eighth-block bars) and a plain set every monospace font has, and saves the choice. For the fonts that draw the graphs as boxes.</li>
+</ul>]]></content:encoded>
+  </item>
+  <item>
     <title>octomon 0.11.7</title>
     <link>https://octomon.dev/changelog#v0.11.7</link>
     <guid isPermaLink="false">https://octomon.dev/changelog/v0.11.7</guid>

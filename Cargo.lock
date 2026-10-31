@@ -1711,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "octomon"
-version = "0.11.7"
+version = "0.11.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1719,6 +1719,9 @@ dependencies = [
  "crossterm",
  "directories",
  "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "netdev",
  "objc2",
