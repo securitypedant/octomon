@@ -179,13 +179,35 @@ fn bss_list(client: &WlanClient, guid: &GUID) -> Vec<BssEntry> {
             (*owned.0).dwNumberOfItems as usize,
         )
     };
+    // The beacon IEs of each entry live inside the same allocation, past the
+    // entry array, at `ulIeOffset` bytes from the start of that entry. The
+    // allocation's own size bounds the read, so a malformed offset from a
+    // misbehaving driver yields an empty slice rather than a wild one.
+    let list_base = owned.0.cast::<u8>();
+    // SAFETY: the header has just been read through the same pointer.
+    let list_size = unsafe { (*owned.0).dwTotalSize } as usize;
     entries
         .iter()
-        .map(|e| BssEntry {
-            bssid: e.dot11Bssid,
-            rssi_dbm: e.lRssi,
-            // The API reports kHz; everything else here speaks MHz.
-            freq_mhz: e.ulChCenterFrequency / 1000,
+        .map(|e| {
+            let entry_base = std::ptr::from_ref(e).cast::<u8>() as usize;
+            let start = entry_base
+                .wrapping_add(e.ulIeOffset as usize)
+                .wrapping_sub(list_base as usize);
+            let end = start.wrapping_add(e.ulIeSize as usize);
+            let ies: &[u8] = if start <= end && end <= list_size {
+                // SAFETY: `[start, end)` lies within the `list_size` bytes the
+                // API wrote, checked above, and `owned` keeps them alive.
+                unsafe { std::slice::from_raw_parts(list_base.add(start), end - start) }
+            } else {
+                &[]
+            };
+            BssEntry {
+                bssid: e.dot11Bssid,
+                rssi_dbm: e.lRssi,
+                // The API reports kHz; everything else here speaks MHz.
+                freq_mhz: e.ulChCenterFrequency / 1000,
+                width_mhz: channel_width_mhz(ies),
+            }
         })
         .collect()
 }
@@ -195,6 +217,124 @@ struct BssEntry {
     bssid: [u8; 6],
     rssi_dbm: i32,
     freq_mhz: u32,
+    width_mhz: u16,
+}
+
+/// The channel width a BSS occupies, read from its beacon's information
+/// elements. `ulChCenterFrequency` is the primary 20MHz channel and nothing
+/// in the connection attributes says how many more are bonded to it, so this
+/// walk is the only place the answer exists (issue #26).
+///
+/// Each generation describes the width in its own element and an access
+/// point carries every element its clients might understand, so the widest
+/// reading wins: HT Operation knows about 40MHz, VHT Operation about 80 and
+/// 160, HE Operation carries the 6GHz band's own field, and EHT Operation
+/// adds 320. Unknown or truncated elements are skipped, and a beacon that says
+/// nothing is 20MHz — what every pre-802.11n network is.
+fn channel_width_mhz(ies: &[u8]) -> u16 {
+    const HT_OPERATION: u8 = 61;
+    const VHT_OPERATION: u8 = 192;
+    const EXTENSION: u8 = 255;
+    const EXT_HE_OPERATION: u8 = 36;
+    const EXT_EHT_OPERATION: u8 = 106;
+
+    let mut width = 20u16;
+    let mut at = 0usize;
+    while at + 2 <= ies.len() {
+        let (id, len) = (ies[at], ies[at + 1] as usize);
+        let Some(body) = ies.get(at + 2..at + 2 + len) else {
+            break; // truncated element: the rest cannot be trusted
+        };
+        at += 2 + len;
+
+        let found = match id {
+            // Primary channel, then HT Operation Information: bits 0-1 of
+            // its first byte place the secondary channel (0 none, 1 above,
+            // 3 below) and bit 2 allows the station to use it.
+            HT_OPERATION if body.len() >= 2 => {
+                let info = body[1];
+                let secondary = info & 0b11;
+                let wide = info & 0b100 != 0;
+                if wide && (secondary == 1 || secondary == 3) {
+                    40
+                } else {
+                    20
+                }
+            }
+            // VHT Operation Information: channel width, then the centre
+            // frequency of segment 0 and 1. Since 802.11-2016 width 1 covers
+            // 80, 160 and 80+80 alike, told apart by segment 1: zero for a
+            // single 80MHz block, otherwise a second block exists and the
+            // network occupies 160MHz of spectrum, contiguous or not. 2 and
+            // 3 are the deprecated explicit 160 and 80+80 encodings.
+            VHT_OPERATION if body.len() >= 3 => match body[0] {
+                1 if body[2] == 0 => 80,
+                1..=3 => 160,
+                _ => 0, // 0: 20 or 40, as HT Operation says
+            },
+            EXTENSION if !body.is_empty() => match body[0] {
+                EXT_HE_OPERATION => he_width(&body[1..]),
+                EXT_EHT_OPERATION => eht_width(&body[1..]),
+                _ => 0,
+            },
+            _ => 0,
+        };
+        width = width.max(found);
+    }
+    width
+}
+
+/// HE Operation, after the extension ID: three bytes of parameters, BSS
+/// colour, two bytes of basic MCS set, then optional fields in a fixed order
+/// whose presence the parameter bits announce — VHT Operation Information
+/// (bit 14, 3 bytes), Max Co-Hosted BSSID Indicator (bit 15, 1 byte), and
+/// 6 GHz Operation Information (bit 17, 5 bytes). Only the last carries a
+/// width, and only 6GHz networks carry it: on the other bands HE access
+/// points describe their width through HT and VHT Operation as before.
+fn he_width(body: &[u8]) -> u16 {
+    if body.len() < 6 {
+        return 0;
+    }
+    let params = u32::from_le_bytes([body[0], body[1], body[2], 0]);
+    let vht_info_present = params & (1 << 14) != 0;
+    let co_hosted_bss = params & (1 << 15) != 0;
+    let six_ghz_present = params & (1 << 17) != 0;
+    if !six_ghz_present {
+        return 0;
+    }
+    let mut at = 6;
+    if vht_info_present {
+        at += 3;
+    }
+    if co_hosted_bss {
+        at += 1;
+    }
+    // Primary channel, control, segment 0, segment 1, minimum rate. Bits 0-1
+    // of control: 20, 40, 80, 160 (or 80+80).
+    match body.get(at + 1).map(|control| control & 0b11) {
+        Some(0) => 20,
+        Some(1) => 40,
+        Some(2) => 80,
+        Some(3) => 160,
+        _ => 0,
+    }
+}
+
+/// EHT Operation, after the extension ID: one byte of parameters whose bit 0
+/// says whether EHT Operation Information follows the four-byte basic MCS
+/// set. Its control byte's bits 0-2 give the width: 20, 40, 80, 160, 320.
+fn eht_width(body: &[u8]) -> u16 {
+    if body.len() < 6 || body[0] & 1 == 0 {
+        return 0;
+    }
+    match body.get(5).map(|control| control & 0b111) {
+        Some(0) => 20,
+        Some(1) => 40,
+        Some(2) => 80,
+        Some(3) => 160,
+        Some(4) => 320,
+        _ => 0,
+    }
 }
 
 /// Map a centre frequency to (channel, band in GHz).
@@ -272,10 +412,8 @@ fn details_blocking() -> Option<WifiInfo> {
     // there is only a bare channel number, which is not: 6GHz channels are
     // numbered from 1 and collide with 2.4GHz.
     let channel = ours
-        .and_then(|b| channel_from_freq(b.freq_mhz))
-        // Width would mean walking the beacon IEs. 20MHz under-counts overlap
-        // rather than inventing it, matching what the Linux nmcli path assumes.
-        .map(|(ch, band)| format!("{ch} ({band}GHz, 20MHz)"))
+        .and_then(|b| channel_from_freq(b.freq_mhz).map(|(ch, band)| (ch, band, b.width_mhz)))
+        .map(|(ch, band, width)| format!("{ch} ({band}GHz, {width}MHz)"))
         .unwrap_or_default();
 
     let rssi = ours
@@ -294,7 +432,7 @@ fn details_blocking() -> Option<WifiInfo> {
                 channel_from_freq(b.freq_mhz).map(|(channel, band_ghz)| Neighbour {
                     channel,
                     band_ghz,
-                    width_mhz: 20,
+                    width_mhz: b.width_mhz,
                 })
             })
             .collect(),
@@ -605,5 +743,128 @@ mod tests {
         assert_eq!(spec.channel, 36);
         assert_eq!(spec.band_ghz, 5);
         assert_eq!(spec.width_mhz, 20);
+    }
+
+    /// One information element: ID, length, body.
+    fn ie(id: u8, body: &[u8]) -> Vec<u8> {
+        let mut v = vec![id, body.len() as u8];
+        v.extend_from_slice(body);
+        v
+    }
+
+    /// HT Operation for `primary` with the secondary channel placed by
+    /// `offset` and the station allowed any width when `wide`.
+    fn ht_operation(primary: u8, offset: u8, wide: bool) -> Vec<u8> {
+        let mut body = vec![primary, offset | if wide { 0b100 } else { 0 }];
+        body.resize(22, 0);
+        ie(61, &body)
+    }
+
+    fn vht_operation(width: u8, seg0: u8, seg1: u8) -> Vec<u8> {
+        ie(192, &[width, seg0, seg1, 0xff, 0xff])
+    }
+
+    #[test]
+    fn a_beacon_without_width_elements_is_20mhz() {
+        assert_eq!(channel_width_mhz(&[]), 20);
+        // SSID and DS Parameter Set alone: an 802.11g network.
+        let mut ies = ie(0, b"home");
+        ies.extend(ie(3, &[6]));
+        assert_eq!(channel_width_mhz(&ies), 20);
+    }
+
+    #[test]
+    fn ht_operation_reports_40mhz_only_when_a_secondary_channel_is_in_use() {
+        assert_eq!(channel_width_mhz(&ht_operation(36, 1, true)), 40);
+        assert_eq!(channel_width_mhz(&ht_operation(40, 3, true)), 40);
+        // No secondary channel, or one the station may not use.
+        assert_eq!(channel_width_mhz(&ht_operation(1, 0, true)), 20);
+        assert_eq!(channel_width_mhz(&ht_operation(36, 1, false)), 20);
+    }
+
+    #[test]
+    fn vht_operation_reports_80_and_160() {
+        // The reporter's network: channel 149 in an 80MHz block centred on
+        // 155. Width 1 with no second segment is 80MHz — the proposal in
+        // issue #26 read this value as 40.
+        let mut ies = ht_operation(149, 1, true);
+        ies.extend(vht_operation(1, 155, 0));
+        assert_eq!(channel_width_mhz(&ies), 80);
+        // Width 1 with a second segment eight channels away: 160MHz.
+        let mut ies = ht_operation(36, 1, true);
+        ies.extend(vht_operation(1, 42, 50));
+        assert_eq!(channel_width_mhz(&ies), 160);
+        // The deprecated explicit 160 and 80+80 encodings.
+        assert_eq!(channel_width_mhz(&vht_operation(2, 50, 0)), 160);
+        assert_eq!(channel_width_mhz(&vht_operation(3, 42, 106)), 160);
+        // Width 0 defers to HT Operation.
+        let mut ies = ht_operation(36, 1, true);
+        ies.extend(vht_operation(0, 0, 0));
+        assert_eq!(channel_width_mhz(&ies), 40);
+        assert_eq!(channel_width_mhz(&vht_operation(0, 0, 0)), 20);
+    }
+
+    #[test]
+    fn he_operation_width_comes_only_from_the_6ghz_field() {
+        // HE Operation without 6GHz information says nothing about width;
+        // the 5GHz HE network falls back to its VHT Operation.
+        let he_5ghz = ie(255, &[36, 0x00, 0x40, 0x00, 1, 0xff, 0xff, 0, 0, 0]);
+        let mut ies = vht_operation(1, 42, 0);
+        ies.extend(he_5ghz.clone());
+        assert_eq!(channel_width_mhz(&ies), 80);
+        assert_eq!(channel_width_mhz(&he_5ghz), 20);
+
+        // 6GHz: parameters with bit 17 set (byte 2 = 0x02), no VHT info, no
+        // co-hosted BSS, then the 6 GHz Operation Information whose control
+        // byte says 160MHz.
+        let he_6ghz = ie(255, &[36, 0x00, 0x00, 0x02, 1, 0xff, 0xff, 37, 3, 47, 0, 0]);
+        assert_eq!(channel_width_mhz(&he_6ghz), 160);
+
+        // With both optional fields present before it, the 6GHz field moves
+        // four bytes down: bits 14 and 15 set in byte 1 (0xc0), bit 17 in
+        // byte 2.
+        let he_6ghz_shifted = ie(
+            255,
+            &[
+                36, 0x00, 0xc0, 0x02, 1, 0xff, 0xff, 1, 42, 0, 2, 5, 2, 39, 0, 0,
+            ],
+        );
+        assert_eq!(channel_width_mhz(&he_6ghz_shifted), 80);
+
+        // Truncated before the 6GHz field: ignored, not misread.
+        let truncated = ie(255, &[36, 0x00, 0x00, 0x02, 1, 0xff, 0xff, 37]);
+        assert_eq!(channel_width_mhz(&truncated), 20);
+    }
+
+    #[test]
+    fn eht_operation_reports_320mhz() {
+        // Parameters bit 0 set, four-byte MCS set, then control = 4 (320MHz).
+        let eht = ie(255, &[106, 0x01, 0xff, 0xff, 0xff, 0xff, 4, 31, 0]);
+        assert_eq!(channel_width_mhz(&eht), 320);
+        // No operation information present: nothing to say.
+        let eht_bare = ie(255, &[106, 0x00, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(channel_width_mhz(&eht_bare), 20);
+        // The widest element wins when several describe the same network.
+        let mut ies = ht_operation(1, 1, true);
+        ies.extend(ie(255, &[106, 0x01, 0xff, 0xff, 0xff, 0xff, 3, 15, 0]));
+        assert_eq!(channel_width_mhz(&ies), 160);
+    }
+
+    #[test]
+    fn malformed_element_streams_are_cut_off_not_read_past() {
+        // An element claiming more bytes than remain ends the walk, keeping
+        // whatever came before it.
+        let mut ies = ht_operation(36, 1, true);
+        ies.extend([192, 50, 1, 42]);
+        assert_eq!(channel_width_mhz(&ies), 40);
+        // A lone ID with no length byte.
+        assert_eq!(channel_width_mhz(&[61]), 20);
+        // Elements too short for their type are skipped, not indexed.
+        let mut ies = ie(61, &[36]);
+        ies.extend(ie(192, &[1]));
+        ies.extend(ie(255, &[]));
+        ies.extend(ie(255, &[36, 1]));
+        ies.extend(ie(255, &[106, 1]));
+        assert_eq!(channel_width_mhz(&ies), 20);
     }
 }
