@@ -589,7 +589,7 @@ fn classify(iface: &netdev::Interface) -> LinkMedium {
 }
 
 /// Interface-name prefixes used by tunnel/VPN virtual devices across platforms.
-fn is_tunnel_name(name: &str) -> bool {
+pub(crate) fn is_tunnel_name(name: &str) -> bool {
     const PREFIXES: &[&str] = &[
         "utun",
         "tun",
@@ -602,9 +602,15 @@ fn is_tunnel_name(name: &str) -> bool {
         "proton",
         "zt",
         "tailscale",
-        // Windows adapter aliases: the WARP client names its adapter
-        // "CloudflareWARP" (one word).
+        // Windows adapter aliases, as the clients register them: the WARP
+        // client's "CloudflareWARP" (one word), WireGuard's "WireGuard
+        // Tunnel", OpenVPN's "OpenVPN Wintun" / "OpenVPN TAP-Windows6",
+        // "Mullvad", "ZeroTier One".
         "cloudflarewarp",
+        "wireguard",
+        "openvpn",
+        "mullvad",
+        "zerotier",
     ];
     let n = name.to_ascii_lowercase();
     PREFIXES.iter().any(|p| n.starts_with(p))
@@ -883,9 +889,14 @@ mod tests {
             "ppp0",
             "ZT0",
             "ipsec1",
-            // The Windows WARP adapter's friendly name, exactly as the client
-            // registers it.
+            // Windows adapters' friendly names, exactly as the clients
+            // register them.
             "CloudflareWARP",
+            "NordLynx",
+            "WireGuard Tunnel",
+            "OpenVPN Wintun",
+            "Mullvad",
+            "ZeroTier One",
         ] {
             assert!(is_tunnel_name(n), "{n} should be a tunnel");
         }
