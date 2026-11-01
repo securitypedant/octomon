@@ -226,8 +226,7 @@ in the Machine panel shows errors as a share of frames. On a
 wired link, the Network panel's utilisation graph plots the same bytes against the negotiated
 link speed. Some VPN tunnel adapters have no counters (another learning I had, from NordVPN's NordLynx on Windows). Then octomon reads the physical
 adapter underneath, which carries the same bytes encrypted. The panel title
-names that adapter, and the fallback is logged to errors.log once per interface name. If neither can be found it sums every adapter except loopback.
-That is honest, but it counts a tunnel's traffic twice, and I would like to [improve it](https://github.com/securitypedant/octomon/issues/19).
+names that adapter, and the fallback is logged to errors.log once per interface name. If neither can be found it sums every physical adapter, leaving out loopback and anything named like a tunnel: a VPN's bytes cross both the tunnel adapter and the adapter beneath it, and until [issue #19](https://github.com/securitypedant/octomon/issues/19) was fixed that sum counted them twice.
 
 Code: [`throughput.rs`](https://github.com/securitypedant/octomon/blob/main/src/collectors/throughput.rs), [`app.rs`](https://github.com/securitypedant/octomon/blob/main/src/app.rs) (`LinkErrors`).
 
@@ -1080,7 +1079,7 @@ Code: [`verdict.rs`](https://github.com/securitypedant/octomon/blob/main/src/ver
 
 Every rule above is a stated, falsifiable condition on measured quantities,
 and every threshold is a constant with a comment explaining the choice.
-There are 348 automated tests, most of them scenarios: a lossy hop followed
+There are 352 automated tests, most of them scenarios: a lossy hop followed
 by clean ones must not blame the ISP; three silent game servers must not
 out-vote the built-in targets; a plane's 30% loss must read as weather once
 learned and as an incident on a connection that is normally clean. That is a specification, and it is
@@ -1149,6 +1148,6 @@ but it's a damn sight better than the hacky mess of scripts I used to run.
 This is a living document. Every change to it after first publication gets
 a line here, newest first, so you can see what moved and when.
 
-- **2026-11-01** · Reviewed against octomon 0.11.9: Wi-Fi details collection and the no-scan rule, and the link chosen by route lookup (§2.3), the two kinds of split tunnel (§3), test count (§6).
+- **2026-11-01** · Reviewed against octomon 0.11.9: the summed-adapters fallback no longer counts tunnels (§2.2), Wi-Fi details collection and the no-scan rule, and the link chosen by route lookup (§2.3), the two kinds of split tunnel (§3), test count (§6).
 - **2026-10-18** · Reviewed against octomon 0.11.6: path-change events and public IP re-fetch (§2.1), the stacked filtered bandwidth graph (§2.2), the version notice (§4.9).
 - **2026-10-16** · First publication, written against octomon 0.11.4.

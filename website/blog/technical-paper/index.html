@@ -319,7 +319,7 @@
     }
   },
   "image": "https://octomon.dev/blog/technical-paper/card.png",
-  "wordCount": 13437,
+  "wordCount": 13460,
   "inLanguage": "en-GB",
   "isPartOf": {
     "@type": "Blog",
@@ -612,8 +612,7 @@
         wired link, the Network panel&#39;s utilisation graph plots the same bytes against the negotiated
         link speed. Some VPN tunnel adapters have no counters (another learning I had, from NordVPN&#39;s NordLynx on Windows). Then octomon reads the physical
         adapter underneath, which carries the same bytes encrypted. The panel title
-        names that adapter, and the fallback is logged to errors.log once per interface name. If neither can be found it sums every adapter except loopback.
-        That is honest, but it counts a tunnel&#39;s traffic twice, and I would like to <a href="https://github.com/securitypedant/octomon/issues/19">improve it</a>.</p>
+        names that adapter, and the fallback is logged to errors.log once per interface name. If neither can be found it sums every physical adapter, leaving out loopback and anything named like a tunnel: a VPN&#39;s bytes cross both the tunnel adapter and the adapter beneath it, and until <a href="https://github.com/securitypedant/octomon/issues/19">issue #19</a> was fixed that sum counted them twice.</p>
         <p>Code: <a href="https://github.com/securitypedant/octomon/blob/main/src/collectors/throughput.rs"><code>throughput.rs</code></a>, <a href="https://github.com/securitypedant/octomon/blob/main/src/app.rs"><code>app.rs</code></a> (<code>LinkErrors</code>).</p>
         <p><strong>Per-process and per-remote traffic</strong>, every 2 seconds, from whatever the
         platform offers without privileges:</p>
@@ -1495,7 +1494,7 @@
         <h2 id="6-what-this-establishes-and-what-it-does-not">6. What this establishes, and what it does not <a class="anchor" href="#6-what-this-establishes-and-what-it-does-not" aria-label="Link to this section">#</a></h2>
         <p>Every rule above is a stated, falsifiable condition on measured quantities,
         and every threshold is a constant with a comment explaining the choice.
-        There are 348 automated tests, most of them scenarios: a lossy hop followed
+        There are 352 automated tests, most of them scenarios: a lossy hop followed
         by clean ones must not blame the ISP; three silent game servers must not
         out-vote the built-in targets; a plane&#39;s 30% loss must read as weather once
         learned and as an incident on a connection that is normally clean. That is a specification, and it is
@@ -1557,7 +1556,7 @@
         <p>This is a living document. Every change to it after first publication gets
         a line here, newest first, so you can see what moved and when.</p>
         <ul>
-        <li><strong>2026-11-01</strong> · Reviewed against octomon 0.11.9: Wi-Fi details collection and the no-scan rule, and the link chosen by route lookup (§2.3), the two kinds of split tunnel (§3), test count (§6).</li>
+        <li><strong>2026-11-01</strong> · Reviewed against octomon 0.11.9: the summed-adapters fallback no longer counts tunnels (§2.2), Wi-Fi details collection and the no-scan rule, and the link chosen by route lookup (§2.3), the two kinds of split tunnel (§3), test count (§6).</li>
         <li><strong>2026-10-18</strong> · Reviewed against octomon 0.11.6: path-change events and public IP re-fetch (§2.1), the stacked filtered bandwidth graph (§2.2), the version notice (§4.9).</li>
         <li><strong>2026-10-16</strong> · First publication, written against octomon 0.11.4.</li>
         </ul>
