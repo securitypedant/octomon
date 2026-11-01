@@ -285,9 +285,19 @@ Code: [`speedtest.rs`](https://github.com/securitypedant/octomon/blob/main/src/c
 
 The Network panel is everything that describes the connection, with a few measurements.
 
-- **Identity**, from the OS's interface tables, re-read every 5 seconds and on `r`. That poll is also how network changes are detected. It collects: interface, medium (Ethernet, Wi-Fi, cellular, tunnel),
+- **Identity**, from the OS's interface tables, re-read every 5 seconds and on `r`. That poll is also how network changes are detected. The link is the interface a route lookup toward the internet selects, so a tunnel holding only private routes is never mistaken for it. It collects: interface, medium (Ethernet, Wi-Fi, cellular, tunnel),
   negotiated link speed, IPv4 and IPv6 addresses, the machine's MAC, the
   gateway's address and MAC, the DHCP server, the configured resolvers.
+- **Wi-Fi details**, every 60 seconds and on `r`: SSID, PHY mode, channel
+  and width, and the airspace count of the other networks the operating
+  system last saw. No probe asks the radio to scan, because a scan takes it
+  off-channel for seconds at a time and would show in the latency figures
+  as octomon's own doing. macOS reads CoreWLAN and its scan cache, Windows
+  the driver's cached beacon list, Linux NetworkManager's cache, so the
+  airspace figure is as fresh as the system's last scan. On Windows the
+  width is read from the access point's beacon, so it refreshes only when
+  the system next hears one, which in practice means a reconnect or an
+  octomon restart.
 - **Public addresses**, IPv4 and IPv6, fetched at startup and on
   network change. (The rest of this document says v4 and v6, and "address
   family" or "family" always means IPv4 versus IPv6.) The v6 lookup runs
@@ -385,7 +395,13 @@ on the link:
 - With a full-tunnel VPN: the underlay gateway's MAC (or IP), the underlay
   medium, and the VPN vendor. When no underlay is visible, the vendor
   alone.
-- With a split-tunnel VPN: the LAN's own fingerprint plus the vendor.
+- With a split-tunnel VPN that carries internet traffic but leaves the LAN
+  outside it (WARP's exclude mode): the LAN's own fingerprint plus the
+  vendor.
+- With a tunnel that carries only its own routes, internet traffic still
+  leaving by the LAN (a corporate VPN to one address range): the LAN's
+  fingerprint alone. The tunnel is listed on the Network panel, and its
+  coming and going is an event, but it does not move the location.
 - With no gateway at all: the SSID alone.
 
 The key is hashed before it is stored. DHCP renumbering does not change it.
@@ -1064,7 +1080,7 @@ Code: [`verdict.rs`](https://github.com/securitypedant/octomon/blob/main/src/ver
 
 Every rule above is a stated, falsifiable condition on measured quantities,
 and every threshold is a constant with a comment explaining the choice.
-There are 331 automated tests, most of them scenarios: a lossy hop followed
+There are 348 automated tests, most of them scenarios: a lossy hop followed
 by clean ones must not blame the ISP; three silent game servers must not
 out-vote the built-in targets; a plane's 30% loss must read as weather once
 learned and as an incident on a connection that is normally clean. That is a specification, and it is
@@ -1133,5 +1149,6 @@ but it's a damn sight better than the hacky mess of scripts I used to run.
 This is a living document. Every change to it after first publication gets
 a line here, newest first, so you can see what moved and when.
 
+- **2026-11-01** · Reviewed against octomon 0.11.9: Wi-Fi details collection and the no-scan rule, and the link chosen by route lookup (§2.3), the two kinds of split tunnel (§3), test count (§6).
 - **2026-10-18** · Reviewed against octomon 0.11.6: path-change events and public IP re-fetch (§2.1), the stacked filtered bandwidth graph (§2.2), the version notice (§4.9).
 - **2026-10-16** · First publication, written against octomon 0.11.4.
