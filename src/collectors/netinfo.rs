@@ -641,11 +641,20 @@ fn iface_with_addr(ifaces: &[netdev::Interface], addr: IpAddr) -> Option<&netdev
 /// among `carrying` — the link itself and the tunnel the traffic leaves
 /// through. Whatever these carry, it is not the internet: the kernel just
 /// said so by routing a public address elsewhere.
+///
+/// "Addressed" means an IPv4 address or a ULA IPv6 one, which every VPN
+/// client assigns its tunnel. macOS keeps utun0–utun3 up permanently with
+/// nothing but a link-local address, and an `ipsec0` carrying the phone
+/// carrier's global v6 for Wi-Fi Calling; a Mac would otherwise list five
+/// "split tunnels" it has no VPN for.
 fn bypassed_tunnels(ifaces: &[netdev::Interface], carrying: &[&str]) -> Vec<String> {
+    let addressed = |i: &netdev::Interface| {
+        !i.ipv4.is_empty() || i.ipv6.iter().any(|n| n.addr().is_unique_local())
+    };
     let mut out: Vec<String> = ifaces
         .iter()
         .filter(|i| classify(i) == LinkMedium::Tunnel)
-        .filter(|i| i.is_up() && (!i.ipv4.is_empty() || !i.ipv6.is_empty()))
+        .filter(|i| i.is_up() && addressed(i))
         .map(counter_name)
         .filter(|name| !carrying.contains(&name.as_str()))
         .collect();
@@ -1007,6 +1016,31 @@ mod tests {
         bare.ipv4.clear();
         let ifaces = vec![up("eth0", "10.0.0.5/24"), down, bare];
         assert!(bypassed_tunnels(&ifaces, &["eth0", ""]).is_empty());
+    }
+
+    /// A Mac as shipped: utun0–utun3 up with link-local v6 only, ipsec0 with
+    /// the carrier's global v6 for Wi-Fi Calling. None is a VPN. A Tailscale
+    /// tunnel with its ULA v6 alone still counts.
+    #[test]
+    fn apples_own_tunnels_are_not_listed() {
+        let v6_only = |name: &str, addr: &str| {
+            let mut i = up(name, "0.0.0.0/32");
+            i.ipv4.clear();
+            i.ipv6 = vec![addr.parse().unwrap()];
+            i
+        };
+        let ifaces = vec![
+            up("en0", "192.168.1.89/23"),
+            v6_only("utun0", "fe80::49c4:35f8:4089:5fbc/64"),
+            v6_only("utun3", "fe80::ce81:b1c:bd2c:69e/64"),
+            v6_only("ipsec0", "2607:fb90:fa7f:21ba:fcda:5875:5ebf:7c8/64"),
+            v6_only("utun5", "fd7a:115c:a1e0::1234/128"),
+            up("utun4", "100.96.0.7/32"),
+        ];
+        assert_eq!(
+            bypassed_tunnels(&ifaces, &["en0", ""]),
+            vec!["utun4", "utun5"]
+        );
     }
 
     /// The wording has to carry "internet path unchanged" itself: on the
