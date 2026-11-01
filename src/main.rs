@@ -39,6 +39,7 @@ struct Ctx {
     state: Arc<Mutex<AppState>>,
     speedtest_trigger: Arc<Notify>,
     netinfo_refresh: Arc<Notify>,
+    wifi_refresh: Arc<Notify>,
     ping_clients: collectors::ping::Clients,
     cfg: Config,
     /// `--demo`: draw from a disguised copy of the state.
@@ -479,7 +480,11 @@ async fn main() -> Result<()> {
 
     // Triggers fired by key presses.
     let speedtest_trigger = Arc::new(Notify::new()); // 's'
-    let netinfo_refresh = Arc::new(Notify::new()); // 'r'
+    // 'r'. One notifier per collector: `notify_one` wakes a single waiter,
+    // so a notifier shared between the netinfo and Wi-Fi loops reached only
+    // whichever of the two happened to be first in line.
+    let netinfo_refresh = Arc::new(Notify::new());
+    let wifi_refresh = Arc::new(Notify::new());
 
     // Shared per-family ICMP clients so targets can be added at runtime and v6
     // addresses (common on carrier hotspots) are probed with the right socket.
@@ -566,10 +571,7 @@ async fn main() -> Result<()> {
         netinfo_refresh.clone(),
         network_changed.clone(),
     ));
-    tokio::spawn(collectors::wifi::run(
-        state.clone(),
-        netinfo_refresh.clone(),
-    ));
+    tokio::spawn(collectors::wifi::run(state.clone(), wifi_refresh.clone()));
     tokio::spawn(collectors::signal::run(state.clone()));
     tokio::spawn(collectors::procbw::run(state.clone(), cfg.clone()));
     tokio::spawn(collectors::web::run(state.clone()));
@@ -602,8 +604,9 @@ async fn main() -> Result<()> {
             speedtest_trigger.notify_one();
             tokio::time::sleep(Duration::from_secs(40)).await;
         } else {
-            // The macOS Wi-Fi probe (system_profiler) is slow; wait for it.
-            tokio::time::sleep(Duration::from_secs(17)).await;
+            // Give the Wi-Fi collector, which starts a second late, its
+            // first pass.
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
         if cli.demo || cli.demo_mac {
             let mut d = demo::Disguise::new();
@@ -738,6 +741,7 @@ async fn main() -> Result<()> {
         state,
         speedtest_trigger,
         netinfo_refresh,
+        wifi_refresh,
         ping_clients,
         cfg,
         demo: cli.demo,
@@ -2612,12 +2616,16 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
     match side {
         Side::None => {}
         Side::Speedtest => ctx.speedtest_trigger.notify_one(),
-        Side::Refresh => ctx.netinfo_refresh.notify_one(),
+        Side::Refresh => {
+            ctx.netinfo_refresh.notify_one();
+            ctx.wifi_refresh.notify_one();
+        }
         Side::Rediscover => {
             // Re-probe the interface too: a rescan is what someone presses
             // when the picture is stale, and the gateway the walk falls back
             // on comes from netinfo.
             ctx.netinfo_refresh.notify_one();
+            ctx.wifi_refresh.notify_one();
             if ctx.ping_clients.available() {
                 tokio::spawn(collectors::discovery::rescan(
                     ctx.state.clone(),

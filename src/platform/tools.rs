@@ -62,12 +62,6 @@ pub fn required() -> Vec<Tool> {
             package: "preinstalled on macOS",
             optional: true,
         });
-        v.push(Tool {
-            name: "system_profiler",
-            provides: "Wi-Fi details and airspace congestion",
-            package: "preinstalled on macOS",
-            optional: true,
-        });
     }
     v
 }

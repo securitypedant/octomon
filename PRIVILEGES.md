@@ -50,7 +50,7 @@ capability is a property of the account, not of the process you launch. See
 
 Nothing to do. Latency uses unprivileged datagram ICMP, path discovery uses
 UDP-probe `traceroute`, per-process bandwidth uses `nettop`, and Wi-Fi comes
-from CoreWLAN and `system_profiler`. Every panel populates without root.
+from CoreWLAN. Every panel populates without root.
 
 Two limits are worth knowing, and neither is fixed by `sudo`: `nettop` reports
 only your own processes, and it is TCP-only, so QUIC and HTTP/3 traffic is not
