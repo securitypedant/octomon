@@ -970,7 +970,10 @@ mod tests {
     fn up(name: &str, v4: &str) -> netdev::Interface {
         let mut i = netdev::Interface::dummy();
         i.name = name.to_string();
-        i.flags = netdev::interface::flags::IFF_UP as u32;
+        // IFF_UP is bit 0 on every platform; netdev types the constant
+        // differently per OS, so the bit is set directly and checked.
+        i.flags = 0x1;
+        assert!(i.is_up());
         i.ipv4 = vec![v4.parse().unwrap()];
         i
     }
