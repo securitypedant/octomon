@@ -542,110 +542,257 @@ mod macos {
             .unwrap_or_default()
     }
 
-    /// Parse the "Current Network Information" block from
-    /// `system_profiler SPAirPortDataType`. Unprivileged; a few hundred ms.
+    /// Wi-Fi details for the active connection, from CoreWLAN.
+    ///
+    /// Nothing here asks the radio to scan. The current network's channel,
+    /// width, PHY mode, signal and rate are read straight from the interface,
+    /// and the neighbouring networks come from the scan cache macOS keeps for
+    /// its own roaming and for the Wi-Fi menu. The previous source,
+    /// `system_profiler SPAirPortDataType`, ran a fresh scan every time: the
+    /// radio spent some 18 seconds a minute off-channel and the gateway's
+    /// round-trip went from 4ms to a median of 20ms with spikes past 200ms —
+    /// octomon measuring the jitter it was causing. Reading the cache costs
+    /// a quarter of a second and no air time; the airspace figures are as
+    /// old as the system's last scan, which is the same deal Windows gets.
+    ///
+    /// CoreWLAN withholds the SSID without Location permission (since macOS
+    /// 14); `ipconfig getsummary` still names it, from the configuration
+    /// side rather than the radio, so it fills that one gap.
     pub async fn wifi_details() -> Option<WifiInfo> {
-        let out = tokio::process::Command::new("system_profiler")
-            .arg("SPAirPortDataType")
+        // CoreWLAN calls are synchronous and the cache read takes a moment.
+        let (mut info, iface) = tokio::task::spawn_blocking(corewlan_details).await.ok()??;
+        if info.ssid.is_empty() {
+            info.ssid = ssid_from_ipconfig(&iface).await.unwrap_or_default();
+        }
+        Some(info)
+    }
+
+    /// Everything CoreWLAN gives: the details and the interface name.
+    fn corewlan_details() -> Option<(WifiInfo, String)> {
+        use objc2_core_wlan::CWWiFiClient;
+        // SAFETY: read-only accessors on the shared client's default
+        // interface; every return is owned or primitive.
+        unsafe {
+            let client = CWWiFiClient::sharedWiFiClient();
+            let iface = client.interface()?;
+            let rssi = iface.rssiValue() as i32;
+            let tx = iface.transmitRate();
+            if rssi == 0 && tx == 0.0 {
+                return None; // not associated
+            }
+            let ours = iface.wlanChannel().map(|ch| {
+                channel_spec(ch.channelNumber(), ch.channelBand().0, ch.channelWidth().0)
+            });
+            let scanned: Vec<(crate::app::Neighbour, i32)> = iface
+                .cachedScanResults()
+                .map(|set| {
+                    set.iter()
+                        .filter_map(|n| {
+                            let ch = n.wlanChannel()?;
+                            let spec = channel_spec(
+                                ch.channelNumber(),
+                                ch.channelBand().0,
+                                ch.channelWidth().0,
+                            );
+                            Some((spec, n.rssiValue() as i32))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let info = WifiInfo {
+                ssid: iface.ssid().map(|s| s.to_string()).unwrap_or_default(),
+                phy: phy_name(iface.activePHYMode().0).to_string(),
+                channel: ours.as_ref().map(channel_string).unwrap_or_default(),
+                rssi: format!("{rssi} dBm / {} dBm", iface.noiseMeasurement()),
+                tx_rate: format!("{tx:.0} Mbps"),
+                neighbours: match ours {
+                    Some(ours) => without_own(scanned, &ours, rssi),
+                    None => scanned.into_iter().map(|(n, _)| n).collect(),
+                },
+            };
+            let name = iface
+                .interfaceName()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "en0".to_string());
+            Some((info, name))
+        }
+    }
+
+    /// `kCWPHYMode*` raw values. 802.11be is not in the bindings yet but is
+    /// the next value Apple assigned.
+    fn phy_name(raw: isize) -> &'static str {
+        match raw {
+            1 => "802.11a",
+            2 => "802.11b",
+            3 => "802.11g",
+            4 => "802.11n",
+            5 => "802.11ac",
+            6 => "802.11ax",
+            7 => "802.11be",
+            _ => "",
+        }
+    }
+
+    /// A `CWChannel` as the rest of octomon describes one. Band and width
+    /// come as `kCWChannelBand*` / `kCWChannelWidth*` raw values; unknown
+    /// ones fall back the way `parse_channel` would — band from the channel
+    /// number, width 20MHz.
+    fn channel_spec(number: isize, band: isize, width: isize) -> crate::app::Neighbour {
+        let channel = u16::try_from(number).unwrap_or(0);
+        crate::app::Neighbour {
+            channel,
+            band_ghz: match band {
+                1 => 2,
+                2 => 5,
+                3 => 6,
+                _ if channel > 14 => 5,
+                _ => 2,
+            },
+            width_mhz: match width {
+                2 => 40,
+                3 => 80,
+                4 => 160,
+                5 => 320,
+                _ => 20,
+            },
+        }
+    }
+
+    /// "157 (5GHz, 80MHz)": the shape `parse_channel` reads back.
+    fn channel_string(n: &crate::app::Neighbour) -> String {
+        format!("{} ({}GHz, {}MHz)", n.channel, n.band_ghz, n.width_mhz)
+    }
+
+    /// The scan cache lists the network we are on as well. Without Location
+    /// permission its BSSID is withheld, so our own entry is picked out as
+    /// the one on our exact channel whose signal is nearest the live reading;
+    /// one entry at most, so a genuine co-channel neighbour survives.
+    fn without_own(
+        scanned: Vec<(crate::app::Neighbour, i32)>,
+        ours: &crate::app::Neighbour,
+        our_rssi: i32,
+    ) -> Vec<crate::app::Neighbour> {
+        let own = scanned
+            .iter()
+            .enumerate()
+            .filter(|(_, (n, _))| n == ours)
+            .min_by_key(|(_, (_, rssi))| (rssi - our_rssi).abs())
+            .map(|(i, _)| i);
+        scanned
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| Some(*i) != own)
+            .map(|(_, (n, _))| n)
+            .collect()
+    }
+
+    /// The SSID from `ipconfig getsummary <iface>`, which reads it from the
+    /// network configuration rather than the radio and so needs no Location
+    /// permission. Unprivileged, immediate.
+    async fn ssid_from_ipconfig(iface: &str) -> Option<String> {
+        let out = tokio::process::Command::new("ipconfig")
+            .args(["getsummary", iface])
             .output()
             .await
             .ok()?;
         if !out.status.success() {
             return None;
         }
-        // One invocation feeds both: this probe takes ~10-15s, so the neighbour
-        // scan rides along with the current-network details rather than paying
-        // that cost twice.
-        let text = String::from_utf8_lossy(&out.stdout);
-        let mut info = parse(&text)?;
-        info.neighbours = parse_neighbours(&text);
-        Some(info)
+        parse_ipconfig_ssid(&String::from_utf8_lossy(&out.stdout))
     }
 
-    /// Channels of every other network the radio can see, from the
-    /// "Other Local Wi-Fi Networks" block of the same report. SSIDs are ignored
-    /// — macOS redacts them without Location permission, and congestion only
-    /// depends on spectrum occupancy.
-    fn parse_neighbours(text: &str) -> Vec<crate::app::Neighbour> {
-        let mut lines = text.lines();
-        let Some(header) = lines
-            .by_ref()
-            .find(|l| l.trim() == "Other Local Wi-Fi Networks:")
-        else {
-            return Vec::new();
-        };
-        let header_indent = indent(header);
-
-        let mut out = Vec::new();
-        for line in lines {
-            if line.trim().is_empty() {
-                continue;
-            }
-            // A line no deeper than the header ends this block.
-            if indent(line) <= header_indent {
-                break;
-            }
-            if let Some((k, v)) = line.split_once(':')
-                && k.trim() == "Channel"
-                && let Some(n) = crate::app::parse_channel(v.trim())
-            {
-                out.push(n);
-            }
-        }
-        out
-    }
-
-    fn parse(text: &str) -> Option<WifiInfo> {
-        let mut lines = text.lines();
-        // Advance to the current-network marker.
-        lines
-            .by_ref()
-            .find(|l| l.trim() == "Current Network Information:")?;
-
-        // The next non-empty line is the SSID (a "<name>:" header).
-        let ssid_line = lines.by_ref().find(|l| !l.trim().is_empty())?;
-        let ssid = ssid_line.trim().trim_end_matches(':').to_string();
-        let ssid_indent = indent(ssid_line);
-
-        let mut info = WifiInfo {
-            ssid,
-            ..Default::default()
-        };
-        for line in lines {
-            if line.trim().is_empty() {
-                continue;
-            }
-            // A line indented no deeper than the SSID ends this network's block.
-            if indent(line) <= ssid_indent {
-                break;
-            }
-            if let Some((k, v)) = line.split_once(':') {
-                let v = v.trim().to_string();
-                match k.trim() {
-                    "PHY Mode" => info.phy = v,
-                    "Channel" => info.channel = v,
-                    "Signal / Noise" => info.rssi = v,
-                    "Transmit Rate" => {
-                        info.tx_rate = if v.chars().all(|c| c.is_ascii_digit()) {
-                            format!("{v} Mbps")
-                        } else {
-                            v
-                        };
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Some(info)
-    }
-
-    fn indent(line: &str) -> usize {
-        line.len() - line.trim_start().len()
+    /// One "  SSID : <name>" line in the summary; a name may itself contain
+    /// a colon, so only the first separator counts.
+    fn parse_ipconfig_ssid(text: &str) -> Option<String> {
+        text.lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            (k.trim() == "SSID" && !v.trim().is_empty()).then(|| v.trim().to_string())
+        })
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// CoreWLAN's channel description, in the string the rest of octomon
+        /// parses: the round trip through `parse_channel` must be lossless.
+        #[test]
+        fn corewlan_channel_round_trips_through_parse_channel() {
+            let ours = channel_spec(157, 2, 3);
+            assert_eq!(channel_string(&ours), "157 (5GHz, 80MHz)");
+            assert_eq!(
+                crate::app::parse_channel(&channel_string(&ours)),
+                Some(ours)
+            );
+            assert_eq!(channel_string(&channel_spec(6, 1, 1)), "6 (2GHz, 20MHz)");
+            assert_eq!(channel_string(&channel_spec(37, 3, 4)), "37 (6GHz, 160MHz)");
+        }
+
+        /// Unknown band or width falls back the way a bare channel would:
+        /// the band from the number, 20MHz.
+        #[test]
+        fn unknown_band_and_width_fall_back_like_a_bare_channel() {
+            assert_eq!(channel_string(&channel_spec(36, 0, 0)), "36 (5GHz, 20MHz)");
+            assert_eq!(channel_string(&channel_spec(11, 0, 0)), "11 (2GHz, 20MHz)");
+        }
+
+        #[test]
+        fn phy_modes_are_named_as_system_profiler_named_them() {
+            assert_eq!(phy_name(6), "802.11ax");
+            assert_eq!(phy_name(5), "802.11ac");
+            assert_eq!(phy_name(7), "802.11be");
+            assert_eq!(phy_name(0), "");
+        }
+
+        /// The scan cache includes the network we are on. It is dropped once,
+        /// by nearest signal, so a real co-channel neighbour still counts.
+        #[test]
+        fn own_network_is_dropped_from_the_cache_once() {
+            let ours = channel_spec(157, 2, 3);
+            let scanned = vec![
+                (channel_spec(149, 2, 3), -70),
+                (ours, -81), // a neighbour on our channel, weaker
+                (ours, -58), // us
+                (channel_spec(6, 1, 1), -40),
+            ];
+            let left = without_own(scanned, &ours, -58);
+            assert_eq!(left.len(), 3);
+            assert_eq!(left.iter().filter(|n| **n == ours).count(), 1);
+
+            // Not in the cache at all: nothing is dropped.
+            let scanned = vec![(channel_spec(149, 2, 3), -70)];
+            assert_eq!(without_own(scanned, &ours, -58).len(), 1);
+        }
+
+        #[test]
+        fn ipconfig_summary_names_the_ssid() {
+            let text = "<dictionary> {\n  BSSID : 0:11:22:33:44:55\n  IPv4 : <array> {\n  SSID : Caf\u{e9}: upstairs\n  Security : WPA2_PSK\n}\n";
+            assert_eq!(
+                parse_ipconfig_ssid(text).as_deref(),
+                Some("Caf\u{e9}: upstairs")
+            );
+            assert_eq!(parse_ipconfig_ssid("  SSID : \n"), None);
+            assert_eq!(parse_ipconfig_ssid("no wifi here"), None);
+        }
+
+        /// Against the live radio. `cargo test -- --ignored --nocapture live_wifi`
+        #[tokio::test]
+        #[ignore = "requires an associated Wi-Fi interface"]
+        async fn live_wifi_details() {
+            let t = std::time::Instant::now();
+            let w = wifi_details().await.expect("associated");
+            println!(
+                "{:?}: ssid={:?} phy={} ch={} rssi={} tx={} neighbours={}",
+                t.elapsed(),
+                w.ssid,
+                w.phy,
+                w.channel,
+                w.rssi,
+                w.tx_rate,
+                w.neighbours.len()
+            );
+            assert!(w.channel_spec().is_some());
+        }
 
         /// Verbatim shape of `nettop -n -L 1 -x -J bytes_in,bytes_out,re-tx`:
         /// a process row, then its sockets. Every socket becomes a sample; the

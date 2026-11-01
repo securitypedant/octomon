@@ -85,7 +85,7 @@ are written to a temporary file and renamed into place.
 each executed directly with a fixed argument array — never through a shell,
 so nothing is subject to word-splitting or `sh -c` interpolation: `traceroute` (`tracert` on
 Windows), `whois`, `ps`, `iperf3`, and per platform `nettop`, `pmset`,
-`system_profiler`, `scutil --proxy`, `ipconfig getoption`, `netstat` (macOS),
+`scutil --proxy`, `ipconfig getoption`/`getsummary`, `netstat` (macOS),
 `iw`, `nmcli`, `ss`, `ip route`, `gsettings` (Linux) or `reg query` (Windows).
 Dynamic arguments are IP-address literals and interface names from the OS,
 with two exceptions from your own `config.toml`: `discovery_probe`, the host

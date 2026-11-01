@@ -5696,8 +5696,8 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
     }
 
     if let Some(w) = &n.wifi {
-        // Live signal/tx come from the CoreWLAN graph below; keep the slower
-        // system_profiler details (SSID / PHY / channel) here.
+        // Live signal/tx come from the signal graph below; the once-a-minute
+        // details (SSID / PHY / channel) sit here.
         // macOS returns the literal string "<redacted>" for the network name
         // unless the caller holds Location Services authorisation — Apple treats
         // an SSID as location-revealing. Say why, rather than showing a bare

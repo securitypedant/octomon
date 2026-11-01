@@ -1,7 +1,8 @@
-//! Wi-Fi radio details collector. Kept separate from `netinfo` because the only
-//! unprivileged source of RSSI / PHY / tx-rate on modern macOS
-//! (`system_profiler SPAirPortDataType`) is slow (~10-15s, it scans), so it runs
-//! on a long cadence and must not gate the fast base-info refresh.
+//! Wi-Fi radio details collector. Kept separate from `netinfo` so the radio
+//! probe, which shells out on Linux and reads scan caches everywhere, never
+//! gates the fast base-info refresh. No platform's probe asks the radio to
+//! scan: that would take it off-channel and show up in octomon's own latency
+//! figures, as the macOS probe did while it ran `system_profiler`.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

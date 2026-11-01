@@ -1,7 +1,7 @@
 //! Windows probes: Wi-Fi via the Native Wifi API, power via kernel32.
 //!
-//! Every other platform shells out for Wi-Fi (`nmcli`, `iw`, `system_profiler`)
-//! and this one deliberately does not, for two reasons. `netsh wlan show
+//! Linux shells out for Wi-Fi (`nmcli`, `iw`), macOS reads CoreWLAN in-process,
+//! and this one deliberately does not shell out, for two reasons. `netsh wlan show
 //! interfaces` prints its *field names* in the display language, so a parser
 //! keyed on "SSID" or "Signal" works on an English install and silently returns
 //! nothing on a German one. And subprocess output arrives in the console's OEM
