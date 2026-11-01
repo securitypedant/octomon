@@ -3206,6 +3206,12 @@ fn snapshot_text(s: &AppState) -> String {
             }
         );
     }
+    for t in &n.bypassed_tunnels {
+        println!(
+            "  split tunnel={} — only its own routes go through it; internet traffic bypasses it",
+            t.label()
+        );
+    }
     if let Some((kind, via)) = s.nat_kind() {
         println!("  nat={} (hop 2 is {via})", kind.label());
     }
@@ -3579,6 +3585,10 @@ fn doctor_json(s: &AppState, full: bool) -> (String, i32) {
             "medium": s.netinfo.medium.label(),
             "gateway": s.netinfo.gateway_ip,
             "tunnel": s.netinfo.tunnel_label(),
+            "bypassed_tunnels": s.netinfo.bypassed_tunnels.iter().map(|t| json!({
+                "iface": t.iface,
+                "vendor": t.vendor,
+            })).collect::<Vec<_>>(),
             "nat": s.nat_kind().map(|(k, via)| json!({"kind": k.label(), "hop2": via.to_string()})),
             "proxy": s.proxy.as_ref().map(|p| json!({
                 "config": p.describe(),

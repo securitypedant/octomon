@@ -5550,6 +5550,20 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         }
         lines.extend(pack_groups(label("gateway"), groups, text_w));
     }
+    // A tunnel that is up but carries none of the internet traffic (a
+    // corporate split tunnel, a mesh VPN): named so nobody wonders why ppp0
+    // exists, and marked so nobody reads it as the path. Plain text, not the
+    // warning colour the carrying tunnel gets — it hides nothing.
+    for t in &n.bypassed_tunnels {
+        lines.push(Line::from(vec![
+            label("tunnel"),
+            Span::styled(t.label(), Style::new().fg(theme::text())),
+            Span::styled(
+                "  split — internet traffic bypasses it",
+                Style::new().fg(theme::dim()),
+            ),
+        ]));
+    }
 
     // How the internet sees this machine — the address beyond the NAT. It is
     // discovered, not configured, so it appears once known.
@@ -10027,6 +10041,27 @@ mod tests {
         assert!(!out.contains("tunnel endpoint"));
         // The physical medium is still Wi-Fi, so the signal graph stays useful.
         assert!(out.contains("Wi-Fi (wireless)"));
+    }
+
+    /// openfortivpn's shape (issue #27): ppp0 is up with only corporate
+    /// prefixes routed into it, and every packet to the internet leaves via
+    /// Wi-Fi. The link is Wi-Fi, the gateway is the LAN's, and the tunnel is
+    /// named as a bypassed one — never as the path.
+    #[test]
+    fn a_bypassed_split_tunnel_is_named_but_not_the_path() {
+        let mut s = state_with_medium(LinkMedium::WiFi);
+        s.netinfo.gateway_ip = "192.168.1.1".to_string();
+        s.netinfo.bypassed_tunnels = vec![crate::app::BypassedTunnel {
+            iface: "ppp0".into(),
+            vendor: "openfortivpn".into(),
+        }];
+        let out = draw(&s, 200, 60);
+        assert!(out.contains("openfortivpn (ppp0)"));
+        assert!(out.contains("bypasses it"));
+        assert!(out.contains("Wi-Fi (wireless)"));
+        assert!(!out.contains("Tunnel (VPN)"));
+        assert!(!out.contains("tunnel endpoint"));
+        assert!(!out.contains("default route is a tunnel"));
     }
 
     #[test]

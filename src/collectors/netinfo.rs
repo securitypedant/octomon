@@ -1,21 +1,22 @@
 //! Network identity from `netdev`: addresses, MAC, gateway, link type & speed,
 //! DHCP and DNS. Re-probed periodically to pick up network changes.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use netdev::interface::types::InterfaceType;
 use tokio::sync::Notify;
 
-use crate::app::{AppState, LinkMedium, NetInfo};
+use crate::app::{AppState, BypassedTunnel, LinkMedium, NetInfo};
 
 pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc<Notify>) {
     let mut ticker = tokio::time::interval(Duration::from_secs(5));
     // Identifying the VPN behind a tunnel can fall back to scanning the process
     // table, so the answer is cached per tunnel device rather than redone every
-    // tick.
-    let mut vendor_cache: Option<(String, String)> = None;
+    // tick — for the tunnel carrying the traffic and for any sitting beside it.
+    let mut vendor_cache: HashMap<String, String> = HashMap::new();
     // The DHCP server behind the current lease barely ever changes, so it is
     // asked for once per attachment (a lease-file read or one-line shell-out)
     // and cached — keyed on interface + gateway, which is what a new
@@ -73,7 +74,24 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
         }
         known_ifaces = Some(current);
 
-        if netdev::get_default_interface().is_err() {
+        // The link is the interface internet traffic leaves from, found by
+        // asking the kernel to route to a public address — not `netdev`'s own
+        // default pick. Its probe goes to 10.254.254.254, an address a
+        // corporate split tunnel pushing 10.0.0.0/8 claims, which made such a
+        // tunnel (openfortivpn's ppp0) the "default interface": a Tunnel
+        // medium, no gateway to discover, VPN events on every reconnect,
+        // while every packet to the internet still left via Wi-Fi (issue
+        // #27). `netdev`'s answer remains the fallback when nothing routes to
+        // the internet at all, so "no default route" still means link lost.
+        let (ifaces, egress_addr) =
+            tokio::task::spawn_blocking(|| (netdev::get_interfaces(), egress_local_addr()))
+                .await
+                .unwrap_or_default();
+        let chosen = egress_addr
+            .and_then(|addr| iface_with_addr(&ifaces, addr))
+            .cloned()
+            .or_else(|| netdev::get_default_interface().ok());
+        let Some(iface) = chosen else {
             let mut s = state.lock().unwrap();
             s.link_lost = true;
             if !link_lost && !s.netinfo.iface.is_empty() {
@@ -101,21 +119,38 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
                 s.push_net_change(crate::app::NetChangeKind::LinkLost, iface, message, detail);
             }
             continue;
-        }
-        if let Ok(iface) = netdev::get_default_interface() {
+        };
+        {
             let mut info = build(&iface);
-            // The kernel's default route can point at the physical NIC while a
-            // split-tunnel VPN quietly carries every packet bound for the
-            // internet, so `build` alone misses it. Probe the real egress.
-            if info.tunnel.is_none()
-                && let Ok(Some(name)) = tokio::task::spawn_blocking(egress_iface_name).await
-                && name != info.iface
-                && is_tunnel_name(&name)
+            // On Linux `netdev` attaches the system resolvers only to the
+            // interface it picked itself; when that was not this one, borrow
+            // them — resolv.conf is system-wide anyway.
+            if info.dns.is_empty()
+                && let Some(picked) = ifaces.iter().find(|i| i.default)
             {
+                info.dns = picked.dns_servers.iter().map(|d| d.to_string()).collect();
+            }
+            // Internet traffic leaves through a tunnel. When the kernel's
+            // default route still points at a physical interface (WARP's
+            // 0.0.0.0/1 + 128.0.0.0/1 shape), that interface is the link — its
+            // gateway is the real, reachable LAN gateway — and the tunnel is a
+            // split route laid over it. Otherwise the tunnel holds the default
+            // route itself: a full tunnel, keyed on its underlay below.
+            if info.tunnel.is_some()
+                && let Ok(default) = netdev::get_default_interface()
+                && classify(&default) != LinkMedium::Tunnel
+                && counter_name(&default) != info.iface
+            {
+                let tunnel_iface = std::mem::take(&mut info.iface);
+                info = build(&default);
                 info.tunnel = Some(String::new()); // vendor resolved below
-                info.tunnel_iface = name;
+                info.tunnel_iface = tunnel_iface;
                 info.tunnel_is_split = true;
             }
+            // Tunnels that are up beside the link without carrying any of the
+            // internet traffic — the split tunnel of issue #27, a mesh VPN.
+            // Named below, shown, never part of the identity.
+            let bypassed = bypassed_tunnels(&ifaces, &[&info.iface, &info.tunnel_iface]);
             // The tunnel holds the default route: find the physical network
             // underneath, so "Home via WARP" and "Hotel via WARP" stay
             // separate places instead of one mixed per-vendor bucket.
@@ -131,22 +166,31 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
                 info.underlay_medium = medium;
                 info.underlay_iface = iface;
             }
+            // Name every tunnel in play, once each.
+            let mut devices: Vec<String> = bypassed.clone();
             if info.tunnel.is_some() {
-                let vendor = match &vendor_cache {
-                    Some((name, v)) if *name == info.tunnel_iface => v.clone(),
-                    _ => {
-                        let dev = info.tunnel_iface.clone();
-                        let v = tokio::task::spawn_blocking(move || tunnel_vendor(dev))
-                            .await
-                            .unwrap_or_default();
-                        vendor_cache = Some((info.tunnel_iface.clone(), v.clone()));
-                        v
-                    }
-                };
-                info.tunnel = Some(vendor);
-            } else {
-                vendor_cache = None;
+                devices.push(info.tunnel_iface.clone());
             }
+            for dev in &devices {
+                if !vendor_cache.contains_key(dev) {
+                    let name = dev.clone();
+                    let v = tokio::task::spawn_blocking(move || tunnel_vendor(name))
+                        .await
+                        .unwrap_or_default();
+                    vendor_cache.insert(dev.clone(), v);
+                }
+            }
+            vendor_cache.retain(|dev, _| devices.contains(dev));
+            if info.tunnel.is_some() {
+                info.tunnel = vendor_cache.get(&info.tunnel_iface).cloned();
+            }
+            info.bypassed_tunnels = bypassed
+                .into_iter()
+                .map(|iface| BypassedTunnel {
+                    vendor: vendor_cache.get(&iface).cloned().unwrap_or_default(),
+                    iface,
+                })
+                .collect();
             // `Some(false)` is an explicit static config; `None` (the OS
             // didn't say) still gets asked — a lease found is proof of DHCP.
             if iface.dhcp_v4_enabled != Some(false) {
@@ -172,6 +216,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
             let prev_dns = s.netinfo.dns.clone();
             let had_tunnel = s.netinfo.tunnel.is_some();
             let had_info = !s.netinfo.iface.is_empty();
+            let prev_bypassed = s.netinfo.bypassed_tunnels.clone();
             let moved = had_info && was != now;
             s.netinfo = info;
             s.netinfo.wifi = if moved { None } else { prev_wifi };
@@ -292,6 +337,32 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
                     detail,
                 );
             }
+            // A bypassed tunnel coming or going is worth a line on the
+            // timeline — "the VPN reconnected at 3pm" — but it is an
+            // interface event, not a VPN one: the path to the internet, the
+            // location and the running statistics are all untouched.
+            if had_info {
+                let link = s.netinfo.iface.clone();
+                let changes = bypassed_changes(&prev_bypassed, &s.netinfo.bypassed_tunnels, &link);
+                for (name, up, message) in changes {
+                    s.push_event(
+                        crate::verdict::Severity::Info,
+                        crate::app::EventCategory::Network,
+                        message.clone(),
+                    );
+                    let detail = describe_attachment(&s.netinfo);
+                    s.push_net_change(
+                        if up {
+                            crate::app::NetChangeKind::IfaceUp
+                        } else {
+                            crate::app::NetChangeKind::IfaceDown
+                        },
+                        name,
+                        message,
+                        detail,
+                    );
+                }
+            }
         }
     }
 }
@@ -375,7 +446,8 @@ fn build(iface: &netdev::Interface) -> NetInfo {
         underlay_gateway_mac: String::new(),
         underlay_medium: LinkMedium::Unknown,
         underlay_iface: String::new(),
-        wifi: None, // filled in by the caller for Wi-Fi links
+        bypassed_tunnels: Vec::new(), // filled by the caller
+        wifi: None,                   // filled in by the caller for Wi-Fi links
     }
 }
 
@@ -456,6 +528,12 @@ fn describe_attachment(n: &NetInfo) -> Vec<String> {
     if let Some(v) = n.tunnel_label() {
         out.push(format!("tunnel {v} ({})", n.tunnel_iface));
     }
+    for t in &n.bypassed_tunnels {
+        out.push(format!(
+            "split tunnel {} — internet traffic bypasses it",
+            t.label()
+        ));
+    }
     if let Some(w) = &n.wifi {
         out.push(format!(
             "wifi {} · {} · ch {} · {}",
@@ -521,32 +599,96 @@ fn counter_name(iface: &netdev::Interface) -> String {
     }
 }
 
-/// Name of the interface that traffic to the public internet actually leaves
-/// from, which is not always the kernel's default route.
+/// The local address the kernel would send a packet to the public internet
+/// from — which is not always the address on its `default` route.
 ///
-/// `netdev` picks the default interface by asking the kernel to route to
-/// 10.254.254.254 — an RFC1918 address that split-tunnel VPNs deliberately keep
-/// *off* the tunnel. Cloudflare WARP compounds this by leaving `default` alone
-/// and installing 0.0.0.0/1 + 128.0.0.0/1, which win on specificity. Both make
-/// the tunnel invisible unless a public destination is used for the probe.
+/// `netdev` picks its default interface by routing to 10.254.254.254, an
+/// RFC1918 address that split-tunnel VPNs deliberately keep *off* the tunnel —
+/// or, worse, inside a 10.0.0.0/8 a corporate tunnel pulls *onto* itself.
+/// Cloudflare WARP compounds this by leaving `default` alone and installing
+/// 0.0.0.0/1 + 128.0.0.0/1, which win on specificity. Only a public
+/// destination tells the truth about where internet traffic goes.
 ///
-/// Uses TEST-NET-1 (RFC 5737): globally routable as far as route selection is
-/// concerned, so any tunnel claims it, but never a real host. Connecting a UDP
-/// socket only selects a route — no packets are sent.
-fn egress_iface_name() -> Option<String> {
-    use std::net::{IpAddr, Ipv4Addr, UdpSocket};
-
-    let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-    sock.connect((Ipv4Addr::new(192, 0, 2, 1), 1)).ok()?;
-    let IpAddr::V4(local) = sock.local_addr().ok()?.ip() else {
-        return None;
+/// Uses TEST-NET-1 (RFC 5737) and its v6 counterpart 2001:db8::/32 (RFC 3849):
+/// globally routable as far as route selection is concerned, so any tunnel
+/// claims them, but never a real host. Connecting a UDP socket only selects a
+/// route — no packets are sent. v4 first; a v6-only host answers on the second.
+fn egress_local_addr() -> Option<IpAddr> {
+    use std::net::UdpSocket;
+    let v4 = || {
+        let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+        sock.connect((Ipv4Addr::new(192, 0, 2, 1), 1)).ok()?;
+        sock.local_addr().ok().map(|a| a.ip())
     };
-    netdev::get_interfaces()
+    let v6 = || {
+        let sock = UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).ok()?;
+        sock.connect((Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 1))
+            .ok()?;
+        sock.local_addr().ok().map(|a| a.ip())
+    };
+    v4().or_else(v6).filter(|a| !a.is_unspecified())
+}
+
+/// The interface holding `addr`.
+fn iface_with_addr(ifaces: &[netdev::Interface], addr: IpAddr) -> Option<&netdev::Interface> {
+    ifaces.iter().find(|i| match addr {
+        IpAddr::V4(a) => i.ipv4.iter().any(|n| n.addr() == a),
+        IpAddr::V6(a) => i.ipv6.iter().any(|n| n.addr() == a),
+    })
+}
+
+/// Counter names of the tunnel devices that are up and addressed but are not
+/// among `carrying` — the link itself and the tunnel the traffic leaves
+/// through. Whatever these carry, it is not the internet: the kernel just
+/// said so by routing a public address elsewhere.
+fn bypassed_tunnels(ifaces: &[netdev::Interface], carrying: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = ifaces
         .iter()
-        // Must match how `build` names interfaces, or the split-tunnel
-        // comparison against `info.iface` can never be equal on Windows.
-        .find(|i| i.ipv4.iter().any(|n| n.addr() == local))
+        .filter(|i| classify(i) == LinkMedium::Tunnel)
+        .filter(|i| i.is_up() && (!i.ipv4.is_empty() || !i.ipv6.is_empty()))
         .map(counter_name)
+        .filter(|name| !carrying.contains(&name.as_str()))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// (device, came up?, message) for every bypassed tunnel that appeared or
+/// vanished. Pure, so the wording is testable: the message has to say in the
+/// same breath that the internet path did not move, or a reader scanning the
+/// timeline will take "ppp0 up" for a VPN taking over.
+fn bypassed_changes(
+    prev: &[BypassedTunnel],
+    now: &[BypassedTunnel],
+    link: &str,
+) -> Vec<(String, bool, String)> {
+    let mut out = Vec::new();
+    for t in now
+        .iter()
+        .filter(|t| !prev.iter().any(|p| p.iface == t.iface))
+    {
+        out.push((
+            t.iface.clone(),
+            true,
+            format!(
+                "split tunnel up: {} — only its own routes go through it; internet traffic still leaves via {link}",
+                t.label()
+            ),
+        ));
+    }
+    for t in prev
+        .iter()
+        .filter(|t| !now.iter().any(|n| n.iface == t.iface))
+    {
+        out.push((
+            t.iface.clone(),
+            false,
+            format!("split tunnel down: {} — internet path unchanged", t.label()),
+        ));
+    }
+    out.sort();
+    out
 }
 
 /// Classify the medium carrying the default route.
@@ -696,6 +838,14 @@ const KNOWN_VPNS: &[Vpn] = &[
         v6: &[],
         procs: &["forticlient", "fortitray"],
     },
+    // The open-source client for the same FortiGate SSL VPNs, usually as a
+    // split tunnel (issue #27).
+    Vpn {
+        display: "openfortivpn",
+        v4: &[],
+        v6: &[],
+        procs: &["openfortivpn"],
+    },
     Vpn {
         display: "OpenVPN",
         v4: &[],
@@ -759,7 +909,7 @@ fn tunnel_vendor(iface_name: String) -> String {
     // The live tunnel's own addresses settle it.
     if let Some(iface) = netdev::get_interfaces()
         .into_iter()
-        .find(|i| i.name == iface_name)
+        .find(|i| counter_name(i) == iface_name)
     {
         let v4: Vec<Ipv4Addr> = iface.ipv4.iter().map(|n| n.addr()).collect();
         let v6: Vec<Ipv6Addr> = iface.ipv6.iter().map(|n| n.addr()).collect();
@@ -793,7 +943,88 @@ fn tunnel_vendor(iface_name: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Ipv4Addr, Ipv6Addr, iface_changes, is_tunnel_name, vendor_from_addrs};
+    use super::{
+        BypassedTunnel, IpAddr, Ipv4Addr, Ipv6Addr, bypassed_changes, bypassed_tunnels,
+        iface_changes, iface_with_addr, is_tunnel_name, vendor_from_addrs,
+    };
+
+    /// An up interface named `name` carrying `v4`, typed by its name alone.
+    fn up(name: &str, v4: &str) -> netdev::Interface {
+        let mut i = netdev::Interface::dummy();
+        i.name = name.to_string();
+        i.flags = netdev::interface::flags::IFF_UP as u32;
+        i.ipv4 = vec![v4.parse().unwrap()];
+        i
+    }
+
+    /// Issue #27, as the reporter's routing table had it: `default` on Wi-Fi,
+    /// ppp0 holding 10.0.0.0/8 and some seventy more corporate prefixes. The
+    /// kernel routes a public address via Wi-Fi, and the tunnel is a
+    /// bystander — up, addressed, carrying none of the internet traffic.
+    #[test]
+    fn a_split_tunnel_beside_the_link_is_bypassed_not_default() {
+        let ifaces = vec![
+            up("lo", "127.0.0.1/8"),
+            up("wlp3s0", "192.168.1.23/24"),
+            up("ppp0", "10.212.134.200/32"),
+        ];
+        // What the egress probe yields on that machine: the Wi-Fi address.
+        let link = iface_with_addr(&ifaces, "192.168.1.23".parse().unwrap()).unwrap();
+        assert_eq!(link.name, "wlp3s0");
+        assert_eq!(bypassed_tunnels(&ifaces, &[&link.name, ""]), vec!["ppp0"]);
+        // The tunnel that carries the traffic is never listed as bypassed.
+        assert!(bypassed_tunnels(&ifaces, &["wlp3s0", "ppp0"]).is_empty());
+        // An address nobody holds names no interface.
+        assert!(iface_with_addr(&ifaces, IpAddr::V4(Ipv4Addr::new(10, 254, 254, 254))).is_none());
+    }
+
+    #[test]
+    fn a_tunnel_without_addresses_or_down_is_not_a_bypassed_tunnel() {
+        let mut down = up("tun0", "10.8.0.2/24");
+        down.flags = 0;
+        let mut bare = up("wg0", "10.9.0.2/24");
+        bare.ipv4.clear();
+        let ifaces = vec![up("eth0", "10.0.0.5/24"), down, bare];
+        assert!(bypassed_tunnels(&ifaces, &["eth0", ""]).is_empty());
+    }
+
+    /// The wording has to carry "internet path unchanged" itself: on the
+    /// timeline a bare "ppp0 up" reads as a VPN taking over.
+    #[test]
+    fn bypassed_tunnel_events_say_the_path_did_not_move() {
+        let ppp = BypassedTunnel {
+            iface: "ppp0".into(),
+            vendor: "openfortivpn".into(),
+        };
+        let changes = bypassed_changes(&[], std::slice::from_ref(&ppp), "wlp3s0");
+        assert_eq!(changes.len(), 1);
+        let (name, came_up, message) = &changes[0];
+        assert_eq!(name, "ppp0");
+        assert!(*came_up);
+        assert!(message.starts_with("split tunnel up: openfortivpn (ppp0)"));
+        assert!(message.contains("still leaves via wlp3s0"));
+
+        let changes = bypassed_changes(std::slice::from_ref(&ppp), &[], "wlp3s0");
+        assert_eq!(changes.len(), 1);
+        assert!(!changes[0].1);
+        assert!(changes[0].2.contains("internet path unchanged"));
+
+        // Same set, no chatter; an unnamed vendor shows the device alone.
+        assert!(
+            bypassed_changes(
+                std::slice::from_ref(&ppp),
+                std::slice::from_ref(&ppp),
+                "wlp3s0"
+            )
+            .is_empty()
+        );
+        let unnamed = BypassedTunnel {
+            iface: "tun0".into(),
+            vendor: String::new(),
+        };
+        let changes = bypassed_changes(&[], std::slice::from_ref(&unnamed), "eth0");
+        assert!(changes[0].2.starts_with("split tunnel up: tun0 —"));
+    }
 
     /// The Ubuntu USB-dongle lesson: a wired interface coming up while Wi-Fi
     /// keeps the default route must be announced — with the "default route
