@@ -906,38 +906,56 @@ fn vendor_from_addrs(v4: &[Ipv4Addr], v6: &[Ipv6Addr]) -> Option<&'static str> {
 /// can be pinned down — the tunnel is still reported, just unnamed, which beats
 /// naming the wrong one.
 fn tunnel_vendor(iface_name: String) -> String {
-    // The live tunnel's own addresses settle it.
-    if let Some(iface) = netdev::get_interfaces()
+    // The live tunnel's own addresses are the first signal.
+    let by_addr = netdev::get_interfaces()
         .into_iter()
         .find(|i| counter_name(i) == iface_name)
-    {
-        let v4: Vec<Ipv4Addr> = iface.ipv4.iter().map(|n| n.addr()).collect();
-        let v6: Vec<Ipv6Addr> = iface.ipv6.iter().map(|n| n.addr()).collect();
-        if let Some(display) = vendor_from_addrs(&v4, &v6) {
-            return display.to_string();
-        }
-    }
+        .and_then(|iface| {
+            let v4: Vec<Ipv4Addr> = iface.ipv4.iter().map(|n| n.addr()).collect();
+            let v6: Vec<Ipv6Addr> = iface.ipv6.iter().map(|n| n.addr()).collect();
+            let vendor = vendor_from_addrs(&v4, &v6)?;
+            // Only an RFC1918 address could belong to anyone's VPN.
+            Some((vendor, v4.iter().any(Ipv4Addr::is_private)))
+        });
 
-    // Fall back to the process table, but only when it is unambiguous: having
-    // two clients installed and running says nothing about which one is up.
+    // The process table is the other: every VPN client whose process is
+    // resident, which several can be at once.
     let mut sys = sysinfo::System::new();
     sys.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::All,
         true,
         sysinfo::ProcessRefreshKind::nothing(),
     );
-    let mut hits = std::collections::BTreeSet::new();
+    let mut running = std::collections::BTreeSet::new();
     for proc in sys.processes().values() {
         let name = proc.name().to_string_lossy().to_ascii_lowercase();
         for vpn in KNOWN_VPNS {
             if vpn.procs.iter().any(|frag| name.contains(frag)) {
-                hits.insert(vpn.display);
+                running.insert(vpn.display);
             }
         }
     }
-    match hits.len() {
-        1 => hits.iter().next().unwrap().to_string(),
-        _ => String::new(),
+    pick_vendor(by_addr, &running)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Weigh the two signals. A tunnel address in a vendor's own CGNAT or v6
+/// block (WARP's 100.96/12, Tailscale's fd7a:115c:a1e0::/48) names it
+/// outright. One in a private 10.x block the vendor happens to use (Mullvad's
+/// 10.64/10, NordVPN's 10.5/16) is the same address space every corporate
+/// VPN hands out, so it only counts with that vendor's client running: an
+/// openfortivpn tunnel on 10.99.0.2 is not Mullvad. With no address to go on,
+/// the process table decides only when it is unambiguous — two clients
+/// resident say nothing about which one is up.
+fn pick_vendor(
+    by_addr: Option<(&'static str, bool)>,
+    running: &std::collections::BTreeSet<&'static str>,
+) -> Option<&'static str> {
+    match by_addr {
+        Some((vendor, false)) => Some(vendor),
+        Some((vendor, true)) if running.contains(vendor) => Some(vendor),
+        _ => (running.len() == 1).then(|| *running.iter().next().unwrap()),
     }
 }
 
@@ -945,7 +963,7 @@ fn tunnel_vendor(iface_name: String) -> String {
 mod tests {
     use super::{
         BypassedTunnel, IpAddr, Ipv4Addr, Ipv6Addr, bypassed_changes, bypassed_tunnels,
-        iface_changes, iface_with_addr, is_tunnel_name, vendor_from_addrs,
+        iface_changes, iface_with_addr, is_tunnel_name, pick_vendor, vendor_from_addrs,
     };
 
     /// An up interface named `name` carrying `v4`, typed by its name alone.
@@ -1086,6 +1104,37 @@ mod tests {
             vendor_from_addrs(&[Ipv4Addr::new(100, 70, 1, 2)], &[]),
             Some("Tailscale")
         );
+    }
+
+    /// Found in the field: a tun device on 10.99.0.2 was labelled Mullvad,
+    /// whose 10.64/10 block it fell into — and any corporate VPN handing out
+    /// 10.x addresses can do the same. Private-range matches need the client.
+    #[test]
+    fn a_private_address_match_needs_the_vendors_client_running() {
+        use std::collections::BTreeSet;
+        let none = BTreeSet::new();
+        let mullvad: BTreeSet<&'static str> = ["Mullvad"].into();
+        let others: BTreeSet<&'static str> = ["Tailscale", "openfortivpn"].into();
+        // CGNAT / v6 blocks are the vendor's own: the address alone decides.
+        assert_eq!(
+            pick_vendor(Some(("Cloudflare WARP", false)), &none),
+            Some("Cloudflare WARP")
+        );
+        // A 10.x match stands only with the client resident...
+        assert_eq!(
+            pick_vendor(Some(("Mullvad", true)), &mullvad),
+            Some("Mullvad")
+        );
+        // ...otherwise the process table decides, unambiguous or not at all.
+        assert_eq!(pick_vendor(Some(("Mullvad", true)), &none), None);
+        assert_eq!(pick_vendor(Some(("Mullvad", true)), &others), None);
+        let forti: BTreeSet<&'static str> = ["openfortivpn"].into();
+        assert_eq!(
+            pick_vendor(Some(("Mullvad", true)), &forti),
+            Some("openfortivpn")
+        );
+        assert_eq!(pick_vendor(None, &forti), Some("openfortivpn"));
+        assert_eq!(pick_vendor(None, &others), None);
     }
 
     #[test]
