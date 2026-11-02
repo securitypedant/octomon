@@ -365,8 +365,18 @@
       "url": "https://octomon.dev/images/octomon-icon-tile.png"
     }
   },
-  "dateModified": "2026-10-30",
+  "dateModified": "2026-11-02",
   "hasPart": [
+    {
+      "@type": "SoftwareApplication",
+      "name": "octomon",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "macOS, Linux, Windows",
+      "softwareVersion": "0.11.9",
+      "datePublished": "2026-11-02",
+      "releaseNotes": "https://octomon.dev/changelog#v0.11.9",
+      "url": "https://github.com/securitypedant/octomon/releases/tag/v0.11.9"
+    },
     {
       "@type": "SoftwareApplication",
       "name": "octomon",
@@ -911,7 +921,7 @@
         binaries for macOS, Linux and Windows.</p>
       </div>
       <ul class="versions">
-        <li class="vgroup"><span class="vlabel">0.11</span><a href="#v0.11.8">0.11.8</a><a href="#v0.11.7">0.11.7</a><a href="#v0.11.6">0.11.6</a><a href="#v0.11.5">0.11.5</a><a href="#v0.11.4">0.11.4</a><a href="#v0.11.3">0.11.3</a><a href="#v0.11.2">0.11.2</a><a href="#v0.11.1">0.11.1</a><a href="#v0.11.0">0.11.0</a></li>
+        <li class="vgroup"><span class="vlabel">0.11</span><a href="#v0.11.9">0.11.9</a><a href="#v0.11.8">0.11.8</a><a href="#v0.11.7">0.11.7</a><a href="#v0.11.6">0.11.6</a><a href="#v0.11.5">0.11.5</a><a href="#v0.11.4">0.11.4</a><a href="#v0.11.3">0.11.3</a><a href="#v0.11.2">0.11.2</a><a href="#v0.11.1">0.11.1</a><a href="#v0.11.0">0.11.0</a></li>
         <li class="vgroup"><span class="vlabel">0.10</span><a href="#v0.10.1">0.10.1</a><a href="#v0.10.0">0.10.0</a></li>
         <li class="vgroup"><span class="vlabel">0.9</span><a href="#v0.9.8">0.9.8</a><a href="#v0.9.7">0.9.7</a><a href="#v0.9.6">0.9.6</a><a href="#v0.9.5">0.9.5</a><a href="#v0.9.4">0.9.4</a><a href="#v0.9.3">0.9.3</a><a href="#v0.9.2">0.9.2</a><a href="#v0.9.1">0.9.1</a><a href="#v0.9.0">0.9.0</a></li>
         <li class="vgroup"><span class="vlabel">0.8</span><a href="#v0.8.2">0.8.2</a><a href="#v0.8.1">0.8.1</a><a href="#v0.8.0">0.8.0</a></li>
@@ -929,6 +939,18 @@
   <section>
     <div class="wrap">
       <div class="post">
+
+        <article class="release" id="v0.11.9">
+          <h2><a href="#v0.11.9">0.11.9</a></h2>
+          <p class="relmeta"><time datetime="2026-11-02">2 November 2026</time> · <a href="https://github.com/securitypedant/octomon/releases/tag/v0.11.9">release on GitHub</a></p>
+          <p class="relsummary">Four fixes, three of them for VPNs and Wi-Fi reporting the wrong thing, and one for a probe that was impacting the measurements. Thanks to squidly and Wlodarski for the detailed reports and for testing the builds.</p>
+          <ul>
+          <li>A split tunnel beside the link is no longer taken for the link (issue #27). With a FortiGate or similar corporate VPN up, octomon reported the tunnel (<code>ppp0</code>) as the link, found no gateway, learned the location as &quot;via VPN&quot; and fired VPN up/down on every reconnect, while internet traffic never touched the tunnel. The cause was how the default interface was chosen: by routing to 10.254.254.254, an address a tunnel pushing 10.0.0.0/8 claims. octomon now picks the link by routing a public address in the same way <code>ip route get</code> works. A tunnel that carries only its own routes is a new kind of entry, &quot;split tunnel: openfortivpn (ppp0), only its own routes go through it&quot;, in the Network panel, <code>--doctor</code> and the JSON output. It comes and goes on the timeline as an interface event, and it is left out of the location identity, so a VPN reconnect doesn&#39;t reset the stats. Full tunnels and WARP-style split tunnels keep their existing behaviour. openfortivpn joins the vendor table.</li>
+          <li>On Windows the Wi-Fi line said every network was 20MHz wide, and the congestion count treated every neighbour as 20MHz too (issue #26). The Native Wifi API gives only the primary channel, so the bonded width is now read from the beacon information elements each network carries: 40MHz from HT, 80 and 160 from VHT, 6GHz widths from HE, 320 from EHT. The value refreshes within a minute of the access point changing it, as soon as Windows next hears the beacon. octomon never asks the radio to scan, on any platform, because a scan takes it off-channel and would show up in the latency figures.</li>
+          <li>On a Mac on Wi-Fi, octomon was inflating its own latency readings. The Wi-Fi details probe ran <code>system_profiler</code> every minute, and that command scans for about 18 seconds, so for a third of every minute the gateway median went from 4ms to 20ms with spikes past 200ms. The details now come from CoreWLAN, which the signal graph already used: channel, width, band, PHY mode, signal and rate from the interface, and the neighbour list from the scan cache macOS keeps for roaming and the Wi-Fi menu. No scan is requested and the probe takes no air time. The ping test with the new probe is back at the control level. <code>system_profiler</code> leaves the tools list, <code>ipconfig getsummary</code> joins it to name the SSID. Also: <code>r</code> now reliably wakes the Wi-Fi collector (it shared a notifier with the network collector and only one of them woke), and <code>--check</code> no longer waits 17 seconds for the probe.</li>
+          <li>The Bandwidth graph no longer shows about double the real rate with some VPNs (issue #19). When neither the link nor the adapter under it has counters, octomon sums every adapter, and with a VPN up that counted the same bytes twice: in the clear on the tunnel and encrypted on the adapter beneath. The sum now leaves out tunnel-named adapters, and the tunnel name list gains the Windows aliases it lacked: <code>WireGuard Tunnel</code>, <code>OpenVPN Wintun</code>, <code>Mullvad</code>, <code>ZeroTier One</code>. Loopback was also skipped by a test that never matched Windows&#39;s <code>Loopback Pseudo-Interface 1</code>; it does now.</li>
+          </ul>
+        </article>
 
         <article class="release" id="v0.11.8">
           <h2><a href="#v0.11.8">0.11.8</a></h2>
