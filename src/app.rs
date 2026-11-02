@@ -1071,8 +1071,34 @@ pub struct NetInfo {
     /// throughput collector reads this adapter when the tunnel's own has no
     /// counters under its name (NordLynx on Windows, found in the field).
     pub underlay_iface: String,
+    /// Tunnels that are up beside the link but carry none of the internet
+    /// traffic: a corporate split tunnel pushed only its own prefixes
+    /// (openfortivpn against a FortiGate, issue #27), a Tailscale mesh. Not
+    /// part of the identity, because such a tunnel reconnecting changes
+    /// nothing about the path to the internet.
+    pub bypassed_tunnels: Vec<BypassedTunnel>,
     /// Present when the default interface is Wi-Fi and details are available.
     pub wifi: Option<WifiInfo>,
+}
+
+/// A tunnel device that is up without carrying the internet traffic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BypassedTunnel {
+    /// The device's counter name ("ppp0").
+    pub iface: String,
+    /// The VPN behind it when identified ("FortiClient"), else empty.
+    pub vendor: String,
+}
+
+impl BypassedTunnel {
+    /// "FortiClient (ppp0)", or "ppp0" alone when the vendor is unknown.
+    pub fn label(&self) -> String {
+        if self.vendor.is_empty() {
+            self.iface.clone()
+        } else {
+            format!("{} ({})", self.vendor, self.iface)
+        }
+    }
 }
 
 impl NetInfo {
@@ -2262,6 +2288,16 @@ mod tests {
         assert!(moved(&|n| n.ipv4 = vec!["10.0.0.5/24".into()]), "subnet");
         assert!(moved(&|n| n.gateway_ip = "10.0.0.1".into()), "gateway");
         assert!(moved(&|n| n.tunnel_iface = "utun6".into()), "vpn came up");
+        // A tunnel that carries none of the internet traffic reconnecting
+        // (openfortivpn, issue #27) is not a move: nothing about the path
+        // changed, so no stats reset, no VPN event, no new location.
+        assert!(
+            !moved(&|n| n.bypassed_tunnels = vec![BypassedTunnel {
+                iface: "ppp0".into(),
+                vendor: "openfortivpn".into(),
+            }]),
+            "bypassed tunnel is not identity"
+        );
         assert!(moved(&|n| n.medium = LinkMedium::Ethernet), "medium");
 
         // Things that don't change which network we're on must not, or every
