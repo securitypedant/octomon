@@ -1079,7 +1079,7 @@ Code: [`verdict.rs`](https://github.com/securitypedant/octomon/blob/main/src/ver
 
 Every rule above is a stated, falsifiable condition on measured quantities,
 and every threshold is a constant with a comment explaining the choice.
-There are 352 automated tests, most of them scenarios: a lossy hop followed
+There are 358 automated tests, most of them scenarios: a lossy hop followed
 by clean ones must not blame the ISP; three silent game servers must not
 out-vote the built-in targets; a plane's 30% loss must read as weather once
 learned and as an incident on a connection that is normally clean. That is a specification, and it is
