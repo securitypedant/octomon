@@ -70,4 +70,62 @@ fn main() {
         println!("cargo:rustc-link-arg=/DELAYLOAD:wlanapi.dll");
         println!("cargo:rustc-link-arg=delayimp.lib");
     }
+
+    #[cfg(windows)]
+    windows_resources();
+}
+
+/// Embeds a VERSIONINFO block, an application manifest and the icon in the
+/// Windows exe.
+///
+/// Without them the binary has no resource section at all: no product name,
+/// no company, no version, no manifest. Real software almost always carries
+/// these and malware often does not, so their absence is one of the signals
+/// Defender's cloud classifier weighs when it decides an unsigned exe is
+/// `Trojan:Win32/Bearfoos.A!ml`, which it has done to two releases. This
+/// does not replace a signature; it removes a cheap reason to look like one
+/// of the bad ones, and gives Explorer, Task Manager and the firewall prompt
+/// a proper name to show.
+///
+/// Only compiled when the build runs on Windows: the resources go through
+/// the SDK's `rc.exe`, which winresource finds for the host architecture, so
+/// native x64 and ARM64 builds both work. A cross-compile from another OS
+/// has no rc.exe and ships without resources, as every release before this
+/// did.
+#[cfg(windows)]
+fn windows_resources() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let mut res = winresource::WindowsResource::new();
+    res.set_icon("resources/windows/octomon.ico")
+        .set_manifest_file("resources/windows/octomon.manifest")
+        .set_language(0x0409) // en-US
+        .set("ProductName", "octomon")
+        .set("FileDescription", "octomon network monitor")
+        .set("CompanyName", "Simon Thorpe")
+        .set(
+            "LegalCopyright",
+            "Copyright (c) Simon Thorpe. MIT or Apache-2.0 licence.",
+        )
+        .set("OriginalFilename", "octomon.exe")
+        .set("InternalName", "octomon")
+        .set("Comments", "https://octomon.dev")
+        .set("ProductVersion", &version)
+        .set("FileVersion", &version);
+    println!("cargo:rerun-if-changed=resources/windows/octomon.ico");
+    println!("cargo:rerun-if-changed=resources/windows/octomon.manifest");
+    if let Err(e) = res.compile() {
+        // A missing rc.exe must not stop someone's `cargo install`: the
+        // resources are reputation and polish, not function. CI and the
+        // release build, where every exe is expected to carry them, fail
+        // loudly instead of quietly shipping a bare binary.
+        if std::env::var_os("CI").is_some() {
+            panic!("embedding Windows resources failed: {e}");
+        }
+        println!(
+            "cargo:warning=Windows resources not embedded ({e}); the exe builds without version info or icon"
+        );
+    }
 }
