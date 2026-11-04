@@ -105,19 +105,26 @@ async function edgeAnswer(request, url, env, ctx) {
 // The query runs on AE_QUERY_TOKEN, and the endpoint is public, so the
 // answer is memoized in the isolate like latestVersion() (same reasoning
 // for not using the Cache API). The response's cache-control header does
-// NOT do this job: Cloudflare runs a Worker before its cache and only
-// caches the Worker's own responses with the opt-in "cache" setting, which
-// wrangler.jsonc doesn't enable — so without the memo every hit on
-// /edge/stats would spend the token's quota. A good answer is kept for an
-// hour; a failed query only for a minute, so a hiccup neither sticks for
-// the hour nor lets a burst of requests retry upstream each time, and the
-// last good series keeps being served meanwhile. Concurrent misses share one
-// in-flight query. The memo holds only the aggregate every caller gets
-// anyway — nothing about who asked.
+// NOT do this job: Cloudflare runs a Worker before its cache, and
+// wrangler.jsonc doesn't opt the Worker's own responses into caching — so
+// without the memo every hit on /edge/stats would spend the token's quota.
+// A good answer is kept for an hour; a failed query only for a minute, so a
+// hiccup neither sticks for the hour nor lets a burst of requests retry
+// upstream each time, and the last good series keeps being served
+// meanwhile. While one request's refresh is running, others serve the memo
+// as it stands rather than awaiting that request's promise: Workers ties
+// I/O to the request that started it, and a promise shared across requests
+// can be left unsettled for good if its owner is cancelled. The refresh is
+// bounded by a timeout and kept alive with waitUntil, so a client that
+// disconnects mid-query can't wedge the memo either. The memo holds only
+// the aggregate every caller gets anyway — nothing about who asked.
 const STATS_TTL_MS = 60 * 60 * 1000;
 const STATS_FAIL_TTL_MS = 60 * 1000;
+const STATS_QUERY_TIMEOUT_MS = 10 * 1000;
 let statsMemo = { series: [], ok: false, at: 0 };
-let statsInflight = null;
+// When the running refresh started, 0 when none is. Stale after the timeout,
+// so a refresh that never reports back only delays the next one.
+let statsRefreshing = 0;
 
 async function queryEdgeStats(env) {
   const sql = `
@@ -136,42 +143,58 @@ async function queryEdgeStats(env) {
         method: "POST",
         headers: { authorization: `Bearer ${env.AE_QUERY_TOKEN}` },
         body: sql,
+        signal: AbortSignal.timeout(STATS_QUERY_TIMEOUT_MS),
       },
     );
-    if (!resp.ok) return { series: [], ok: false, at: Date.now() };
+    // Only the upstream status or error goes to the log (visible in
+    // `wrangler tail`; Workers Logs stay off): nothing about the caller.
+    if (!resp.ok) {
+      console.error(`edge stats: Analytics Engine answered ${resp.status}`);
+      return { series: [], ok: false, at: Date.now() };
+    }
     const data = await resp.json();
-    const series = (data.data ?? []).map((r) => ({
+    // A 200 without rows is not an empty graph to keep for an hour.
+    if (!Array.isArray(data?.data)) {
+      console.error("edge stats: Analytics Engine answer has no data array");
+      return { series: [], ok: false, at: Date.now() };
+    }
+    const series = data.data.map((r) => ({
       day: r.day,
       version: r.version,
       why: r.why ?? "",
       calls: Math.round(Number(r.calls) || 0),
     }));
     return { series, ok: true, at: Date.now() };
-  } catch {
+  } catch (e) {
+    console.error(`edge stats: ${e}`);
     return { series: [], ok: false, at: Date.now() };
   }
 }
 
-async function edgeStats(env) {
+async function edgeStats(env, ctx) {
   if (!env.AE_QUERY_TOKEN || !env.CF_ACCOUNT_ID) {
     return new Response(JSON.stringify({ series: [] }) + "\n", {
       headers: { "content-type": "application/json; charset=utf-8" },
     });
   }
+  const now = Date.now();
   const ttl = statsMemo.ok ? STATS_TTL_MS : STATS_FAIL_TTL_MS;
-  if (Date.now() - statsMemo.at >= ttl) {
-    statsInflight ??= queryEdgeStats(env).then((m) => {
+  if (now - statsMemo.at >= ttl && now - statsRefreshing >= STATS_QUERY_TIMEOUT_MS) {
+    statsRefreshing = now;
+    const refresh = queryEdgeStats(env).then((m) => {
       statsMemo = m.ok ? m : { ...m, series: statsMemo.series };
-      statsInflight = null;
+      statsRefreshing = 0;
     });
-    await statsInflight;
+    ctx.waitUntil(refresh);
+    await refresh;
   }
+  const fresh = statsMemo.ok && Date.now() - statsMemo.at < STATS_TTL_MS;
   return new Response(JSON.stringify({ series: statsMemo.series }) + "\n", {
     headers: {
       "content-type": "application/json; charset=utf-8",
-      // For browsers only (see above). After a failed refresh the series
-      // may be stale, so don't let a browser hold on to it.
-      "cache-control": statsMemo.ok ? "public, max-age=3600" : "no-store",
+      // For browsers only (see above). A stale or failed series must not be
+      // held on to.
+      "cache-control": fresh ? "public, max-age=3600" : "no-store",
     },
   });
 }
@@ -198,7 +221,7 @@ export default {
       return await edgeAnswer(request, url, env, ctx);
     }
     if (url.pathname === "/edge/stats") {
-      return edgeStats(env);
+      return edgeStats(env, ctx);
     }
     if (!url.pathname.startsWith("/apt/")) {
       // Non-asset paths that reach the worker have no answer of their own, so
