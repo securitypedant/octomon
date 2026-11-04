@@ -724,6 +724,12 @@ fn classify(iface: &netdev::Interface) -> LinkMedium {
     if is_tunnel_name(&iface.name) || iface.friendly_name.as_deref().is_some_and(is_tunnel_name) {
         return LinkMedium::Tunnel;
     }
+    // NetworkManager names a WireGuard or OpenVPN device after its connection
+    // ("home", "Trevor"), so no name rule can catch it, and netdev types it
+    // Unknown. The kernel knows what the device is.
+    if kernel_tunnel(&iface.name).is_some() {
+        return LinkMedium::Tunnel;
+    }
     let base = match iface.if_type {
         InterfaceType::Wireless80211 | InterfaceType::PeerToPeerWireless => LinkMedium::WiFi,
         InterfaceType::Ethernet
@@ -752,6 +758,51 @@ fn classify(iface: &netdev::Interface) -> LinkMedium {
         }
     }
     base
+}
+
+/// A tunnel device as the Linux kernel reports it in sysfs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum KernelTunnel {
+    /// `DEVTYPE=wireguard`: the in-kernel WireGuard that NetworkManager and
+    /// wg-quick both create.
+    WireGuard,
+    /// A tun/tap device (OpenVPN, openconnect, Tailscale's userspace), or a
+    /// point-to-point or IP-in-IP link (PPP, GRE, SIT, IPIP).
+    Other,
+}
+
+/// What sysfs says about one device: `type` is its ARPHRD link type, `uevent`
+/// carries `DEVTYPE`, and only tun/tap devices have a `tun_flags` file. Raw-IP
+/// cellular modems share WireGuard's ARPHRD_NONE, so that type alone is not
+/// taken as a tunnel; `DEVTYPE` or `tun_flags` has to say so.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn kernel_tunnel_from(arphrd: Option<u32>, uevent: &str, tun_flags: bool) -> Option<KernelTunnel> {
+    if uevent.lines().any(|l| l.trim() == "DEVTYPE=wireguard") {
+        return Some(KernelTunnel::WireGuard);
+    }
+    if tun_flags {
+        return Some(KernelTunnel::Other);
+    }
+    // ARPHRD_PPP, _TUNNEL, _TUNNEL6, _SIT, _IPGRE, _IP6GRE.
+    matches!(arphrd, Some(512 | 768 | 769 | 776 | 778 | 823)).then_some(KernelTunnel::Other)
+}
+
+#[cfg(target_os = "linux")]
+fn kernel_tunnel(name: &str) -> Option<KernelTunnel> {
+    if name.is_empty() || name.contains('/') || name.starts_with('.') {
+        return None;
+    }
+    let dir = std::path::Path::new("/sys/class/net").join(name);
+    let arphrd = std::fs::read_to_string(dir.join("type"))
+        .ok()
+        .and_then(|t| t.trim().parse().ok());
+    let uevent = std::fs::read_to_string(dir.join("uevent")).unwrap_or_default();
+    kernel_tunnel_from(arphrd, &uevent, dir.join("tun_flags").exists())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kernel_tunnel(_name: &str) -> Option<KernelTunnel> {
+    None
 }
 
 /// Interface-name prefixes used by tunnel/VPN virtual devices across platforms.
@@ -937,6 +988,8 @@ fn vendor_from_addrs(v4: &[Ipv4Addr], v6: &[Ipv6Addr]) -> Option<&'static str> {
 struct TunnelAddrs {
     v4: Vec<Ipv4Addr>,
     v6: Vec<Ipv6Addr>,
+    /// The kernel says this is a WireGuard device (Linux only).
+    kernel_wireguard: bool,
 }
 
 fn tunnel_addrs(ifaces: &[netdev::Interface], iface_name: &str) -> TunnelAddrs {
@@ -946,6 +999,7 @@ fn tunnel_addrs(ifaces: &[netdev::Interface], iface_name: &str) -> TunnelAddrs {
         .map(|iface| TunnelAddrs {
             v4: iface.ipv4.iter().map(|n| n.addr()).collect(),
             v6: iface.ipv6.iter().map(|n| n.addr()).collect(),
+            kernel_wireguard: kernel_tunnel(&iface.name) == Some(KernelTunnel::WireGuard),
         })
         .unwrap_or_default()
 }
@@ -974,7 +1028,11 @@ fn tunnel_vendor(t: &TunnelAddrs) -> String {
             }
         }
     }
+    // A kernel WireGuard device no client claims is plain WireGuard — no
+    // process to find, since NetworkManager and wg-quick leave none behind.
+    // A client that does claim it (Mullvad's wg0-mullvad) keeps its name.
     pick_vendor(by_addr, &running)
+        .or_else(|| t.kernel_wireguard.then_some("WireGuard"))
         .unwrap_or_default()
         .to_string()
 }
@@ -1036,6 +1094,36 @@ mod tests {
         BypassedTunnel, IpAddr, Ipv4Addr, Ipv6Addr, bypassed_changes, bypassed_tunnels,
         iface_changes, iface_with_addr, is_tunnel_name, pick_vendor, vendor_from_addrs,
     };
+
+    /// Kubuntu 26.04: NetworkManager's WireGuard connections "home" and
+    /// "Trevor" are devices named after the connection, ARPHRD_NONE with
+    /// DEVTYPE=wireguard. They have to read as tunnels, or the full tunnel is
+    /// a link with "an address but no gateway".
+    #[test]
+    fn the_kernel_names_tunnels_that_their_names_do_not() {
+        use super::{KernelTunnel, kernel_tunnel_from};
+        let wg = "INTERFACE=Trevor\nIFINDEX=7\nDEVTYPE=wireguard\n";
+        assert_eq!(
+            kernel_tunnel_from(Some(65534), wg, false),
+            Some(KernelTunnel::WireGuard)
+        );
+        assert_eq!(
+            kernel_tunnel_from(Some(65534), "INTERFACE=tun0\n", true),
+            Some(KernelTunnel::Other)
+        );
+        assert_eq!(
+            kernel_tunnel_from(Some(512), "INTERFACE=ppp0\n", false),
+            Some(KernelTunnel::Other)
+        );
+        // Wi-Fi, Ethernet, and a raw-IP modem that shares ARPHRD_NONE.
+        assert_eq!(kernel_tunnel_from(Some(1), "DEVTYPE=wlan\n", false), None);
+        assert_eq!(kernel_tunnel_from(Some(1), "INTERFACE=eth0\n", false), None);
+        assert_eq!(
+            kernel_tunnel_from(Some(65534), "DEVTYPE=wwan\n", false),
+            None
+        );
+        assert_eq!(kernel_tunnel_from(None, "", false), None);
+    }
 
     /// Zscaler ZPA puts 100.64.0.1 on its utun, inside Tailscale's range.
     #[test]
