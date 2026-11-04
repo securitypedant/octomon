@@ -724,7 +724,7 @@ fn classify(iface: &netdev::Interface) -> LinkMedium {
     if is_tunnel_name(&iface.name) || iface.friendly_name.as_deref().is_some_and(is_tunnel_name) {
         return LinkMedium::Tunnel;
     }
-    // NetworkManager names a WireGuard or OpenVPN device after its connection
+    // NetworkManager names a WireGuard device after its connection
     // ("home", "Trevor"), so no name rule can catch it, and netdev types it
     // Unknown. The kernel knows what the device is.
     if kernel_tunnel(&iface.name).is_some() {
@@ -766,7 +766,7 @@ enum KernelTunnel {
     /// `DEVTYPE=wireguard`: the in-kernel WireGuard that NetworkManager and
     /// wg-quick both create.
     WireGuard,
-    /// A tun/tap device (OpenVPN, openconnect, Tailscale's userspace), or a
+    /// A tun/tap device (OpenVPN, openconnect, tailscaled), or a
     /// point-to-point or IP-in-IP link (PPP, GRE, SIT, IPIP).
     Other,
 }
@@ -1009,7 +1009,7 @@ fn tunnel_addrs(ifaces: &[netdev::Interface], iface_name: &str) -> TunnelAddrs {
 /// naming the wrong one.
 fn tunnel_vendor(t: &TunnelAddrs) -> String {
     // The live tunnel's own addresses are the first signal.
-    let by_addr = vendor_from_addrs(&t.v4, &t.v6).map(|v| (v, addr_match(&t.v4)));
+    let by_addr = vendor_match(&t.v4, &t.v6);
 
     // The process table is the other: every VPN client whose process is
     // resident, which several can be at once.
@@ -1028,20 +1028,54 @@ fn tunnel_vendor(t: &TunnelAddrs) -> String {
             }
         }
     }
-    // A kernel WireGuard device no client claims is plain WireGuard — no
-    // process to find, since NetworkManager and wg-quick leave none behind.
-    // A client that does claim it (Mullvad's wg0-mullvad) keeps its name.
-    pick_vendor(by_addr, &running)
-        .or_else(|| t.kernel_wireguard.then_some("WireGuard"))
+    name_tunnel(by_addr, &running, t.kernel_wireguard)
         .unwrap_or_default()
         .to_string()
+}
+
+/// The vendor whose address block a tunnel's address falls in, with how far
+/// that match can be trusted. Classified by the address that matched, not by
+/// the tunnel's addresses as a whole, and a v6 block (always a vendor's own)
+/// is looked for first: a Tailscale tunnel carrying fd7a:115c:a1e0:: and a
+/// 100.x address is named by the v6 outright, where its 100.x alone could
+/// fall in WARP's /12 or yield to a running Zscaler.
+fn vendor_match(v4: &[Ipv4Addr], v6: &[Ipv6Addr]) -> Option<(&'static str, AddrMatch)> {
+    let by_v6 = KNOWN_VPNS.iter().find(|vpn| {
+        v6.iter()
+            .any(|a| vpn.v6.iter().any(|(n, p)| in_v6(*a, *n, *p)))
+    });
+    if let Some(vpn) = by_v6 {
+        return Some((vpn.display, AddrMatch::Own));
+    }
+    KNOWN_VPNS.iter().find_map(|vpn| {
+        v4.iter()
+            .find(|a| vpn.v4.iter().any(|(n, p)| in_v4(**a, *n, *p)))
+            .map(|a| (vpn.display, addr_match(*a)))
+    })
+}
+
+/// Name a tunnel from its address match and the running clients. A kernel
+/// WireGuard device (NetworkManager's, wg-quick's) has no process of its
+/// own, so a client resident for some other reason must not lend it a name:
+/// it is named by a confirmed address match (Mullvad's wg0-mullvad, with
+/// Mullvad running), and is otherwise plain WireGuard.
+fn name_tunnel(
+    by_addr: Option<(&'static str, AddrMatch)>,
+    running: &std::collections::BTreeSet<&'static str>,
+    kernel_wireguard: bool,
+) -> Option<&'static str> {
+    let picked = pick_vendor(by_addr, running);
+    if kernel_wireguard && picked.is_none_or(|v| by_addr.is_none_or(|(a, _)| a != v)) {
+        return Some("WireGuard");
+    }
+    picked
 }
 
 /// How far an address match on a tunnel can be trusted on its own.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum AddrMatch {
-    /// A v6 block, or a v4 one outside the shared spaces below: the vendor's
-    /// own, so the address names it outright.
+    /// A v6 block, or a v4 address outside the shared spaces below: the
+    /// vendor's own, so the address names it outright.
     Own,
     /// 100.64.0.0/10, carrier-grade NAT space that several clients carve
     /// tunnel addresses from: Tailscale owns the whole /10 in [`KNOWN_VPNS`],
@@ -1054,13 +1088,10 @@ enum AddrMatch {
     Private,
 }
 
-fn addr_match(v4: &[Ipv4Addr]) -> AddrMatch {
-    if v4.iter().any(Ipv4Addr::is_private) {
+fn addr_match(a: Ipv4Addr) -> AddrMatch {
+    if a.is_private() {
         AddrMatch::Private
-    } else if v4
-        .iter()
-        .any(|a| in_v4(*a, Ipv4Addr::new(100, 64, 0, 0), 10))
-    {
+    } else if in_v4(a, Ipv4Addr::new(100, 64, 0, 0), 10) {
         AddrMatch::Shared
     } else {
         AddrMatch::Own
@@ -1070,8 +1101,8 @@ fn addr_match(v4: &[Ipv4Addr]) -> AddrMatch {
 /// Weigh the two signals: the tunnel's address, and the VPN clients whose
 /// processes are resident. A vendor's own block names it outright (see
 /// [`AddrMatch`]); a shared or private match stands when its client runs. A
-/// shared match otherwise yields to the one other client running, or stands
-/// alone when none is (an openfortivpn tunnel on 10.99.0.2 is not Mullvad;
+/// shared match otherwise stands unless exactly one other client is running,
+/// which then wins (an openfortivpn tunnel on 10.99.0.2 is not Mullvad;
 /// Zscaler's 100.64.0.1 is not Tailscale). With no address to go on, the
 /// process table decides only when it is unambiguous — two clients resident
 /// say nothing about which one is up.
@@ -1128,11 +1159,11 @@ mod tests {
     /// Zscaler ZPA puts 100.64.0.1 on its utun, inside Tailscale's range.
     #[test]
     fn a_shared_cgnat_address_defers_to_the_running_client() {
-        use super::{AddrMatch, addr_match};
+        use super::{AddrMatch, addr_match, vendor_match};
         use std::collections::BTreeSet;
         let v4 = [Ipv4Addr::new(100, 64, 0, 1)];
-        assert_eq!(addr_match(&v4), AddrMatch::Shared);
-        let addr = vendor_from_addrs(&v4, &[]).map(|v| (v, addr_match(&v4)));
+        assert_eq!(addr_match(v4[0]), AddrMatch::Shared);
+        let addr = vendor_match(&v4, &[]);
         assert_eq!(addr, Some(("Tailscale", AddrMatch::Shared)));
         let run = |names: &[&'static str]| names.iter().copied().collect::<BTreeSet<_>>();
         assert_eq!(pick_vendor(addr, &run(&["Zscaler"])), Some("Zscaler"));
@@ -1144,6 +1175,63 @@ mod tests {
         assert_eq!(pick_vendor(addr, &run(&[])), Some("Tailscale"));
         assert_eq!(pick_vendor(None, &run(&["Zscaler"])), Some("Zscaler"));
         assert_eq!(pick_vendor(None, &run(&["Mullvad", "Zscaler"])), None);
+    }
+
+    /// A Tailscale tunnel carries its fd7a:115c:a1e0:: address and a 100.x
+    /// one, which can fall in WARP's /12. The v6 names it outright, so a
+    /// sole running Zscaler doesn't take it over.
+    #[test]
+    fn a_vendors_own_v6_outweighs_its_shared_v4() {
+        use super::{AddrMatch, vendor_match};
+        use std::collections::BTreeSet;
+        let v4 = [Ipv4Addr::new(100, 101, 2, 3)];
+        let v6: [Ipv6Addr; 1] = ["fd7a:115c:a1e0::1".parse().unwrap()];
+        let addr = vendor_match(&v4, &v6);
+        assert_eq!(addr, Some(("Tailscale", AddrMatch::Own)));
+        assert_eq!(
+            pick_vendor(addr, &BTreeSet::from(["Zscaler"])),
+            Some("Tailscale")
+        );
+        // The same 100.x alone is WARP's, and shared.
+        assert_eq!(
+            vendor_match(&v4, &[]),
+            Some(("Cloudflare WARP", AddrMatch::Shared))
+        );
+        // Classified by the address that matched: Mullvad's 10.64.x stays
+        // Private even beside an unrelated public address.
+        assert_eq!(
+            vendor_match(
+                &[Ipv4Addr::new(203, 0, 113, 7), Ipv4Addr::new(10, 64, 0, 7)],
+                &[]
+            ),
+            Some(("Mullvad", AddrMatch::Private))
+        );
+    }
+
+    /// NetworkManager's "Trevor" with Tailscale running for something else:
+    /// the kernel WireGuard device is WireGuard, not Tailscale. A client
+    /// whose address the device carries, and which is running, still names
+    /// it (Mullvad's wg0-mullvad).
+    #[test]
+    fn a_bystander_client_does_not_name_a_kernel_wireguard_device() {
+        use super::{AddrMatch, name_tunnel};
+        use std::collections::BTreeSet;
+        let tailscale = BTreeSet::from(["Tailscale"]);
+        let mullvad = BTreeSet::from(["Mullvad"]);
+        let none = BTreeSet::new();
+        let mullvad_addr = Some(("Mullvad", AddrMatch::Private));
+
+        assert_eq!(name_tunnel(None, &tailscale, true), Some("WireGuard"));
+        assert_eq!(name_tunnel(None, &none, true), Some("WireGuard"));
+        assert_eq!(name_tunnel(mullvad_addr, &mullvad, true), Some("Mullvad"));
+        assert_eq!(name_tunnel(mullvad_addr, &none, true), Some("WireGuard"));
+        assert_eq!(
+            name_tunnel(mullvad_addr, &tailscale, true),
+            Some("WireGuard")
+        );
+        // Not a kernel WireGuard device: unchanged.
+        assert_eq!(name_tunnel(None, &tailscale, false), Some("Tailscale"));
+        assert_eq!(name_tunnel(None, &none, false), None);
     }
 
     /// An up interface named `name` carrying `v4`, typed by its name alone.
@@ -1324,7 +1412,8 @@ mod tests {
         let none = BTreeSet::new();
         let mullvad: BTreeSet<&'static str> = ["Mullvad"].into();
         let others: BTreeSet<&'static str> = ["Tailscale", "openfortivpn"].into();
-        // CGNAT / v6 blocks are the vendor's own: the address alone decides.
+        // WARP's CGNAT block is shared: the address stands while no single
+        // other client is running.
         assert_eq!(
             pick_vendor(Some(("Cloudflare WARP", AddrMatch::Shared)), &none),
             Some("Cloudflare WARP")
