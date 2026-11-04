@@ -400,12 +400,25 @@ pub fn load() -> Store {
     path().map(|p| load_from(&p)).unwrap_or_default()
 }
 
+/// [`read_store`] for readers: an unreadable file is logged and read as
+/// empty, which is all a display needs.
 fn load_from(p: &std::path::Path) -> Store {
+    read_store(p).unwrap_or_else(|e| {
+        crate::errlog::log("baseline", format!("could not read {}: {e}", p.display()));
+        Store::new()
+    })
+}
+
+/// The stored baselines. Only a missing file is an empty store: one that
+/// exists but can't be read (permissions, I/O) is an error, so a save never
+/// writes a one-network store over every network it couldn't see.
+fn read_store(p: &std::path::Path) -> std::io::Result<Store> {
     let text = match std::fs::read_to_string(p) {
         Ok(t) => t,
-        Err(_) => return Store::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Store::new()),
+        Err(e) => return Err(e),
     };
-    match serde_json::from_str(&text) {
+    Ok(match serde_json::from_str(&text) {
         Ok(store) => store,
         Err(e) => {
             let aside = p.with_extension("json.corrupt");
@@ -426,7 +439,7 @@ fn load_from(p: &std::path::Path) -> Store {
             );
             Store::new()
         }
-    }
+    })
 }
 
 /// Change the stored baselines in place: load, `edit`, save, all under the
@@ -440,29 +453,24 @@ fn update(edit: impl FnOnce(&mut Store)) {
         crate::errlog::log("baseline", "no data directory — learned networks not saved");
         return;
     };
-    if !update_at(&p, edit) {
+    if let Err(e) = update_at(&p, edit) {
         crate::errlog::log(
             "baseline",
-            format!(
-                "another octomon process is holding {} — learned networks not saved",
-                p.display()
-            ),
+            format!("{}: {e} — learned networks not saved", p.display()),
         );
     }
 }
 
-/// `false` when the lock stayed busy and nothing was written.
-fn update_at(p: &std::path::Path, edit: impl FnOnce(&mut Store)) -> bool {
+/// Nothing is written when the lock can't be had or the file can't be read.
+fn update_at(p: &std::path::Path, edit: impl FnOnce(&mut Store)) -> std::io::Result<()> {
     if let Some(dir) = p.parent() {
         let _ = crate::store::create_dir_private(dir);
     }
-    let Some(_held) = crate::store::FileLock::acquire(p) else {
-        return false;
-    };
-    let mut all = load_from(p);
+    let _held = crate::store::FileLock::acquire(p)?;
+    let mut all = read_store(p)?;
     edit(&mut all);
     save_to(p, &all);
-    true
+    Ok(())
 }
 
 /// Best-effort whole-file rewrite — a handful of networks × ~200 bytes.
@@ -968,15 +976,18 @@ mod tests {
                 let p = p.clone();
                 std::thread::spawn(move || {
                     for j in 0..5 {
-                        assert!(update_at(&p, |all| {
-                            all.insert(
-                                format!("net-{i}-{j}"),
-                                Baseline {
-                                    label: format!("Net {i}"),
-                                    ..Default::default()
-                                },
-                            );
-                        }));
+                        assert!(
+                            update_at(&p, |all| {
+                                all.insert(
+                                    format!("net-{i}-{j}"),
+                                    Baseline {
+                                        label: format!("Net {i}"),
+                                        ..Default::default()
+                                    },
+                                );
+                            })
+                            .is_ok()
+                        );
                     }
                 })
             })
@@ -990,6 +1001,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A baselines.json that exists but can't be read is not an empty store:
+    /// saving one network over it would erase every other one.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_store_is_not_overwritten() {
+        use std::os::unix::fs::PermissionsExt as _;
+        if crate::platform::tools::is_privileged() {
+            return; // root reads it regardless of the mode
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "octomon-baseline-unreadable-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("baselines.json");
+        let mut two = Store::new();
+        for name in ["home", "office"] {
+            two.insert(name.into(), Baseline::default());
+        }
+        std::fs::write(&p, serde_json::to_string(&two).unwrap()).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let r = update_at(&p, |all| {
+            all.insert("hotel".into(), Baseline::default());
+        });
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(r.is_err());
+        assert_eq!(load_from(&p).len(), 2, "both stored networks survive");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_save_never_runs_while_someone_else_holds_the_lock() {
         let dir =
@@ -999,15 +1042,21 @@ mod tests {
         let p = dir.join("baselines.json");
 
         let held = crate::store::FileLock::acquire(&p).expect("free to start with");
-        assert!(!update_at(&p, |all| {
-            all.insert("blocked".into(), Baseline::default());
-        }));
+        assert!(
+            update_at(&p, |all| {
+                all.insert("blocked".into(), Baseline::default());
+            })
+            .is_err()
+        );
         assert!(!p.exists(), "wrote without the lock");
         drop(held);
 
-        assert!(update_at(&p, |all| {
-            all.insert("after".into(), Baseline::default());
-        }));
+        assert!(
+            update_at(&p, |all| {
+                all.insert("after".into(), Baseline::default());
+            })
+            .is_ok()
+        );
         assert!(load_from(&p).contains_key("after"));
         let _ = std::fs::remove_dir_all(&dir);
     }

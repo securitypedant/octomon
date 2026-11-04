@@ -208,7 +208,10 @@ pub async fn run(state: Arc<Mutex<AppState>>, trigger: Arc<Notify>) {
                     medium,
                     server: r.server.clone(),
                 };
-                crate::store::append(&record);
+                // Off the state lock: the append may wait on another octomon
+                // holding the file.
+                let saved = record.clone();
+                tokio::task::spawn_blocking(move || crate::store::append(&saved));
                 s.speed_history.push(record);
                 s.speed_total += 1;
 

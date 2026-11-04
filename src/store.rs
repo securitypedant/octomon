@@ -479,25 +479,50 @@ const LOCK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
 /// the rewrite replaces the file's inode: a lock on the old one would not stop
 /// a writer that opened the new one. Advisory — it only orders octomon against
 /// octomon, which is all that writes here.
+#[must_use = "the lock is released as soon as this is dropped"]
 pub struct FileLock {
     _file: std::fs::File,
 }
 
 impl FileLock {
-    /// Take the lock for `path`, waiting up to [`LOCK_PATIENCE`]. `None` when
-    /// it could not be had in time or the lock file could not be opened;
-    /// callers decide whether to go ahead unlocked (an append — a racy line
-    /// beats a lost one) or give up (a rewrite — never safe unlocked).
-    pub fn acquire(path: &std::path::Path) -> Option<FileLock> {
-        let lock = path.with_file_name(format!(".{}.lock", path.file_name()?.to_string_lossy()));
-        let deadline = std::time::Instant::now() + LOCK_PATIENCE;
+    /// Take the lock for `path`, waiting up to [`LOCK_PATIENCE`] — blocking
+    /// the calling thread, so keep it off the shared state lock. A peer that
+    /// held on past the deadline is a `WouldBlock` error saying so; any other
+    /// error is the real one (an unopenable lock file, say), so the log says
+    /// what actually went wrong. Callers decide whether to go ahead unlocked
+    /// (an append — a racy line beats a lost one) or give up (a rewrite —
+    /// never safe unlocked).
+    pub fn acquire(path: &std::path::Path) -> std::io::Result<FileLock> {
+        Self::acquire_within(path, LOCK_PATIENCE)
+    }
+
+    /// One attempt, no waiting: for writers that must never stall, and go
+    /// ahead unlocked when a peer has it.
+    pub fn acquire_now(path: &std::path::Path) -> std::io::Result<FileLock> {
+        Self::acquire_within(path, std::time::Duration::ZERO)
+    }
+
+    fn acquire_within(
+        path: &std::path::Path,
+        patience: std::time::Duration,
+    ) -> std::io::Result<FileLock> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| std::io::Error::other("no file name to lock"))?;
+        let lock = path.with_file_name(format!(".{}.lock", name.to_string_lossy()));
+        let deadline = std::time::Instant::now() + patience;
         loop {
-            match Self::try_acquire(&lock) {
-                Ok(Some(held)) => return Some(held),
-                Ok(None) if std::time::Instant::now() < deadline => {
+            match Self::try_acquire(&lock)? {
+                Some(held) => return Ok(held),
+                None if std::time::Instant::now() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                _ => return None,
+                None => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "another octomon process is holding the file",
+                    ));
+                }
             }
         }
     }
@@ -570,7 +595,7 @@ pub fn append_locked(path: &std::path::Path, text: &str) -> std::io::Result<()> 
     if let Some(dir) = path.parent() {
         let _ = create_dir_private(dir);
     }
-    let _held = FileLock::acquire(path);
+    let _held = FileLock::acquire(path).ok();
     private_options()
         .create(true)
         .append(true)
@@ -591,12 +616,7 @@ pub fn rewrite_locked(
     path: &std::path::Path,
     edit: impl FnOnce(&str) -> Option<String>,
 ) -> std::io::Result<bool> {
-    let Some(_held) = FileLock::acquire(path) else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::WouldBlock,
-            "another octomon process is holding the file",
-        ));
-    };
+    let _held = FileLock::acquire(path)?;
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -616,26 +636,24 @@ pub const PRUNE_EVERY: std::time::Duration = std::time::Duration::from_secs(3600
 
 /// When a file was last checked against its bound, so the append path can
 /// prune "every so often" without rewriting on every append.
-pub struct PruneClock(std::sync::Mutex<Option<std::time::Instant>>);
+pub struct PruneClock(parking_lot::Mutex<Option<std::time::Instant>>);
 
 impl PruneClock {
     pub const fn new() -> Self {
-        Self(std::sync::Mutex::new(None))
+        // parking_lot's doesn't poison, so a panic elsewhere can't stop
+        // pruning for the rest of the run.
+        Self(parking_lot::const_mutex(None))
     }
 
     /// Record a check made now (the startup load counts as one).
     pub fn mark(&self) {
-        if let Ok(mut last) = self.0.lock() {
-            *last = Some(std::time::Instant::now());
-        }
+        *self.0.lock() = Some(std::time::Instant::now());
     }
 
     /// Whether a check is due — and if so, claim it, so concurrent appenders
     /// in this process don't both run it. Never checked counts as due.
     pub fn due(&self, every: std::time::Duration) -> bool {
-        let Ok(mut last) = self.0.lock() else {
-            return false;
-        };
+        let mut last = self.0.lock();
         if last.is_some_and(|t| t.elapsed() < every) {
             return false;
         }
