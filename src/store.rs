@@ -337,8 +337,9 @@ fn open_nofollow(path: &std::path::Path, dir: bool) -> Option<std::fs::File> {
 /// directory somebody else owns (their `$XDG_DATA_HOME`, or the user's own
 /// tree seen from a `sudo` run) is not ours to re-permission.
 ///
-/// Under `sudo`, the directories this call created are then given to the
-/// invoking user (see [`hand_back`]) — the leaf after it has been made
+/// Under `sudo`, the leaf (whether or not this call created it) and any
+/// parents this call created are then given to the invoking user (see
+/// [`hand_back`]) — the leaf after it has been made
 /// owner-only, since once it is theirs [`owned_by_me`] no longer lets root
 /// touch its mode.
 pub fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
@@ -1054,6 +1055,46 @@ mod tests {
         let clock = PruneClock::new();
         clock.mark();
         assert!(!clock.due(every), "a startup load counts as a check");
+    }
+
+    /// Appenders and a rewriter running at once, as a dashboard and a
+    /// `--watch` do: every appended line must survive every rewrite. Threads
+    /// stand in for processes, since each lock is its own open.
+    #[test]
+    fn appends_survive_concurrent_rewrites() {
+        let dir = scratch("append-race");
+        let path = dir.join("net_history.jsonl");
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let rewriter = {
+            let (path, done) = (path.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut rewrites = 0;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    if rewrite_locked(&path, |t| Some(t.to_string())).is_ok() {
+                        rewrites += 1;
+                    }
+                }
+                rewrites
+            })
+        };
+        let appenders: Vec<_> = (0..4)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for j in 0..50 {
+                        append_locked(&path, &format!("{i}-{j}\n")).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for a in appenders {
+            a.join().unwrap();
+        }
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(rewriter.join().unwrap() > 0, "the rewriter ran");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 200, "no line lost to a rewrite");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The race this lock exists for: a line another process appends after

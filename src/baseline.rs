@@ -262,8 +262,10 @@ fn unidentified_tunnel(n: &NetInfo) -> (String, String, Option<&str>) {
 /// uplink and the exit PoP both shape the normal: "HomeNet via Cloudflare
 /// WARP" ≠ "HotelNet via Cloudflare WARP". Split tunnels key on the physical
 /// network's own identity; full tunnels on the gatewayed physical interface
-/// found beneath the tunnel, falling back to one per-vendor location when no
-/// underlay is visible at all.
+/// found beneath the tunnel. With no underlay visible at all, a named
+/// commercial VPN falls back to one location per vendor; a self-hosted
+/// WireGuard or OpenVPN config, or an unidentified tunnel, to one per tunnel
+/// address.
 pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
     let mac_known = mac_is_known(&n.gateway_mac);
     let ip_known = !n.gateway_ip.is_empty() && n.gateway_ip != "-";
@@ -758,10 +760,9 @@ mod tests {
         assert_ne!(a, fingerprint(&v6("fd00:13::2/128")).unwrap().0);
     }
 
-    /// A full tunnel with a visible physical network underneath keys on that
-    /// underlay: the same VPN over the office Ethernet and over hotel Wi-Fi
-    /// is two places with two normals. The vendor-only bucket above is only
-    /// the fallback for setups where no underlay is discoverable.
+    /// netdev reports an unresolved neighbour as 00:00:00:00:00:00. Keyed on
+    /// that, every full tunnel shared one location; it has to fall back to
+    /// the underlay's gateway address.
     #[test]
     fn an_unresolved_underlay_mac_falls_back_to_the_gateway_ip() {
         let over = |gw_ip: &str| NetInfo {
@@ -783,6 +784,10 @@ mod tests {
         assert_eq!(home.1, "192.168.10.1 via Zscaler");
     }
 
+    /// A full tunnel with a visible physical network underneath keys on that
+    /// underlay: the same VPN over the office Ethernet and over hotel Wi-Fi
+    /// is two places with two normals. The per-vendor bucket above is only
+    /// the fallback for setups where no underlay is discoverable.
     #[test]
     fn a_full_tunnel_keys_on_the_underlay_when_one_is_visible() {
         let over = |gw_ip: &str, gw_mac: &str, medium: LinkMedium| NetInfo {
