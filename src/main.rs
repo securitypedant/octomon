@@ -775,15 +775,32 @@ async fn main() -> Result<()> {
     // ratatui::init() enables raw mode + alt screen and installs a panic hook
     // that restores the terminal, so a panic never leaves it wedged.
     let mut terminal = ratatui::init();
-    // That hook restores the terminal on *any* panic, but a collector panic
-    // is caught by its supervisor and the dashboard keeps drawing — leaving
-    // the alternate screen then would wreck it. Only the UI's own thread may
-    // end the session; everything else is reported by `supervise`.
+    // That hook restores the terminal on *any* panic, but a panic off the
+    // UI's thread doesn't end the session — a supervised collector is
+    // restarted, and the dashboard keeps drawing — so leaving the alternate
+    // screen then would wreck it. Only the UI's own thread restores the
+    // terminal. Every other panic goes to errors.log with its location,
+    // since printing it would land on the dashboard and not every task is
+    // supervised (ping loops, whois, traceroute, blocking work).
     let restore_and_report = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if std::thread::current().name() == Some("main") {
+        let thread = std::thread::current();
+        if thread.name() == Some("main") {
             restore_and_report(info);
+            return;
         }
+        let at = info
+            .location()
+            .map(|l| format!(" at {}:{}", l.file(), l.line()))
+            .unwrap_or_default();
+        errlog::log(
+            "panic",
+            format!(
+                "{} panicked{at}: {}",
+                thread.name().unwrap_or("a task thread"),
+                panic_message(info.payload())
+            ),
+        );
     }));
     let ctx = Ctx {
         state,
@@ -812,10 +829,19 @@ const RESTART_DELAY: Duration = Duration::from_secs(5);
 fn supervise<F, Fut>(name: &'static str, state: &Arc<Mutex<AppState>>, start: F)
 where
     F: FnMut() -> Fut + Send + 'static,
-    Fut: std::future::Future + Send + 'static,
-    Fut::Output: Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     supervise_with(name, state, RESTART_DELAY, start);
+}
+
+/// A panic's message: the payload of `panic!("…")` is a `&str` or a
+/// `String`; anything else is named as such.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
 }
 
 fn supervise_with<F, Fut>(
@@ -826,20 +852,14 @@ fn supervise_with<F, Fut>(
 ) -> tokio::task::JoinHandle<()>
 where
     F: FnMut() -> Fut + Send + 'static,
-    Fut: std::future::Future + Send + 'static,
-    Fut::Output: Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     let state = state.clone();
     tokio::spawn(async move {
         loop {
             match tokio::spawn(start()).await {
                 Err(e) if e.is_panic() => {
-                    let payload = e.into_panic();
-                    let why = payload
-                        .downcast_ref::<&str>()
-                        .map(|s| s.to_string())
-                        .or_else(|| payload.downcast_ref::<String>().cloned())
-                        .unwrap_or_else(|| "unknown panic".to_string());
+                    let why = panic_message(e.into_panic().as_ref());
                     let message = format!("{name} collector crashed ({why}) — restarting");
                     errlog::log("supervisor", &message);
                     state.lock().notice_event(
