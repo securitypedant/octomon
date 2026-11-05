@@ -279,9 +279,10 @@ pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
         .unwrap_or("");
     // A full-tunnel VPN (the tunnel itself holds the default route) is its own
     // place, whatever LAN sits underneath: latency, DNS and loss all describe
-    // the tunnel, not the room. Keyed on the vendor so reconnecting — or a
-    // different exit server, or macOS renumbering utunN — comes back to the
-    // same location instead of minting a new one each time. This is also the
+    // the tunnel, not the room. Keyed on the vendor (and, for a self-hosted or
+    // unidentified tunnel, its own address), so reconnecting — or macOS
+    // renumbering utunN — comes back to the same location instead of minting
+    // a new one each time. This is also the
     // only identity a tunnel like WARP on Windows has: a /32, no gateway, no
     // MAC — nothing below would key on it at all.
     let full_tunnel = n.medium == LinkMedium::Tunnel && n.tunnel.is_some();
@@ -392,18 +393,13 @@ fn path() -> Option<std::path::PathBuf> {
     crate::store::data_dir().map(|d| d.join("baselines.json"))
 }
 
-/// Best-effort load; a missing file is an empty map, never a crash. A file
-/// that is there but will not parse is moved aside to `baselines.json.corrupt`
-/// and logged, rather than read as empty: the next `save` would otherwise
-/// rewrite the file with only the current network, and every other learned
-/// normal would be gone for good over one bad byte. Moved aside, it can be
-/// repaired by hand.
+/// Every stored baseline, for display. Any error is logged and read as
+/// empty, which is all a display needs; only a save ([`update_at`]) acts on
+/// a file that won't parse.
 pub fn load() -> Store {
     path().map(|p| load_from(&p)).unwrap_or_default()
 }
 
-/// [`read_store`] for readers: an unreadable file is logged and read as
-/// empty, which is all a display needs.
 fn load_from(p: &std::path::Path) -> Store {
     read_store(p).unwrap_or_else(|e| {
         crate::errlog::log("baseline", format!("could not read {}: {e}", p.display()));
@@ -411,38 +407,69 @@ fn load_from(p: &std::path::Path) -> Store {
     })
 }
 
-/// The stored baselines. Only a missing file is an empty store: one that
-/// exists but can't be read (permissions, I/O) is an error, so a save never
-/// writes a one-network store over every network it couldn't see. One that
-/// doesn't parse is moved aside and read as empty; if it can't be moved, it is
-/// still somebody's history, so that is an error too.
+/// The stored baselines, exactly as on disk; the file is never touched. Only
+/// a missing file is an empty store. One that exists but can't be read
+/// (permissions, I/O) is an error, so a save never writes a one-network
+/// store over every network it couldn't see. One that doesn't parse, as
+/// UTF-8 or as JSON, is an `InvalidData` error.
 fn read_store(p: &std::path::Path) -> std::io::Result<Store> {
-    let text = match std::fs::read_to_string(p) {
-        Ok(t) => t,
+    let bytes = match std::fs::read(p) {
+        Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Store::new()),
         Err(e) => return Err(e),
     };
-    match serde_json::from_str(&text) {
-        Ok(store) => Ok(store),
-        Err(e) => {
-            let aside = p.with_extension("json.corrupt");
-            if let Err(m) = std::fs::rename(p, &aside) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("did not parse ({e}) and could not be moved aside ({m})"),
-                ));
+    serde_json::from_slice(&bytes).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("did not parse: {e}"),
+        )
+    })
+}
+
+/// How many earlier corrupt copies may be kept beside the store.
+const ASIDE_SLOTS: usize = 10;
+
+/// Move a store that won't parse to the first free `baselines.json.corrupt`,
+/// `.corrupt.1` … slot, so it can be repaired by hand and an earlier one is
+/// never replaced. Called with the file's lock held, so no other octomon
+/// moves or rewrites it meanwhile. With every slot taken, nothing moves and
+/// the save fails: the file is still somebody's history.
+fn set_aside(p: &std::path::Path, why: &std::io::Error) -> std::io::Result<()> {
+    let first = p.with_extension("json.corrupt");
+    let aside = (0..ASIDE_SLOTS)
+        .map(|i| {
+            if i == 0 {
+                first.clone()
+            } else {
+                p.with_extension(format!("json.corrupt.{i}"))
             }
-            crate::errlog::log(
-                "baseline",
+        })
+        .find(|a| std::fs::symlink_metadata(a).is_err())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
                 format!(
-                    "{} did not parse: {e} — moved to {} and starting over",
-                    p.display(),
-                    aside.display()
+                    "{why}, and it could not be moved aside: {} and its {} numbered slots are taken",
+                    first.display(),
+                    ASIDE_SLOTS - 1
                 ),
-            );
-            Ok(Store::new())
-        }
-    }
+            )
+        })?;
+    std::fs::rename(p, &aside).map_err(|m| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{why}, and it could not be moved aside: {m}"),
+        )
+    })?;
+    crate::errlog::log(
+        "baseline",
+        format!(
+            "{} {why} — moved to {} and starting over",
+            p.display(),
+            aside.display()
+        ),
+    );
+    Ok(())
 }
 
 /// Change the stored baselines in place: load, `edit`, save, all under the
@@ -450,28 +477,43 @@ fn read_store(p: &std::path::Path) -> std::io::Result<Store> {
 /// a `--watch` service, or two watchers) save at the same moments — startup,
 /// a network change — and unlocked they share one temporary file, so one
 /// rename fails, and whichever save lands last drops the network the other
-/// just learned. Loading after the lock is taken keeps both.
-fn update(edit: impl FnOnce(&mut Store)) {
+/// just learned. Loading after the lock is taken keeps both. (Two processes
+/// saving the *same* network still each write their own copy of it; the last
+/// one stands.) Errors are logged here and returned for callers that tell
+/// the user.
+fn update(edit: impl FnOnce(&mut Store)) -> std::io::Result<()> {
     let Some(p) = path() else {
         crate::errlog::log("baseline", "no data directory — learned networks not saved");
-        return;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no data directory",
+        ));
     };
-    if let Err(e) = update_at(&p, edit) {
+    update_at(&p, edit).inspect_err(|e| {
         crate::errlog::log(
             "baseline",
             format!("{}: {e} — learned networks not saved", p.display()),
         );
-    }
+    })
 }
 
-/// `Ok` means the edited store is on disk. Nothing is written when the lock
-/// can't be had or the file can't be read.
+/// `Ok` means the edited store was written and renamed into place. Nothing
+/// is written when the directory, the lock or the file can't be had. A
+/// store that doesn't parse is first set aside ([`set_aside`]); if the save
+/// then fails, `baselines.json` is gone and its old contents are in the
+/// `.corrupt` copy.
 fn update_at(p: &std::path::Path, edit: impl FnOnce(&mut Store)) -> std::io::Result<()> {
     if let Some(dir) = p.parent() {
-        let _ = crate::store::create_dir_private(dir);
+        crate::store::create_dir_private(dir)?;
     }
     let _held = crate::store::FileLock::acquire(p)?;
-    let mut all = read_store(p)?;
+    let mut all = match read_store(p) {
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            set_aside(p, &e)?;
+            Store::new()
+        }
+        r => r?,
+    };
     edit(&mut all);
     save_to(p, &all)
 }
@@ -484,29 +526,45 @@ fn save_to(p: &std::path::Path, store: &Store) -> std::io::Result<()> {
     crate::store::write_private(p, json)
 }
 
-/// Load one network's baseline (blocking file read — call off the lock).
-pub fn load_one(key: &str) -> Option<Baseline> {
-    load().get(key).cloned()
+/// Load one network's baseline (blocking file read — call off the state
+/// lock). `Ok(None)` is a network not seen before. A store that doesn't
+/// parse counts as empty too, since the next save sets it aside; any other
+/// read error is returned, so the caller doesn't take a network it simply
+/// couldn't read for a new one and save over what it had learned.
+pub fn load_one(key: &str) -> std::io::Result<Option<Baseline>> {
+    let Some(p) = path() else {
+        return Ok(None);
+    };
+    match read_store(&p) {
+        Ok(all) => Ok(all.get(key).cloned()),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
-/// Merge one network's baseline back in and persist (blocking — off the lock).
+/// Replace one network's stored baseline (blocking — off the state lock).
+/// The stored name is kept: names change only through [`name_network`], so
+/// an older in-memory copy in another octomon can't undo a rename.
 pub fn save_one(key: &str, b: &Baseline) {
-    update(|all| {
-        all.insert(key.to_string(), b.clone());
-    });
+    let _ = update(|all| put_keeping_name(all, key, b));
 }
 
-/// Remove one network's stored baseline (blocking — off the lock). Its
+fn put_keeping_name(all: &mut Store, key: &str, b: &Baseline) {
+    let name = all.get(key).and_then(|old| old.name.clone());
+    all.insert(key.to_string(), Baseline { name, ..b.clone() });
+}
+
+/// Remove one network's stored baseline (blocking — off the state lock). Its
 /// incident history is deliberately kept: if the network is ever visited
 /// again, "3 outages this week" is still true and still useful.
-pub fn forget(key: &str) {
+pub fn forget(key: &str) -> std::io::Result<()> {
     update(|all| {
         all.remove(key);
-    });
+    })
 }
 
 /// Set the user's name for a network, keeping any learned stats.
-pub fn name_network(key: &str, label: &str, name: &str) {
+pub fn name_network(key: &str, label: &str, name: &str) -> std::io::Result<()> {
     update(|all| {
         let entry = all.entry(key.to_string()).or_insert_with(|| Baseline {
             label: label.to_string(),
@@ -517,7 +575,7 @@ pub fn name_network(key: &str, label: &str, name: &str) {
         } else {
             Some(name.trim().to_string())
         };
-    });
+    })
 }
 
 /// "current is way above normal": the abnormality test used for confidence
@@ -950,10 +1008,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let p = dir.join("baselines.json");
 
+        let start = std::sync::Arc::new(std::sync::Barrier::new(4));
         let writers: Vec<_> = (0..4)
             .map(|i| {
-                let p = p.clone();
+                let (p, start) = (p.clone(), start.clone());
                 std::thread::spawn(move || {
+                    start.wait();
                     for j in 0..5 {
                         assert!(
                             update_at(&p, |all| {
@@ -1028,15 +1088,81 @@ mod tests {
         (dir, p)
     }
 
-    /// A corrupt store that can't be moved aside is an error, and left as is.
+    /// The usual corrupt store: set aside, then saved over with the edit.
+    /// Bytes that aren't UTF-8 count as corrupt too, not as unreadable.
+    #[test]
+    fn a_corrupt_store_is_set_aside_and_the_save_goes_ahead() {
+        for (tag, bad) in [
+            ("json", b"{ not json".as_slice()),
+            ("utf8", b"\xff\xfe{}".as_slice()),
+        ] {
+            let (dir, p) = store_with_blocked(&format!("aside-{tag}"), "", "unused");
+            std::fs::write(&p, bad).unwrap();
+            assert!(load_from(&p).is_empty(), "a reader sees nothing");
+            assert_eq!(std::fs::read(&p).unwrap(), bad, "and moves nothing");
+            update_at(&p, |all| {
+                all.insert("hotel".into(), Baseline::default());
+            })
+            .unwrap();
+            assert_eq!(
+                std::fs::read(dir.join("baselines.json.corrupt")).unwrap(),
+                bad
+            );
+            assert_eq!(load_from(&p).into_keys().collect::<Vec<_>>(), ["hotel"]);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A second corrupt store goes to the next slot; the first is kept.
+    #[test]
+    fn an_earlier_corrupt_copy_is_never_replaced() {
+        let (dir, p) = store_with_blocked("slots", "{ first", "unused");
+        update_at(&p, |_| {}).unwrap();
+        std::fs::write(&p, "{ second").unwrap();
+        update_at(&p, |_| {}).unwrap();
+        let read = |n: &str| std::fs::read_to_string(dir.join(n)).unwrap();
+        assert_eq!(read("baselines.json.corrupt"), "{ first");
+        assert_eq!(read("baselines.json.corrupt.1"), "{ second");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A corrupt store with every slot taken is an error, and left as is.
     #[test]
     fn a_corrupt_store_that_cannot_be_moved_aside_is_an_error() {
         let (dir, p) = store_with_blocked("stuck", "{ not json", "baselines.json.corrupt");
+        for i in 1..ASIDE_SLOTS {
+            std::fs::write(dir.join(format!("baselines.json.corrupt.{i}")), "").unwrap();
+        }
         let r = update_at(&p, |all| {
             all.insert("hotel".into(), Baseline::default());
         });
         assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "{ not json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A save from an older in-memory copy doesn't undo a rename made since.
+    #[test]
+    fn a_save_keeps_the_stored_name() {
+        let (dir, p) = store_with_blocked("name", "", "unused");
+        std::fs::remove_file(&p).unwrap();
+        update_at(&p, |all| {
+            all.insert(
+                "home".into(),
+                Baseline {
+                    name: Some("Den".into()),
+                    ..Default::default()
+                },
+            );
+        })
+        .unwrap();
+        let stale = Baseline {
+            samples: 7,
+            ..Default::default()
+        };
+        update_at(&p, |all| put_keeping_name(all, "home", &stale)).unwrap();
+        let home = &load_from(&p)["home"];
+        assert_eq!((home.name.as_deref(), home.samples), (Some("Den"), 7));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

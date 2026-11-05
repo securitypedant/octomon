@@ -142,12 +142,13 @@ fn invoker_from(euid: u32, uid: Option<&str>, gid: Option<&str>) -> Option<(u32,
 /// The invoking user's home directory, from the password database rather than
 /// `$HOME` — the environment is exactly what is in question under `sudo` —
 /// and with symlinks resolved, so it compares against the resolved path of an
-/// open file. Computed once.
+/// open file. Computed once; `None` when not under `sudo`.
 #[cfg(unix)]
-fn invoker_home(uid: u32) -> Option<&'static std::path::Path> {
+fn invoker_home() -> Option<&'static std::path::Path> {
     static HOME: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     HOME.get_or_init(|| {
         use std::os::unix::ffi::OsStrExt as _;
+        let (uid, _) = invoker()?;
         // SAFETY: an all-zero `passwd` is a valid value for getpwuid_r to fill
         // in (every field is an integer or a pointer).
         let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
@@ -285,21 +286,63 @@ fn hand_back_fd(fd: std::os::fd::BorrowedFd<'_>, scope: Scope) {
         return;
     }
     let kind = st.st_mode & libc::S_IFMT;
-    let regular = kind == libc::S_IFREG && st.st_nlink == 1;
-    if !regular && kind != libc::S_IFDIR {
+    let real = real_path(raw);
+    let shown = || {
+        real.as_deref()
+            .map_or_else(|| format!("descriptor {raw}"), |p| p.display().to_string())
+    };
+    if kind == libc::S_IFREG && st.st_nlink != 1 {
+        hand_back_failed(format!(
+            "{} has {} hard links — left root-owned",
+            shown(),
+            st.st_nlink
+        ));
         return;
     }
-    let Some(home) = invoker_home(uid) else {
+    if kind != libc::S_IFREG && kind != libc::S_IFDIR {
+        return;
+    }
+    let Some(home) = invoker_home() else {
+        hand_back_failed(format!(
+            "no home directory for uid {uid} — {} left root-owned",
+            shown()
+        ));
         return;
     };
-    let Some(real) = real_path(raw) else { return };
-    if !may_hand_back(&real, home, &own_roots(), scope) {
+    let Some(real) = real.as_deref() else {
+        hand_back_failed(format!("{} has no path — left root-owned", shown()));
+        return;
+    };
+    if !may_hand_back(real, home, &own_roots(), scope) {
+        hand_back_failed(format!(
+            "{} is outside octomon's directories in {} — left root-owned",
+            real.display(),
+            home.display()
+        ));
         return;
     }
-    // Best-effort, like every write it follows: a failure leaves the file
-    // root-owned, which is no worse than before.
+    // A failure leaves the file root-owned, which is no worse than before,
+    // but the next unprivileged run will fail on it, so it is recorded.
     // SAFETY: `raw` is a live descriptor for the duration of this call.
-    let _ = unsafe { libc::fchown(raw, uid, gid) };
+    if unsafe { libc::fchown(raw, uid, gid) } != 0 {
+        hand_back_failed(format!(
+            "could not give {} back to uid {uid}: {}",
+            real.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+}
+
+/// Record a file left root-owned. errors.log hands its own file back too, so
+/// a failure there would come straight back here: only the outer call logs.
+#[cfg(unix)]
+fn hand_back_failed(message: String) {
+    thread_local!(static LOGGING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+    if LOGGING.replace(true) {
+        return;
+    }
+    crate::errlog::log("sudo", message);
+    LOGGING.set(false);
 }
 
 /// [`hand_back_fd`] for a file just opened in one of octomon's own
@@ -460,7 +503,8 @@ pub fn write_private(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std:
 }
 
 /// How long to wait for another octomon process to let go of a data file
-/// before going ahead without it. Holders only ever append a line or rewrite a
+/// before giving up: an append then goes ahead unlocked, a rewrite or a
+/// baselines save fails. Holders only ever append a line or rewrite a
 /// few hundred kilobytes, so anything past this is a stuck or stopped process
 /// (a dashboard suspended with Ctrl+Z mid-write), and the verdict loop must not
 /// hang behind it.
@@ -473,8 +517,11 @@ const LOCK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
 /// An append is safe on its own (`O_APPEND` lands each line whole at the end),
 /// but a rewrite is read → tmp file → rename: a line another process appends
 /// between the read and the rename goes to the inode the rename then unlinks,
-/// and is gone. So every append and every rewrite of a shared file takes this
-/// first, and a rewrite re-reads the file once it holds it.
+/// and is gone. So every rewrite of a shared file takes this first and
+/// re-reads the file once it holds it, and every append tries to take it
+/// ([`append_locked`] goes ahead without it rather than drop the line; the
+/// `errors.log` roll tries once). `baselines.json` takes it across its whole
+/// load, edit and save.
 ///
 /// The lock is a sibling `.<name>.lock` rather than the file itself, because
 /// the rewrite replaces the file's inode: a lock on the old one would not stop
@@ -521,7 +568,17 @@ impl FileLock {
                 None => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
-                        "another octomon process is holding the file",
+                        if cfg!(windows) {
+                            format!(
+                                "{} is still open elsewhere after {patience:?} (another octomon, or a scanner)",
+                                lock.display()
+                            )
+                        } else {
+                            format!(
+                                "another octomon process held {} past {patience:?}",
+                                lock.display()
+                            )
+                        },
                     ));
                 }
             }
@@ -530,7 +587,8 @@ impl FileLock {
 
     /// One non-blocking attempt: `Ok(None)` when another process holds it.
     /// Non-blocking plus a deadline rather than a blocking `flock`, so a peer
-    /// that never lets go costs two seconds and not the rest of the session.
+    /// that never lets go costs at most [`LOCK_PATIENCE`] and not the rest
+    /// of the session.
     #[cfg(unix)]
     fn try_acquire(lock: &std::path::Path) -> std::io::Result<Option<FileLock>> {
         use std::os::fd::AsRawFd as _;
@@ -581,7 +639,8 @@ impl FileLock {
         }
     }
 
-    /// Anything else gets no lock and the old, racy behaviour.
+    /// Anything else has no lock: appends go ahead unlocked as before, but
+    /// rewrites and baselines saves fail rather than race.
     #[cfg(not(any(unix, windows)))]
     fn try_acquire(_: &std::path::Path) -> std::io::Result<Option<FileLock>> {
         Err(std::io::Error::other("no file locking on this platform"))
@@ -591,12 +650,26 @@ impl FileLock {
 /// Append `text` to `path` (creating it owner-only), holding its [`FileLock`]
 /// so the line cannot land in the middle of another process's rewrite. When
 /// the lock cannot be had the append goes ahead anyway: losing the line to a
-/// race that may not even be happening is worse than risking it.
+/// race that may not even be happening is worse than risking it. That is
+/// logged, once per file per run, so a lost line has an explanation.
 pub fn append_locked(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
-        let _ = create_dir_private(dir);
+        create_dir_private(dir)?;
     }
-    let _held = FileLock::acquire(path).ok();
+    let _held = FileLock::acquire(path)
+        .inspect_err(|e| {
+            static TOLD: parking_lot::Mutex<Vec<PathBuf>> = parking_lot::const_mutex(Vec::new());
+            let mut told = TOLD.lock();
+            if !told.iter().any(|p| p == path) {
+                told.push(path.to_path_buf());
+                drop(told);
+                crate::errlog::log(
+                    "store",
+                    format!("{}: appending without the lock: {e}", path.display()),
+                );
+            }
+        })
+        .ok();
     private_options()
         .create(true)
         .append(true)
@@ -636,26 +709,34 @@ pub fn rewrite_locked(
 pub const PRUNE_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// When a file was last checked against its bound, so the append path can
-/// prune "every so often" without rewriting on every append.
-pub struct PruneClock(parking_lot::Mutex<Option<std::time::Instant>>);
+/// prune once per interval without rewriting on every append. A check is
+/// claimed when it is asked for, not when it finishes, so a prune that fails
+/// waits for the next interval.
+pub struct PruneClock {
+    every: std::time::Duration,
+    // parking_lot's doesn't poison, so a panic elsewhere can't stop pruning
+    // for the rest of the run.
+    last: parking_lot::Mutex<Option<std::time::Instant>>,
+}
 
 impl PruneClock {
-    pub const fn new() -> Self {
-        // parking_lot's doesn't poison, so a panic elsewhere can't stop
-        // pruning for the rest of the run.
-        Self(parking_lot::const_mutex(None))
+    pub const fn new(every: std::time::Duration) -> Self {
+        Self {
+            every,
+            last: parking_lot::const_mutex(None),
+        }
     }
 
     /// Record a check made now (the startup load counts as one).
     pub fn mark(&self) {
-        *self.0.lock() = Some(std::time::Instant::now());
+        *self.last.lock() = Some(std::time::Instant::now());
     }
 
-    /// Whether a check is due — and if so, claim it, so concurrent appenders
-    /// in this process don't both run it. Never checked counts as due.
-    pub fn due(&self, every: std::time::Duration) -> bool {
-        let mut last = self.0.lock();
-        if last.is_some_and(|t| t.elapsed() < every) {
+    /// Claim a check if one is due, so concurrent appenders in this process
+    /// don't both run it. Never checked counts as due.
+    pub fn claim_if_due(&self) -> bool {
+        let mut last = self.last.lock();
+        if last.is_some_and(|t| t.elapsed() < self.every) {
             return false;
         }
         *last = Some(std::time::Instant::now());
@@ -760,7 +841,7 @@ fn net_history_path() -> Option<PathBuf> {
 }
 
 /// When net_history.jsonl was last checked against its cap.
-static NET_HISTORY_PRUNED: PruneClock = PruneClock::new();
+static NET_HISTORY_PRUNED: PruneClock = PruneClock::new(PRUNE_EVERY);
 
 /// Append network changes (best-effort) — the verdict tick calls this with
 /// whatever the collectors pushed since its last pass. Every
@@ -793,7 +874,7 @@ pub fn append_net_changes(changes: &[crate::app::NetChange]) {
         );
         return;
     }
-    if NET_HISTORY_PRUNED.due(PRUNE_EVERY) {
+    if NET_HISTORY_PRUNED.claim_if_due() {
         prune_net_history(&path);
     }
 }
@@ -810,23 +891,28 @@ fn prune_net_history(path: &std::path::Path) {
 /// file holds several caps' worth — the body to rewrite it down to them. The
 /// slack is what keeps this from rewriting on every append once the file sits
 /// at the cap: a trimmed file has to grow by three caps before it is due again.
+/// The rewrite keeps the file's own lines from the first one kept, including
+/// any this version can't parse — a newer octomon beside this one may have
+/// written them — and drops only what lies before.
 fn net_history_tail(
     text: &str,
 ) -> (
     std::collections::VecDeque<crate::app::NetChange>,
     Option<String>,
 ) {
-    let all: Vec<crate::app::NetChange> = text
+    let all: Vec<(usize, crate::app::NetChange)> = text
         .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
+        .enumerate()
+        .filter_map(|(i, l)| serde_json::from_str(l).ok().map(|c| (i, c)))
         .collect();
     let cap = crate::app::NET_HISTORY_CAP;
     let skip = all.len().saturating_sub(cap);
-    let tail: std::collections::VecDeque<_> = all.into_iter().skip(skip).collect();
+    let first_kept = all.get(skip).map_or(0, |(i, _)| *i);
+    let tail: std::collections::VecDeque<_> = all.into_iter().skip(skip).map(|(_, c)| c).collect();
     let rewrite = (skip > cap * 3).then(|| {
-        tail.iter()
-            .filter_map(|c| serde_json::to_string(c).ok())
-            .map(|l| l + "\n")
+        text.lines()
+            .skip(first_kept)
+            .map(|l| format!("{l}\n"))
             .collect()
     });
     (tail, rewrite)
@@ -836,12 +922,14 @@ fn net_history_tail(
 /// keeps. A file grown to several caps' worth is rewritten down to the tail
 /// while we're here, so an always-on machine doesn't accrete an unbounded
 /// log of DHCP renewals; [`append_net_changes`] repeats that during a long
-/// run. Unparseable lines (older formats) are skipped.
+/// run. Lines this version can't parse are skipped here, and kept on disk
+/// unless a trim removes everything before them. An unreadable file is
+/// logged and shows as empty.
 pub fn load_net_history() -> std::collections::VecDeque<crate::app::NetChange> {
     let Some(path) = net_history_path() else {
         return Default::default();
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Some(text) = read_logged(&path, "store") else {
         return Default::default();
     };
     NET_HISTORY_PRUNED.mark();
@@ -854,11 +942,27 @@ pub fn load_net_history() -> std::collections::VecDeque<crate::app::NetChange> {
     tail
 }
 
+/// Read a history file for display. Missing is `None` quietly; anything else
+/// that stops the read is logged first, since an unreadable file (say, one an
+/// old `sudo` run left root-owned) would otherwise just look empty.
+pub fn read_logged(path: &std::path::Path, area: &str) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(t) => Some(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            crate::errlog::log(area, format!("could not read {}: {e}", path.display()));
+            None
+        }
+    }
+}
+
 /// Delete the whole data directory — baselines, incident history, speed-test
-/// history and session CSVs. The total-reset path; best-effort.
-pub fn erase() {
-    if let Some(dir) = data_dir() {
-        let _ = std::fs::remove_dir_all(dir);
+/// history and session CSVs. The total-reset path; an error if it was there
+/// and couldn't be removed.
+pub fn erase() -> std::io::Result<()> {
+    match data_dir().map(std::fs::remove_dir_all) {
+        Some(Err(e)) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
     }
 }
 
@@ -887,38 +991,13 @@ pub fn append(rec: &SpeedRecord) {
 }
 
 /// Remove one record from the history file (blocking file rewrite — call off
-/// the lock). Matched on timestamp + provider + the speeds, first match only:
+/// the state lock). Matched on timestamp + provider + the speeds, first match only:
 /// `at` alone can collide when two providers are raced in the same second.
 /// Rewritten under the file lock from a fresh read, so a speed test another
 /// octomon process records meanwhile is not swept away with this one.
 pub fn forget(rec: &SpeedRecord) {
     let Some(path) = path() else { return };
-    let rewrote = rewrite_locked(&path, |text| {
-        let mut removed = false;
-        let kept: Vec<&str> = text
-            .lines()
-            .filter(|l| {
-                if removed {
-                    return true;
-                }
-                let same = serde_json::from_str::<SpeedRecord>(l).is_ok_and(|r| {
-                    r.at == rec.at
-                        && r.provider == rec.provider
-                        && r.down_mbps == rec.down_mbps
-                        && r.up_mbps == rec.up_mbps
-                });
-                removed |= same;
-                !same
-            })
-            .collect();
-        removed.then(|| {
-            let mut out = kept.join("\n");
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out
-        })
-    });
+    let rewrote = rewrite_locked(&path, |text| without_record(text, rec));
     if let Err(e) = rewrote {
         crate::errlog::log(
             "store",
@@ -930,6 +1009,34 @@ pub fn forget(rec: &SpeedRecord) {
     }
 }
 
+/// `text` without the first line that is `rec`, or `None` when no line is.
+fn without_record(text: &str, rec: &SpeedRecord) -> Option<String> {
+    let mut removed = false;
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|l| {
+            if removed {
+                return true;
+            }
+            let same = serde_json::from_str::<SpeedRecord>(l).is_ok_and(|r| {
+                r.at == rec.at
+                    && r.provider == rec.provider
+                    && r.down_mbps == rec.down_mbps
+                    && r.up_mbps == rec.up_mbps
+            });
+            removed |= same;
+            !same
+        })
+        .collect();
+    removed.then(|| {
+        let mut out = kept.join("\n");
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out
+    })
+}
+
 /// Load the most recent `n` records (oldest → newest), plus how many are stored
 /// in total — the UI shows both, so "showing 500 of 812" stays honest when the
 /// history outgrows what is kept in memory.
@@ -937,7 +1044,7 @@ pub fn load_recent(n: usize) -> (Vec<SpeedRecord>, usize) {
     let Some(path) = path() else {
         return (Vec::new(), 0);
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Some(text) = read_logged(&path, "store") else {
         return (Vec::new(), 0);
     };
     let mut recs: Vec<SpeedRecord> = text
@@ -1046,15 +1153,15 @@ mod tests {
     /// matter how often the append path asks — and the startup load counts.
     #[test]
     fn the_prune_clock_is_due_once_per_interval() {
-        let every = std::time::Duration::from_secs(3600);
-        let clock = PruneClock::new();
-        assert!(clock.due(every), "never checked is due");
-        assert!(!clock.due(every), "claimed by the first ask");
-        assert!(clock.due(std::time::Duration::ZERO));
+        let clock = PruneClock::new(PRUNE_EVERY);
+        assert!(clock.claim_if_due(), "never checked is due");
+        assert!(!clock.claim_if_due(), "claimed by the first ask");
+        let always = PruneClock::new(std::time::Duration::ZERO);
+        assert!(always.claim_if_due() && always.claim_if_due());
 
-        let clock = PruneClock::new();
+        let clock = PruneClock::new(PRUNE_EVERY);
         clock.mark();
-        assert!(!clock.due(every), "a startup load counts as a check");
+        assert!(!clock.claim_if_due(), "a startup load counts as a check");
     }
 
     /// Appenders and a rewriter running at once, as a dashboard and a
@@ -1073,6 +1180,11 @@ mod tests {
                     if rewrite_locked(&path, |t| Some(t.to_string())).is_ok() {
                         rewrites += 1;
                     }
+                    // flock isn't fair: without a pause the rewriter could
+                    // re-take the lock every time, an appender would give up
+                    // after LOCK_PATIENCE and append unlocked, and the test
+                    // would fail for a reason it isn't testing.
+                    std::thread::sleep(std::time::Duration::from_millis(1));
                 }
                 rewrites
             })
@@ -1135,6 +1247,97 @@ mod tests {
 
     /// While another holder has the file, a rewrite gives up with an error
     /// instead of writing unlocked — and once it lets go, it goes through.
+    /// An append doesn't wait forever on a held lock or drop its line: after
+    /// LOCK_PATIENCE it goes ahead without it.
+    #[test]
+    fn an_append_goes_ahead_when_the_lock_stays_busy() {
+        let dir = scratch("append-held");
+        let path = dir.join("history.jsonl");
+        let held = FileLock::acquire(&path).expect("free to start with");
+        append_locked(&path, "kept\n").expect("appends anyway");
+        drop(held);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept\n");
+    }
+
+    /// A lock that can't be taken for a reason other than a busy peer says
+    /// so at once, instead of waiting out LOCK_PATIENCE and blaming a peer.
+    #[test]
+    fn a_lock_error_is_the_real_error_and_immediate() {
+        let dir = scratch("lock-missing");
+        let started = std::time::Instant::now();
+        let Err(err) = FileLock::acquire(&dir.join("missing/sub/f")) else {
+            panic!("locked a file in a missing directory")
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(started.elapsed() < LOCK_PATIENCE / 2);
+
+        let path = dir.join("f");
+        let _held = FileLock::acquire(&path).unwrap();
+        let started = std::time::Instant::now();
+        let Err(err) = FileLock::acquire_now(&path) else {
+            panic!("took a held lock")
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(
+            started.elapsed() < LOCK_PATIENCE / 2,
+            "acquire_now never waits"
+        );
+    }
+
+    /// [x] on a speed test removes that one record and nothing else.
+    #[test]
+    fn forgetting_a_speed_test_removes_only_the_first_match() {
+        let rec = |at, down| SpeedRecord {
+            at,
+            provider: "Cloudflare".into(),
+            down_mbps: down,
+            up_mbps: 10.0,
+            idle_ms: None,
+            loaded_ms: None,
+            network: None,
+            medium: None,
+            server: None,
+        };
+        let line = |r: &SpeedRecord| serde_json::to_string(r).unwrap();
+        let text = [
+            line(&rec(1, 50.0)),
+            "not json".into(),
+            line(&rec(1, 50.0)),
+            line(&rec(1, 60.0)),
+        ]
+        .join("\n")
+            + "\n";
+        let out = without_record(&text, &rec(1, 50.0)).expect("one matched");
+        assert_eq!(
+            out,
+            [
+                "not json".to_string(),
+                line(&rec(1, 50.0)),
+                line(&rec(1, 60.0))
+            ]
+            .join("\n")
+                + "\n"
+        );
+        assert!(without_record(&text, &rec(2, 50.0)).is_none());
+        assert_eq!(
+            without_record(&(line(&rec(1, 50.0)) + "\n"), &rec(1, 50.0)).as_deref(),
+            Some("")
+        );
+    }
+
+    /// A trim keeps lines this version can't parse once they're past the cut:
+    /// a newer octomon beside it may have written them.
+    #[test]
+    fn a_net_history_trim_keeps_lines_it_cannot_parse() {
+        let cap = crate::app::NET_HISTORY_CAP;
+        let mut text: String = (0..(cap * 4) as i64).map(change).collect();
+        text.push_str("{\"from\":\"a newer octomon\"}\n");
+        text.push_str(&change((cap * 4) as i64));
+        let body = net_history_tail(&text).1.expect("past the slack");
+        assert!(body.contains("a newer octomon"));
+        assert_eq!(body.lines().count(), cap + 1);
+    }
+
     #[test]
     fn a_rewrite_never_runs_while_someone_else_holds_the_lock() {
         let dir = scratch("held");

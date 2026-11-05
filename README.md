@@ -280,7 +280,10 @@ On first run octomon writes a config file you can edit:
   (finished incidents per network, kept 90 days), `net_history.jsonl` (link,
   address, route and VPN changes), `whois.log` (every `W` lookup, trimmed to
   the most recent 8 MB), `errors.log`, and `octomon-<timestamp>.csv` recordings
-  while recording is on.
+  while recording is on. The empty `.<name>.lock` files beside them let a
+  dashboard and a `--watch` share the files; a `baselines.json` that stops
+  parsing is moved to `baselines.json.corrupt` (then `.corrupt.1` …) for
+  repair by hand.
 
 All of it describes your network, so octomon writes it owner-only — mode `0600`
 in `0700` directories, and files from older versions are tightened at startup.

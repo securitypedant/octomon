@@ -37,7 +37,10 @@ test("a good answer is served from the memo for the hour", async (t) => {
   const w = await freshWorker();
   const first = await h.stats(w);
   assert.equal(first.headers.get("cache-control"), "public, max-age=3600");
-  assert.equal((await first.json()).series.length, 1);
+  const body = await first.json();
+  assert.equal(body.series.length, 1);
+  assert.equal(body.stale, undefined, "a fresh answer isn't marked");
+  assert.ok(fetch.mock.calls[0].arguments[1].signal instanceof AbortSignal, "the query is bounded");
   h.advance(59 * 60 * 1000);
   await h.stats(w);
   assert.equal(fetch.mock.callCount(), 1);
@@ -93,7 +96,9 @@ test("a failure keeps the last good series, uncached, and retries after a minute
     reply = bad();
     const r = await h.stats(w);
     assert.equal(r.headers.get("cache-control"), "no-store");
-    assert.equal((await r.json()).series.length, 1, "last good series kept");
+    const body = await r.json();
+    assert.equal(body.series.length, 1, "last good series kept");
+    assert.equal(body.stale, true, "and marked as such");
     const calls = fetch.mock.callCount();
     h.advance(30 * 1000);
     await h.stats(w);
@@ -113,5 +118,22 @@ test("a thrown fetch is a failure, not a 500", async (t) => {
   });
   const r = await h.stats(await freshWorker());
   assert.equal(r.status, 200);
-  assert.deepEqual((await r.json()).series, []);
+  assert.deepEqual(await r.json(), { series: [], stale: true });
+});
+
+test("a slow refresh that settles after a newer one doesn't overwrite it", async (t) => {
+  const h = harness(t);
+  const pending = [];
+  t.mock.method(globalThis, "fetch", () => new Promise((r) => pending.push(r)));
+  const w = await freshWorker();
+  const slow = h.stats(w);
+  h.advance(11 * 1000);
+  const fast = h.stats(w);
+  pending[1](answer({ data: [row, row] }));
+  await fast;
+  pending[0](new Response("not json"));
+  await slow;
+  const r = await h.stats(w);
+  assert.equal((await r.json()).series.length, 2);
+  assert.equal(r.headers.get("cache-control"), "public, max-age=3600");
 });

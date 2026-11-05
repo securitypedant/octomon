@@ -251,6 +251,12 @@ fn drop_command_lines(v: &mut AppState) {
     }
 }
 
+/// A public address of either family (bare or CIDR).
+fn public_addr(cidr: &str) -> bool {
+    let ip = cidr.split('/').next().unwrap_or(cidr).trim();
+    ip.parse::<IpAddr>().is_ok_and(is_global)
+}
+
 /// A global-scope IPv6 (bare or CIDR): the kind that is public-facing.
 fn global_v6(cidr: &str) -> bool {
     let ip = cidr.split('/').next().unwrap_or(cidr).trim();
@@ -306,11 +312,12 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
     }
     // A split tunnel's own addresses live apart from the NIC's, and an
     // unidentified VPN's location label names one ("HomeNet via VPN 2601:…").
+    // A public v4 is as telling here as a public v6.
     v.netinfo.tunnel_addrs = v
         .netinfo
         .tunnel_addrs
         .iter()
-        .map(|a| if global_v6(a) { d.cidr(a) } else { a.clone() })
+        .map(|a| if public_addr(a) { d.cidr(a) } else { a.clone() })
         .collect();
 
     // Everything else is drawn as measured, with the mapping applied where
@@ -527,11 +534,16 @@ impl Disguise {
     fn ssid_or_text(&mut self, label: &str) -> String {
         // Split-tunnel locations read "HomeNet via Cloudflare WARP": the
         // network half identifies the place and gets disguised; the vendor
-        // half identifies software and stays — except a self-hosted tunnel's
-        // address ("WireGuard 2001:…"), which gets the same substitutions as
-        // that address anywhere else.
+        // half identifies software and stays — except a tunnel's address
+        // ("WireGuard 2001:…"), hidden when public. Stored locations carry
+        // addresses from other sessions that nothing else here has seen, so
+        // the address is disguised by what it is, not looked up.
         if let Some((net, vpn)) = label.split_once(" via ") {
-            return format!("{} via {}", self.ssid_or_text(net), self.text(vpn));
+            let vpn = match vpn.rsplit_once(' ') {
+                Some((name, addr)) if public_addr(addr) => format!("{name} {}", self.cidr(addr)),
+                _ => self.text(vpn),
+            };
+            return format!("{} via {vpn}", self.ssid_or_text(net));
         }
         if label.parse::<IpAddr>().is_ok() || self.subs.contains_key(label) {
             return self.text(label);
@@ -828,6 +840,41 @@ mod tests {
         let v = disguise(&s, &mut Disguise::new());
         let label = v.baseline.unwrap().label;
         assert!(label.starts_with("DemoNet via VPN 2001:db8:"), "{label}");
+
+        // A stored location from another session, and a speed test labelled
+        // with it: its address was never on an interface here, and is hidden
+        // anyway. A public v4 too.
+        s.netinfo.tunnel_addrs = Vec::new();
+        s.speed_history = vec![crate::store::SpeedRecord {
+            at: 1,
+            provider: "Cloudflare".into(),
+            down_mbps: 1.0,
+            up_mbps: 1.0,
+            idle_ms: None,
+            loaded_ms: None,
+            network: Some("192.168.10.1 via WireGuard 203.0.113.7".into()),
+            medium: None,
+            server: None,
+        }];
+        s.locations = Some(vec![(
+            "k".into(),
+            crate::baseline::Baseline {
+                label: "192.168.10.1 via WireGuard 2601:646:8f00:9999::7".into(),
+                ..Default::default()
+            },
+        )]);
+        let v = disguise(&s, &mut Disguise::new());
+        let stored = &v.locations.as_ref().unwrap()[0].1.label;
+        assert!(
+            stored.starts_with("192.168.10.1 via WireGuard 2001:db8:"),
+            "{stored}"
+        );
+        let tested = v.speed_history[0].network.as_deref().unwrap();
+        assert!(!tested.contains("203.0.113.7"), "{tested}");
+        assert!(
+            tested.starts_with("192.168.10.1 via WireGuard "),
+            "{tested}"
+        );
     }
 
     /// Whois is the point of asking about a server; about our own address

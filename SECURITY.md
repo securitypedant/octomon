@@ -45,10 +45,12 @@ it never writes through a symlink or re-permissions a file or directory root
 does not own, and it ignores an `[alert] command` from a `config.toml` root
 does not own (`--alert-cmd` on root's own command line still runs). Otherwise
 a link or a line planted in the user's home would have root act on it. And
-under `sudo` (`SUDO_UID` set, running as root) it gives what it creates in
-its own data and config directories back to the invoking user, along with
-any `~/.local/share`-style parent it had to create on the way, so a later
-unprivileged run can still read and append them. That is an `fchown` of the
+under `sudo` (`SUDO_UID` set, running as root) it gives what it creates or
+rewrites in its own data and config directories back to the invoking user,
+along with any `~/.local/share`-style parent it had to create on the way, and
+at startup repairs anything an earlier `sudo` run left root-owned there, so a
+later unprivileged run can still read and append them. A file it has to
+leave root-owned is recorded in `errors.log`. That is an `fchown` of the
 open descriptor, only for something root owns, never for a file with more
 than one hard link, and only after the descriptor itself (`F_GETPATH` on
 macOS, `/proc/self/fd` on Linux) places it under the invoking user's home as
@@ -78,11 +80,15 @@ and two endpoints: the container list and one-shot stats. A `tcp://` endpoint
 is never used, and `containers = false` in config.toml turns the whole thing
 off; on Linux the same figures come from `/proc` without the socket.
 
-**Local files.** octomon writes, under the XDG / `%APPDATA%` directories,
-`config.toml`, `speedtests.jsonl`, `baselines.json`, `history.jsonl`,
-`net_history.jsonl`, `whois.log`, `errors.log`, event exports and support
-bundles on request, and CSV recordings while recording is on (see
-[Configuration](README.md#configuration)). The baselines, history and
+**Local files.** octomon writes, under the XDG directories (`%APPDATA%` for
+config and `%LOCALAPPDATA%` for data on Windows), `config.toml`,
+`speedtests.jsonl`, `baselines.json`, `history.jsonl`, `net_history.jsonl`,
+`whois.log`, `errors.log`, event exports and support bundles on request, and
+CSV recordings while recording is on (see
+[Configuration](README.md#configuration)). Beside them are empty
+`.<name>.lock` files that let two octomon processes share the files, a
+short-lived `.<name>.tmp` during each rewrite, and `baselines.json.corrupt`
+(then `.corrupt.1` …) if a baselines file ever stops parsing. The baselines, history and
 recordings contain your SSID, gateway, addresses and process names. On unix,
 files are created owner-only (0600) in owner-only directories (0700), and a
 startup pass tightens anything an older version wrote under the umask; the

@@ -271,6 +271,13 @@ async fn main() -> Result<()> {
         .expect("install rustls crypto provider before any TLS use");
     use_utf8_console();
     let cli = Cli::parse();
+    // Every panic goes to errors.log, in every mode: a `--watch` under a
+    // service manager has no stderr anyone reads. It still prints as usual.
+    let print = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log_panic(info);
+        print(info);
+    }));
     // Everything octomon stores describes someone's network, so it is all
     // owner-only. New files are created that way; this catches the ones an
     // older version wrote under the umask. Before the first write, so the
@@ -528,7 +535,7 @@ async fn main() -> Result<()> {
         // that isn't usable yet — launched on hotel Wi-Fi before the portal is
         // signed in to — gets the same retries a start-then-join does.
         if !cli.check {
-            supervise("discovery", &state, {
+            supervise_once("discovery", &state, {
                 let (st, pc, cf) = (state.clone(), ping_clients.clone(), cfg.clone());
                 move || collectors::discovery::refresh(st.clone(), pc.clone(), cf.clone())
             });
@@ -773,34 +780,21 @@ async fn main() -> Result<()> {
     });
 
     // ratatui::init() enables raw mode + alt screen and installs a panic hook
-    // that restores the terminal, so a panic never leaves it wedged.
+    // that restores the terminal, then runs the logging hook above.
     let mut terminal = ratatui::init();
     // That hook restores the terminal on *any* panic, but a panic off the
     // UI's thread doesn't end the session — a supervised collector is
     // restarted, and the dashboard keeps drawing — so leaving the alternate
-    // screen then would wreck it. Only the UI's own thread restores the
-    // terminal. Every other panic goes to errors.log with its location,
-    // since printing it would land on the dashboard and not every task is
-    // supervised (ping loops, whois, traceroute, blocking work).
+    // screen then would wreck it, and printing would land on the dashboard.
+    // Only the UI's own thread restores and prints; every other panic is
+    // only logged.
     let restore_and_report = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let thread = std::thread::current();
-        if thread.name() == Some("main") {
+        if std::thread::current().name() == Some("main") {
             restore_and_report(info);
-            return;
+        } else {
+            log_panic(info);
         }
-        let at = info
-            .location()
-            .map(|l| format!(" at {}:{}", l.file(), l.line()))
-            .unwrap_or_default();
-        errlog::log(
-            "panic",
-            format!(
-                "{} panicked{at}: {}",
-                thread.name().unwrap_or("a task thread"),
-                panic_message(info.payload())
-            ),
-        );
     }));
     let ctx = Ctx {
         state,
@@ -817,6 +811,15 @@ async fn main() -> Result<()> {
     result
 }
 
+/// A change the user asked for didn't reach the disk: say so where they look.
+fn tell_unsaved(state: &Arc<Mutex<AppState>>, message: String) {
+    state.lock().notice_event(
+        verdict::Severity::Degraded,
+        app::EventCategory::Logging,
+        message,
+    );
+}
+
 /// How long a collector that panicked waits before it is started again: long
 /// enough that one failing on every pass cannot spin, short enough that its
 /// panel is back before anyone wonders why it froze.
@@ -825,13 +828,47 @@ const RESTART_DELAY: Duration = Duration::from_secs(5);
 /// Run a long-lived collector, starting it again whenever it panics. Without
 /// this a panic ended the task silently: its panel froze on its last reading
 /// and, for the analysis loop, a `--watch` stopped alerting with nothing said.
-/// A collector that returns on its own is done and is left alone.
+/// These run for the life of the process, so one that returns on its own is
+/// left alone but logged: its panel has stopped updating.
 fn supervise<F, Fut>(name: &'static str, state: &Arc<Mutex<AppState>>, start: F)
 where
     F: FnMut() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
-    supervise_with(name, state, RESTART_DELAY, start);
+    supervise_with(name, state, RESTART_DELAY, Finish::Unexpected, start);
+}
+
+/// [`supervise`] for a task that is meant to finish, such as one startup pass.
+fn supervise_once<F, Fut>(name: &'static str, state: &Arc<Mutex<AppState>>, start: F)
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    supervise_with(name, state, RESTART_DELAY, Finish::Expected, start);
+}
+
+/// Whether a supervised task returning on its own is news.
+#[derive(Clone, Copy, PartialEq)]
+enum Finish {
+    Expected,
+    Unexpected,
+}
+
+/// Record a panic in errors.log with its thread and location.
+fn log_panic(info: &std::panic::PanicHookInfo) {
+    let thread = std::thread::current();
+    let at = info
+        .location()
+        .map(|l| format!(" at {}:{}", l.file(), l.line()))
+        .unwrap_or_default();
+    errlog::log(
+        "panic",
+        format!(
+            "{} panicked{at}: {}",
+            thread.name().unwrap_or("a task thread"),
+            panic_message(info.payload())
+        ),
+    );
 }
 
 /// A panic's message: the payload of `panic!("…")` is a `&str` or a
@@ -848,6 +885,7 @@ fn supervise_with<F, Fut>(
     name: &'static str,
     state: &Arc<Mutex<AppState>>,
     delay: Duration,
+    finish: Finish,
     mut start: F,
 ) -> tokio::task::JoinHandle<()>
 where
@@ -868,6 +906,10 @@ where
                         message,
                     );
                     tokio::time::sleep(delay).await;
+                }
+                Ok(()) if finish == Finish::Unexpected => {
+                    errlog::log("supervisor", format!("{name} collector stopped on its own"));
+                    return;
                 }
                 _ => return,
             }
@@ -2872,23 +2914,47 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
             });
         }
         Side::ForgetLocation(key) => {
-            tokio::task::spawn_blocking(move || baseline::forget(&key));
+            let state = ctx.state.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = baseline::forget(&key) {
+                    tell_unsaved(&state, format!("couldn't forget the location: {e}"));
+                }
+            });
         }
         Side::TotalReset => {
             let state = ctx.state.clone();
             tokio::task::spawn_blocking(move || {
-                config::Config::erase();
-                store::erase();
-                state.lock().notice_event(
-                    verdict::Severity::Info,
-                    app::EventCategory::Logging,
-                    "TOTAL RESET — all config and stored data erased; restart octomon for a fully fresh start"
-                        .to_string(),
-                );
+                let failed: Vec<String> = [
+                    ("config", config::Config::erase()),
+                    ("stored data", store::erase()),
+                ]
+                .into_iter()
+                .filter_map(|(what, r)| r.err().map(|e| format!("{what}: {e}")))
+                .collect();
+                let (severity, message) = if failed.is_empty() {
+                    (
+                        verdict::Severity::Info,
+                        "TOTAL RESET — all config and stored data erased; restart octomon for a fully fresh start"
+                            .to_string(),
+                    )
+                } else {
+                    (
+                        verdict::Severity::Degraded,
+                        format!("TOTAL RESET incomplete — not erased: {}", failed.join("; ")),
+                    )
+                };
+                state
+                    .lock()
+                    .notice_event(severity, app::EventCategory::Logging, message);
             });
         }
         Side::NameNetwork { key, label, name } => {
-            tokio::task::spawn_blocking(move || baseline::name_network(&key, &label, &name));
+            let state = ctx.state.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = baseline::name_network(&key, &label, &name) {
+                    tell_unsaved(&state, format!("couldn't save the network's name: {e}"));
+                }
+            });
         }
         Side::LoadLocations => {
             let state = ctx.state.clone();
@@ -3856,12 +3922,18 @@ mod tests {
         let state = super::Arc::new(super::Mutex::new(super::AppState::new(vec![])));
         let runs = super::Arc::new(AtomicU32::new(0));
         let counter = runs.clone();
-        let supervisor = super::supervise_with("test", &state, super::Duration::ZERO, move || {
-            let n = counter.fetch_add(1, Ordering::SeqCst);
-            async move {
-                assert!(n >= 2, "deliberate crash {n}");
-            }
-        });
+        let supervisor = super::supervise_with(
+            "test",
+            &state,
+            super::Duration::ZERO,
+            super::Finish::Expected,
+            move || {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    assert!(n >= 2, "deliberate crash {n}");
+                }
+            },
+        );
         supervisor.await.expect("supervisor itself never panics");
         assert_eq!(runs.load(Ordering::SeqCst), 3);
         let s = state.lock();

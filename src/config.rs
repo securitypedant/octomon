@@ -566,9 +566,10 @@ impl Config {
     /// Delete the whole config directory — the config file and any exported
     /// event CSVs beside it. The total-reset path; best-effort like every
     /// other persistence call, because a half-failed erase must not crash.
-    pub fn erase() {
-        if let Some(dir) = Self::dir() {
-            let _ = std::fs::remove_dir_all(dir);
+    pub fn erase() -> std::io::Result<()> {
+        match Self::dir().map(std::fs::remove_dir_all) {
+            Some(Err(e)) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
         }
     }
 

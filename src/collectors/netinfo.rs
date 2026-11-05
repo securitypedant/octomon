@@ -19,7 +19,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
     // — for the tunnel carrying the traffic and for any sitting beside it.
     // Keyed on the device *and* its addresses: macOS hands a freed utunN to
     // whichever VPN connects next, and a name-only key kept the old vendor.
-    let mut vendor_cache: HashMap<String, (TunnelAddrs, String)> = HashMap::new();
+    let mut vendor_cache: HashMap<String, (TunnelAddrs, Option<&'static str>)> = HashMap::new();
     // The DHCP server behind the current lease barely ever changes, so it is
     // asked for once per attachment (a lease-file read or one-line shell-out)
     // and cached — keyed on interface + gateway, which is what a new
@@ -173,35 +173,46 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
             let mut devices: Vec<String> = bypassed.clone();
             if info.tunnel.is_some() {
                 devices.push(info.tunnel_iface.clone());
-                let addrs = tunnel_addrs(&ifaces, &info.tunnel_iface);
-                info.tunnel_addrs = addrs
-                    .v4
-                    .iter()
-                    .map(|a| a.to_string())
-                    .chain(addrs.v6.iter().map(|a| a.to_string()))
-                    .collect();
             }
             for dev in &devices {
                 let addrs = tunnel_addrs(&ifaces, dev);
+                if *dev == info.tunnel_iface && info.tunnel.is_some() {
+                    info.tunnel_addrs = addrs
+                        .v4
+                        .iter()
+                        .map(|a| a.to_string())
+                        .chain(addrs.v6.iter().map(|a| a.to_string()))
+                        .collect();
+                }
                 if vendor_cache.get(dev).is_none_or(|(had, _)| *had != addrs) {
                     let key = addrs.clone();
-                    let v = tokio::task::spawn_blocking(move || tunnel_vendor(&key))
-                        .await
-                        .unwrap_or_default();
-                    vendor_cache.insert(dev.clone(), (addrs, v));
+                    // A lookup that panicked isn't cached as "unnamed": the
+                    // next pass asks again.
+                    match tokio::task::spawn_blocking(move || tunnel_vendor(&key)).await {
+                        Ok(v) => {
+                            vendor_cache.insert(dev.clone(), (addrs, v));
+                        }
+                        Err(_) => {
+                            vendor_cache.remove(dev);
+                        }
+                    }
                 }
             }
             vendor_cache.retain(|dev, _| devices.contains(dev));
+            let vendor_of = |dev: &str| {
+                vendor_cache
+                    .get(dev)
+                    .and_then(|(_, v)| *v)
+                    .unwrap_or_default()
+                    .to_string()
+            };
             if info.tunnel.is_some() {
-                info.tunnel = vendor_cache.get(&info.tunnel_iface).map(|(_, v)| v.clone());
+                info.tunnel = Some(vendor_of(&info.tunnel_iface));
             }
             info.bypassed_tunnels = bypassed
                 .into_iter()
                 .map(|iface| BypassedTunnel {
-                    vendor: vendor_cache
-                        .get(&iface)
-                        .map(|(_, v)| v.clone())
-                        .unwrap_or_default(),
+                    vendor: vendor_of(&iface),
                     iface,
                 })
                 .collect();
@@ -1004,10 +1015,11 @@ fn tunnel_addrs(ifaces: &[netdev::Interface], iface_name: &str) -> TunnelAddrs {
         .unwrap_or_default()
 }
 
-/// Identify the VPN carrying a tunnel. Returns an empty string when nothing
-/// can be pinned down — the tunnel is still reported, just unnamed, which beats
-/// naming the wrong one.
-fn tunnel_vendor(t: &TunnelAddrs) -> String {
+/// Identify the VPN carrying a tunnel. `None` when nothing can be pinned
+/// down — the tunnel is still reported, just unnamed, which beats naming the
+/// wrong one. Cached on the addresses, so a client started after its tunnel
+/// came up doesn't rename it until the addresses change.
+fn tunnel_vendor(t: &TunnelAddrs) -> Option<&'static str> {
     // The live tunnel's own addresses are the first signal.
     let by_addr = vendor_match(&t.v4, &t.v6);
 
@@ -1029,8 +1041,6 @@ fn tunnel_vendor(t: &TunnelAddrs) -> String {
         }
     }
     name_tunnel(by_addr, &running, t.kernel_wireguard)
-        .unwrap_or_default()
-        .to_string()
 }
 
 /// The vendor whose address block a tunnel's address falls in, with how far
@@ -1055,20 +1065,25 @@ fn vendor_match(v4: &[Ipv4Addr], v6: &[Ipv6Addr]) -> Option<(&'static str, AddrM
 }
 
 /// Name a tunnel from its address match and the running clients. A kernel
-/// WireGuard device (NetworkManager's, wg-quick's) has no process of its
-/// own, so a client resident for some other reason must not lend it a name:
-/// it is named by a confirmed address match (Mullvad's wg0-mullvad, with
-/// Mullvad running), and is otherwise plain WireGuard.
+/// WireGuard device (NetworkManager's, wg-quick's, NetBird's) has no process
+/// of its own, so neither a client resident for some other reason nor a
+/// shared-space address on its own names it: it takes a vendor's name only
+/// from that vendor's own block (Mullvad's v6), or from a shared or private
+/// match with that vendor's client running (wg0-mullvad on 10.64.x), and is
+/// otherwise plain WireGuard.
 fn name_tunnel(
     by_addr: Option<(&'static str, AddrMatch)>,
     running: &std::collections::BTreeSet<&'static str>,
     kernel_wireguard: bool,
 ) -> Option<&'static str> {
-    let picked = pick_vendor(by_addr, running);
-    if kernel_wireguard && picked.is_none_or(|v| by_addr.is_none_or(|(a, _)| a != v)) {
-        return Some("WireGuard");
+    if kernel_wireguard {
+        return Some(match by_addr {
+            Some((vendor, AddrMatch::Own)) => vendor,
+            Some((vendor, _)) if running.contains(vendor) => vendor,
+            _ => "WireGuard",
+        });
     }
-    picked
+    pick_vendor(by_addr, running)
 }
 
 /// How far an address match on a tunnel can be trusted on its own.
@@ -1115,7 +1130,7 @@ fn pick_vendor(
         Some((vendor, AddrMatch::Own)) => Some(vendor),
         Some((vendor, _)) if running.contains(vendor) => Some(vendor),
         Some((vendor, AddrMatch::Shared)) => sole.or(Some(vendor)),
-        _ => sole,
+        Some((_, AddrMatch::Private)) | None => sole,
     }
 }
 
@@ -1154,6 +1169,34 @@ mod tests {
             None
         );
         assert_eq!(kernel_tunnel_from(None, "", false), None);
+        // Every point-to-point and IP-in-IP type, by its ARPHRD number:
+        // PPP, IPIP (TUNNEL), IP6IP6 (TUNNEL6), SIT, GRE, IP6GRE.
+        for arphrd in [512, 768, 769, 776, 778, 823] {
+            assert_eq!(
+                kernel_tunnel_from(Some(arphrd), "", false),
+                Some(KernelTunnel::Other),
+                "ARPHRD {arphrd}"
+            );
+        }
+        // Loopback and IEEE 802.11 radiotap are not tunnels.
+        for arphrd in [772, 803] {
+            assert_eq!(
+                kernel_tunnel_from(Some(arphrd), "", false),
+                None,
+                "ARPHRD {arphrd}"
+            );
+        }
+    }
+
+    /// A device name is only ever joined under /sys/class/net, never used to
+    /// climb out of it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_device_name_cannot_leave_sysfs() {
+        use super::kernel_tunnel;
+        for name in ["", "../../../etc", ".", "..", "a/b"] {
+            assert_eq!(kernel_tunnel(name), None, "{name:?}");
+        }
     }
 
     /// Zscaler ZPA puts 100.64.0.1 on its utun, inside Tailscale's range.
@@ -1229,7 +1272,20 @@ mod tests {
             name_tunnel(mullvad_addr, &tailscale, true),
             Some("WireGuard")
         );
+        // A shared-space (CGNAT) address alone doesn't make a kernel
+        // WireGuard device Tailscale or WARP: NetBird's wt0, or any
+        // wg-quick config on 100.64/10. Tailscale's own Linux device is tun.
+        let tailscale_addr = Some(("Tailscale", AddrMatch::Shared));
+        assert_eq!(name_tunnel(tailscale_addr, &none, true), Some("WireGuard"));
+        assert_eq!(
+            name_tunnel(tailscale_addr, &tailscale, true),
+            Some("Tailscale")
+        );
+        // A vendor's own block names it outright.
+        let mullvad_v6 = Some(("Mullvad", AddrMatch::Own));
+        assert_eq!(name_tunnel(mullvad_v6, &none, true), Some("Mullvad"));
         // Not a kernel WireGuard device: unchanged.
+        assert_eq!(name_tunnel(tailscale_addr, &none, false), Some("Tailscale"));
         assert_eq!(name_tunnel(None, &tailscale, false), Some("Tailscale"));
         assert_eq!(name_tunnel(None, &none, false), None);
     }

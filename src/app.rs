@@ -3031,6 +3031,9 @@ pub struct AppState {
     pub baseline: Option<crate::baseline::Baseline>,
     /// Fingerprint key of the current network, for persisting the baseline.
     pub baseline_key: Option<String>,
+    /// The stored baselines couldn't be read when this network was loaded:
+    /// `baseline` is learned in memory and never saved.
+    pub baseline_unsaved: bool,
     /// Show the first-run explainer once the startup notice is dismissed.
     pub explainer_pending: bool,
     /// The startup version check found a newer release while another modal
@@ -3247,6 +3250,7 @@ impl AppState {
             link_lost: false,
             baseline: None,
             baseline_key: None,
+            baseline_unsaved: false,
             explainer_pending: false,
             update_pending: false,
             locations: None,

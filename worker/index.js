@@ -116,8 +116,11 @@ async function edgeAnswer(request, url, env, ctx) {
 // I/O to the request that started it, and a promise shared across requests
 // can be left unsettled for good if its owner is cancelled. The refresh is
 // bounded by a timeout and kept alive with waitUntil, so a client that
-// disconnects mid-query can't wedge the memo either. The memo holds only
-// the aggregate every caller gets anyway — nothing about who asked.
+// disconnects mid-query can't wedge the memo either. A refresh that settles
+// after a newer one has landed is dropped. An answer that isn't a fresh
+// good series says so with `stale: true`, so the page can tell "failing"
+// from "no data yet". The memo holds only the aggregate every caller gets
+// anyway — nothing about who asked.
 const STATS_TTL_MS = 60 * 60 * 1000;
 const STATS_FAIL_TTL_MS = 60 * 1000;
 const STATS_QUERY_TIMEOUT_MS = 10 * 1000;
@@ -125,6 +128,8 @@ let statsMemo = { series: [], ok: false, at: 0 };
 // When the running refresh started, 0 when none is. Stale after the timeout,
 // so a refresh that never reports back only delays the next one.
 let statsRefreshing = 0;
+// When the refresh whose answer is in the memo started.
+let statsFrom = 0;
 
 async function queryEdgeStats(env) {
   const sql = `
@@ -181,15 +186,20 @@ async function edgeStats(env, ctx) {
   const ttl = statsMemo.ok ? STATS_TTL_MS : STATS_FAIL_TTL_MS;
   if (now - statsMemo.at >= ttl && now - statsRefreshing >= STATS_QUERY_TIMEOUT_MS) {
     statsRefreshing = now;
+    const started = now;
     const refresh = queryEdgeStats(env).then((m) => {
-      statsMemo = m.ok ? m : { ...m, series: statsMemo.series };
-      statsRefreshing = 0;
+      if (started >= statsFrom) {
+        statsMemo = m.ok ? m : { ...m, series: statsMemo.series };
+        statsFrom = started;
+      }
+      if (statsRefreshing === started) statsRefreshing = 0;
     });
     ctx.waitUntil(refresh);
     await refresh;
   }
   const fresh = statsMemo.ok && Date.now() - statsMemo.at < STATS_TTL_MS;
-  return new Response(JSON.stringify({ series: statsMemo.series }) + "\n", {
+  const body = fresh ? { series: statsMemo.series } : { series: statsMemo.series, stale: true };
+  return new Response(JSON.stringify(body) + "\n", {
     headers: {
       "content-type": "application/json; charset=utf-8",
       // For browsers only (see above). A stale or failed series must not be

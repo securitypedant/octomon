@@ -89,7 +89,7 @@ fn path() -> Option<PathBuf> {
 }
 
 /// When history.jsonl was last checked for expired episodes.
-static PRUNED: crate::store::PruneClock = crate::store::PruneClock::new();
+static PRUNED: crate::store::PruneClock = crate::store::PruneClock::new(crate::store::PRUNE_EVERY);
 
 /// Append one finished episode (best-effort; ignored on error, logged so a
 /// gap in the incident history has an explanation). Every
@@ -117,19 +117,20 @@ pub fn append(ep: &Episode) {
         );
         return;
     }
-    if PRUNED.due(crate::store::PRUNE_EVERY) {
+    if PRUNED.claim_if_due() {
         prune(&p);
     }
 }
 
 /// Every retained episode, oldest first. Lines that fail to parse are
-/// skipped; episodes older than the retention window are dropped and, when
-/// any were, the file is rewritten without them.
+/// skipped here and kept on disk; episodes older than the retention window
+/// are dropped and, when any were, the file is rewritten without them. An
+/// unreadable file is logged and shows as empty.
 pub fn load() -> Vec<Episode> {
     let Some(p) = path() else {
         return Vec::new();
     };
-    let Ok(text) = std::fs::read_to_string(&p) else {
+    let Some(text) = crate::store::read_logged(&p, "history") else {
         return Vec::new();
     };
     PRUNED.mark();
@@ -148,7 +149,7 @@ fn cutoff() -> i64 {
     chrono::Utc::now().timestamp() - RETAIN_DAYS * 86_400
 }
 
-/// Drop expired episodes from the file, under the store lock and from a
+/// Drop expired episodes from the file, under its file lock and from a
 /// fresh read.
 fn prune(p: &std::path::Path) {
     let cutoff = cutoff();
@@ -160,20 +161,23 @@ fn prune(p: &std::path::Path) {
 /// The episodes in `text` that started at or after `cutoff`, plus — only when
 /// any were dropped — the body to rewrite the file with. A file with nothing
 /// expired is left alone, so the periodic check costs a read, not a write.
+/// The rewrite keeps the file's own lines, including any this version can't
+/// parse: a newer octomon beside this one may have written them.
 fn retained(text: &str, cutoff: i64) -> (Vec<Episode>, Option<String>) {
-    let all: Vec<Episode> = text
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    let total = all.len();
-    let kept: Vec<Episode> = all.into_iter().filter(|e| e.at >= cutoff).collect();
-    let rewrite = (kept.len() != total).then(|| {
-        kept.iter()
-            .filter_map(|e| serde_json::to_string(e).ok())
-            .map(|l| l + "\n")
-            .collect()
-    });
-    (kept, rewrite)
+    let mut kept = Vec::new();
+    let mut body = String::new();
+    let mut dropped = false;
+    for line in text.lines() {
+        match serde_json::from_str::<Episode>(line) {
+            Ok(e) if e.at < cutoff => dropped = true,
+            parsed => {
+                kept.extend(parsed.ok());
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+    }
+    (kept, dropped.then_some(body))
 }
 
 /// Something worth saying about one network's recent history.
@@ -389,16 +393,20 @@ mod tests {
         assert_eq!(kept.len(), 2);
         assert!(rewrite.is_none());
 
-        // One expired: it goes, the rest is the new body.
+        // One expired: it goes, the rest is the new body — including the
+        // line this version can't parse, which a newer one may have written.
         let (kept, rewrite) = retained(&text, 200);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].at, 300);
-        assert_eq!(rewrite.as_deref(), Some(line(&new).as_str()));
+        assert_eq!(
+            rewrite.as_deref(),
+            Some(format!("not json\n{}", line(&new)).as_str())
+        );
 
-        // All expired: an empty file, not a skipped rewrite.
+        // All expired: only the unparseable line is left, not a skipped rewrite.
         let (kept, rewrite) = retained(&text, 1_000);
         assert!(kept.is_empty());
-        assert_eq!(rewrite.as_deref(), Some(""));
+        assert_eq!(rewrite.as_deref(), Some("not json\n"));
     }
 
     #[test]

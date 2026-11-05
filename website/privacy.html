@@ -350,11 +350,18 @@
   const legend = document.getElementById("edge-legend");
   const colors = ["#3FCF5C", "#B249B9", "#E8B03A", "#E0524D", "#8A96A4"];
   let series = [];
+  let stale = false;
   try {
     const resp = await fetch("/edge/stats");
-    series = (await resp.json()).series ?? [];
+    const body = await resp.json();
+    series = body.series ?? [];
+    stale = body.stale === true;
   } catch {
     note.textContent = "the stats endpoint isn't answering right now; try again later.";
+    return;
+  }
+  if (stale && !series.length) {
+    note.textContent = "the stats query is failing right now; try again later.";
     return;
   }
   if (!series.length) {
@@ -457,7 +464,8 @@
   legend.innerHTML = versions
     .map((v, vi) => `<span class="key"><span class="swatch" style="background:${colors[vi % colors.length]}"></span>octomon ${v}</span>`)
     .join("") + (estPeak > 0 ? '<span class="key"><span class="swatch" style="background:#F4F7FA"></span>octomon running (h/day)</span>' : "");
-  note.textContent = "updated hourly · day buckets · version, reason and count only, by design, so nobody can be traced through it."
+  note.textContent = (stale ? "the latest stats query failed, so this is the last good answer · " : "") +
+    "updated hourly · day buckets · version, reason and count only, by design, so nobody can be traced through it."
     + (estPeak > 0 ? "" : " · the running-hours line appears once 0.8.2+ clients start reporting call reasons.");
 })();
 </script>
