@@ -241,9 +241,13 @@ async fn full_names() -> HashMap<u32, String> {
     tokio::task::spawn_blocking(|| {
         // Names only: the default refresh also reads command lines, environment
         // and disk usage for every process, which is a lot of work every 2s.
-        let mut sys = System::new_with_specifics(
+        // Fallible as of sysinfo 0.40; with no table the rows go unlabelled,
+        // which is what a miss already meant here.
+        let Ok(mut sys) = System::new_with_specifics(
             RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
-        );
+        ) else {
+            return HashMap::new();
+        };
         sys.refresh_processes(ProcessesToUpdate::All, true);
         sys.processes()
             .iter()
