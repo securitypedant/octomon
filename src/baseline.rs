@@ -896,6 +896,19 @@ mod tests {
         renumbered.tunnel_iface = "utun7".into();
         assert_eq!(home_warp.0, fingerprint(&renumbered).unwrap().0);
 
+        // Deliberately unlike a full tunnel: two split WireGuard configs on
+        // one LAN are one location. Internet traffic doesn't go through a
+        // split tunnel, so the normal being learned is the LAN's.
+        let split_wg = |addr: &str| {
+            let mut n = with_warp("HomeNet", "aa:bb:cc:dd:ee:ff");
+            n.tunnel = Some("WireGuard".into());
+            n.tunnel_addrs = vec![addr.into()];
+            n
+        };
+        let (a, b) = (split_wg("10.9.8.10"), split_wg("10.7.0.2"));
+        assert_eq!(fingerprint(&a).unwrap(), fingerprint(&b).unwrap());
+        assert_eq!(fingerprint(&a).unwrap().1, "HomeNet via WireGuard");
+
         // An unidentified split tunnel still separates from the bare LAN,
         // and keys on the tunnel's own address — not the physical NIC's
         // (`ipv4` here) and not the renumbering device name.
@@ -1194,12 +1207,10 @@ mod tests {
         let p = dir.join("baselines.json");
 
         let held = crate::store::FileLock::acquire(&p).expect("free to start with");
-        assert!(
-            update_at(&p, |all| {
-                all.insert("blocked".into(), Baseline::default());
-            })
-            .is_err()
-        );
+        let busy = update_at(&p, |all| {
+            all.insert("blocked".into(), Baseline::default());
+        });
+        assert_eq!(busy.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
         assert!(!p.exists(), "wrote without the lock");
         drop(held);
 
