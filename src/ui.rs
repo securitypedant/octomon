@@ -8895,18 +8895,16 @@ mod tests {
         // Cores are numbered from 1 for display; index 2 is core 3.
         assert!(out.contains("core 3 88%"));
         assert!(out.contains("68% used"), "pressure, not used/total");
-        // Windows has no load-average concept and sysinfo reports zeros there,
-        // so the row is suppressed rather than rendered as a measured idle.
-        if cfg!(windows) {
-            assert!(
-                !out.contains("load "),
-                "Windows has no load average to show"
-            );
-        } else {
-            assert!(out.contains("2.80 2.90 2.90"));
-        }
+        assert!(out.contains("2.80 2.90 2.90"));
         assert!(out.contains("CPU limited to 70%"));
         assert!(out.contains("Battery Power"));
+
+        // A platform with no load-average concept (Windows) reports none, and
+        // the row is left out rather than rendered as a measured idle machine.
+        s.vitals.load = None;
+        let out = draw(&s, 120, 30);
+        assert!(!out.contains("load "), "no load average to show");
+        assert!(out.contains("68% used"), "the rest of the panel stays");
 
         // Per-core detail is full-screen only; the split view stays a summary.
         assert!(!out.contains("per-core"));
