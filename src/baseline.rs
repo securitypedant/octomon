@@ -413,35 +413,36 @@ fn load_from(p: &std::path::Path) -> Store {
 
 /// The stored baselines. Only a missing file is an empty store: one that
 /// exists but can't be read (permissions, I/O) is an error, so a save never
-/// writes a one-network store over every network it couldn't see.
+/// writes a one-network store over every network it couldn't see. One that
+/// doesn't parse is moved aside and read as empty; if it can't be moved, it is
+/// still somebody's history, so that is an error too.
 fn read_store(p: &std::path::Path) -> std::io::Result<Store> {
     let text = match std::fs::read_to_string(p) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Store::new()),
         Err(e) => return Err(e),
     };
-    Ok(match serde_json::from_str(&text) {
-        Ok(store) => store,
+    match serde_json::from_str(&text) {
+        Ok(store) => Ok(store),
         Err(e) => {
             let aside = p.with_extension("json.corrupt");
-            let moved = std::fs::rename(p, &aside);
+            if let Err(m) = std::fs::rename(p, &aside) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("did not parse ({e}) and could not be moved aside ({m})"),
+                ));
+            }
             crate::errlog::log(
                 "baseline",
-                match moved {
-                    Ok(()) => format!(
-                        "{} did not parse: {e} — moved to {} and starting over",
-                        p.display(),
-                        aside.display()
-                    ),
-                    Err(m) => format!(
-                        "{} did not parse: {e} — could not move it aside ({m}); learned networks not saved",
-                        p.display()
-                    ),
-                },
+                format!(
+                    "{} did not parse: {e} — moved to {} and starting over",
+                    p.display(),
+                    aside.display()
+                ),
             );
-            Store::new()
+            Ok(Store::new())
         }
-    })
+    }
 }
 
 /// Change the stored baselines in place: load, `edit`, save, all under the
@@ -463,7 +464,8 @@ fn update(edit: impl FnOnce(&mut Store)) {
     }
 }
 
-/// Nothing is written when the lock can't be had or the file can't be read.
+/// `Ok` means the edited store is on disk. Nothing is written when the lock
+/// can't be had or the file can't be read.
 fn update_at(p: &std::path::Path, edit: impl FnOnce(&mut Store)) -> std::io::Result<()> {
     if let Some(dir) = p.parent() {
         let _ = crate::store::create_dir_private(dir);
@@ -471,43 +473,15 @@ fn update_at(p: &std::path::Path, edit: impl FnOnce(&mut Store)) -> std::io::Res
     let _held = crate::store::FileLock::acquire(p)?;
     let mut all = read_store(p)?;
     edit(&mut all);
-    save_to(p, &all);
-    Ok(())
+    save_to(p, &all)
 }
 
-/// Best-effort whole-file rewrite — a handful of networks × ~200 bytes.
-/// A failure here means every learned normal is lost at exit, which shows up
-/// much later as "it forgot my networks", so it goes on the record. Only
-/// [`update_at`] calls this, with the file's lock held.
-fn save_to(p: &std::path::Path, store: &Store) {
-    // If `load` could not move a corrupt file aside, it is still there and
-    // still somebody's history: do not write over it.
-    if let Ok(text) = std::fs::read_to_string(p)
-        && serde_json::from_str::<Store>(&text).is_err()
-    {
-        crate::errlog::log(
-            "baseline",
-            format!(
-                "{} is unreadable and still in place — not overwriting it",
-                p.display()
-            ),
-        );
-        return;
-    }
-    match serde_json::to_string_pretty(store) {
-        Ok(json) => {
-            if let Err(e) = crate::store::write_private(p, json) {
-                crate::errlog::log(
-                    "baseline",
-                    format!(
-                        "could not write {}: {e} — learned networks not saved",
-                        p.display()
-                    ),
-                );
-            }
-        }
-        Err(e) => crate::errlog::log("baseline", format!("not serializable: {e}")),
-    }
+/// Whole-file rewrite — a handful of networks × ~200 bytes. Only
+/// [`update_at`] calls this, with the file's lock held and the file just read,
+/// so there is nothing on disk it could write over unseen.
+fn save_to(p: &std::path::Path, store: &Store) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(store).map_err(std::io::Error::other)?;
+    crate::store::write_private(p, json)
 }
 
 /// Load one network's baseline (blocking file read — call off the lock).
@@ -1035,6 +1009,53 @@ mod tests {
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(r.is_err());
         assert_eq!(load_from(&p).len(), 2, "both stored networks survive");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A store directory where `blocked` is taken by a non-empty directory,
+    /// so nothing can be moved or written to that name, even as root.
+    fn store_with_blocked(
+        tag: &str,
+        contents: &str,
+        blocked: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("octomon-baseline-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(blocked).join("x")).unwrap();
+        let p = dir.join("baselines.json");
+        std::fs::write(&p, contents).unwrap();
+        (dir, p)
+    }
+
+    /// A corrupt store that can't be moved aside is an error, and left as is.
+    #[test]
+    fn a_corrupt_store_that_cannot_be_moved_aside_is_an_error() {
+        let (dir, p) = store_with_blocked("stuck", "{ not json", "baselines.json.corrupt");
+        let r = update_at(&p, |all| {
+            all.insert("hotel".into(), Baseline::default());
+        });
+        assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "{ not json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A save that can't be written is reported, not taken for success.
+    #[test]
+    fn a_save_that_cannot_be_written_is_an_error() {
+        let one: Store = [("home".to_string(), Baseline::default())]
+            .into_iter()
+            .collect();
+        let (dir, p) = store_with_blocked(
+            "unwritable",
+            &serde_json::to_string(&one).unwrap(),
+            ".baselines.json.tmp",
+        );
+        let r = update_at(&p, |all| {
+            all.insert("hotel".into(), Baseline::default());
+        });
+        assert!(r.is_err());
+        assert_eq!(load_from(&p).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
