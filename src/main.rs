@@ -2699,7 +2699,9 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
             tokio::task::spawn_blocking(move || {
                 use chrono::TimeZone;
                 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-                let mut sys = System::new();
+                let Ok(mut sys) = System::new() else {
+                    return;
+                };
                 sys.refresh_processes_specifics(
                     ProcessesToUpdate::All,
                     true,
@@ -2708,13 +2710,14 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         .with_cmd(UpdateKind::Always)
                         .with_user(UpdateKind::Always),
                 );
-                let users = sysinfo::Users::new_with_refreshed_list();
+                // Without the user table the rows simply show no owner.
+                let users = sysinfo::Users::new_with_refreshed_list().ok();
                 let mut map = std::collections::HashMap::new();
                 for pid in pids {
                     if let Some(p) = sys.process(sysinfo::Pid::from_u32(pid)) {
                         let user = p
                             .user_id()
-                            .and_then(|uid| users.get_user_by_id(uid))
+                            .and_then(|uid| users.as_ref()?.get_user_by_id(uid))
                             .map(|u| u.name().to_string())
                             .unwrap_or_default();
                         // "name (pid)"; empty if the parent itself has exited.
@@ -3310,13 +3313,11 @@ fn snapshot_text(s: &AppState) -> String {
         v.mem_total / 1_048_576,
         v.mem_pressure_pct
     );
-    // Windows has no load average and sysinfo reports zeros, which read as a
-    // permanently idle machine rather than an absent measurement. Matches what
-    // the dashboard does with the same figures.
-    let load = if cfg!(windows) {
-        String::new()
-    } else {
-        format!("load={:.2} {:.2} {:.2} ", v.load.0, v.load.1, v.load.2)
+    // Windows has no load average, so the line carries no figure rather than
+    // a permanently idle machine. Matches what the dashboard does.
+    let load = match v.load {
+        Some((l1, l5, l15)) => format!("load={l1:.2} {l5:.2} {l15:.2} "),
+        None => String::new(),
     };
     println!(
         "  {load}over {} cores  swap={}/{} MiB",

@@ -6370,14 +6370,11 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
 
     // Load average, plus swap — swap activity is what actually correlates with
     // "everything feels slow".
-    let (l1, l5, l15) = v.load;
     let cores = v.core_count().max(1) as f64;
-    // Windows has no load-average concept and sysinfo reports zeros for it,
-    // which would render as a measured, permanently idle machine rather than as
-    // a figure the platform does not have. Swap still means something there.
-    let mut load_spans = if cfg!(windows) {
-        Vec::new()
-    } else {
+    // Windows has no load-average concept, so there is no figure to show
+    // rather than a measured, permanently idle machine. Swap still means
+    // something there.
+    let mut load_spans = if let Some((l1, l5, l15)) = v.load {
         vec![
             Span::styled("load ", Style::new().fg(theme::dim())),
             Span::styled(
@@ -6392,6 +6389,8 @@ fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
                 }),
             ),
         ]
+    } else {
+        Vec::new()
     };
     if v.swap_used > 0 {
         // Only separated from the load figures when there are any.
@@ -8886,7 +8885,7 @@ mod tests {
         s.vitals.cores = vec![12.0, 4.0, 88.0, 3.0];
         s.vitals.mem_total = 24 * 1024 * 1024 * 1024;
         s.vitals.mem_pressure_pct = 68.0;
-        s.vitals.load = (2.8, 2.9, 2.9);
+        s.vitals.load = Some((2.8, 2.9, 2.9));
         s.vitals.thermal = "CPU limited to 70%".into();
         s.vitals.throttled = true;
         s.vitals.power_source = "Battery Power".into();
@@ -8896,18 +8895,16 @@ mod tests {
         // Cores are numbered from 1 for display; index 2 is core 3.
         assert!(out.contains("core 3 88%"));
         assert!(out.contains("68% used"), "pressure, not used/total");
-        // Windows has no load-average concept and sysinfo reports zeros there,
-        // so the row is suppressed rather than rendered as a measured idle.
-        if cfg!(windows) {
-            assert!(
-                !out.contains("load "),
-                "Windows has no load average to show"
-            );
-        } else {
-            assert!(out.contains("2.80 2.90 2.90"));
-        }
+        assert!(out.contains("2.80 2.90 2.90"));
         assert!(out.contains("CPU limited to 70%"));
         assert!(out.contains("Battery Power"));
+
+        // A platform with no load-average concept (Windows) reports none, and
+        // the row is left out rather than rendered as a measured idle machine.
+        s.vitals.load = None;
+        let out = draw(&s, 120, 30);
+        assert!(!out.contains("load "), "no load average to show");
+        assert!(out.contains("68% used"), "the rest of the panel stays");
 
         // Per-core detail is full-screen only; the split view stays a summary.
         assert!(!out.contains("per-core"));
