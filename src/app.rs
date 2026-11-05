@@ -1588,8 +1588,9 @@ pub struct Vitals {
     /// Per-core usage in core order. A single pegged core stalls a network path
     /// while the global average looks idle, so the detail earns its space.
     pub cores: Vec<f32>,
-    /// 1 / 5 / 15-minute load average.
-    pub load: (f64, f64, f64),
+    /// 1 / 5 / 15-minute load average. `None` where the platform has no such
+    /// figure (Windows), as distinct from a measured idle machine.
+    pub load: Option<(f64, f64, f64)>,
     /// Share of RAM that is *unavailable*, 0..100. On macOS "used" sits near
     /// total because of caching, so used/total reads alarming and means little;
     /// what is available is the number that tracks feeling slow.

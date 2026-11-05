@@ -10,7 +10,15 @@ use crate::app::AppState;
 use crate::config::Config;
 
 pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
-    let mut networks = Networks::new_with_refreshed_list();
+    // sysinfo 0.40 made this fallible. With no counters there is nothing to
+    // graph; the log says why the bandwidth panel stayed empty.
+    let mut networks = match Networks::new_with_refreshed_list() {
+        Ok(n) => n,
+        Err(e) => {
+            crate::errlog::log("throughput", format!("interface counters unavailable: {e}"));
+            return;
+        }
+    };
 
     let mut ticker = tokio::time::interval(cfg.sample_interval());
     ticker.tick().await; // consume the immediate first tick (baseline)
@@ -56,7 +64,13 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         // of that sum, because a VPN's bytes also cross the adapter under
         // it and would be counted twice (issue #19). Each step down is
         // logged once so it can be seen and fixed.
-        let find = |n: &String| networks.iter().find(|(name, _)| *name == n);
+        // Interface names are OsStrings as of sysinfo 0.40; the ones here
+        // are compared against names netinfo already holds as Strings.
+        let find = |n: &String| {
+            networks
+                .iter()
+                .find(|(name, _)| name.to_string_lossy() == n.as_str())
+        };
         let matched = want
             .as_ref()
             .and_then(find)
@@ -64,7 +78,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         let c = match matched {
             Some((name, data)) => {
                 if let Some(di) = &want
-                    && di != name
+                    && name.to_string_lossy() != di.as_str()
                     && missing_logged.as_deref() != Some(di.as_str())
                 {
                     crate::errlog::log(
@@ -75,14 +89,17 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
                     );
                     missing_logged = Some(di.clone());
                 }
-                label = name.clone();
+                label = name.to_string_lossy().into_owned();
                 Counters::of(data)
             }
             None => {
                 if let Some(di) = &want
                     && missing_logged.as_deref() != Some(di.as_str())
                 {
-                    let known: Vec<&str> = networks.keys().map(|n| n.as_str()).collect();
+                    let known: Vec<String> = networks
+                        .keys()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .collect();
                     crate::errlog::log(
                         "throughput",
                         format!(
@@ -94,7 +111,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
                 sum_physical(
                     networks
                         .iter()
-                        .map(|(name, data)| (name.as_str(), Counters::of(data))),
+                        .map(|(name, data)| (name.to_string_lossy(), Counters::of(data))),
                 )
             }
         };
@@ -189,9 +206,12 @@ impl Counters {
 /// physical adapter beneath it both report the same traffic, once in the
 /// clear and once encrypted, so adding both showed twice the real rate
 /// (issue #19). Skipping the tunnel leaves one copy.
-fn sum_physical<'a>(entries: impl Iterator<Item = (&'a str, Counters)>) -> Counters {
+fn sum_physical(entries: impl Iterator<Item = (impl AsRef<str>, Counters)>) -> Counters {
     entries
-        .filter(|(name, _)| !is_loopback_name(name) && !super::netinfo::is_tunnel_name(name))
+        .filter(|(name, _)| {
+            let name = name.as_ref();
+            !is_loopback_name(name) && !super::netinfo::is_tunnel_name(name)
+        })
         .fold(Counters::default(), |acc, (_, c)| acc.add(c))
 }
 

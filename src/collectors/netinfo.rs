@@ -935,18 +935,19 @@ fn tunnel_vendor(iface_name: String) -> String {
 
     // The process table is the other: every VPN client whose process is
     // resident, which several can be at once.
-    let mut sys = sysinfo::System::new();
-    sys.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::All,
-        true,
-        sysinfo::ProcessRefreshKind::nothing(),
-    );
     let mut running = std::collections::BTreeSet::new();
-    for proc in sys.processes().values() {
-        let name = proc.name().to_string_lossy().to_ascii_lowercase();
-        for vpn in KNOWN_VPNS {
-            if vpn.procs.iter().any(|frag| name.contains(frag)) {
-                running.insert(vpn.display);
+    if let Ok(mut sys) = sysinfo::System::new() {
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::nothing(),
+        );
+        for proc in sys.processes().values() {
+            let name = proc.name().to_string_lossy().to_ascii_lowercase();
+            for vpn in KNOWN_VPNS {
+                if vpn.procs.iter().any(|frag| name.contains(frag)) {
+                    running.insert(vpn.display);
+                }
             }
         }
     }
