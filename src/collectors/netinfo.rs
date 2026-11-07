@@ -754,7 +754,7 @@ fn classify(iface: &netdev::Interface) -> LinkMedium {
     if base == LinkMedium::Unknown && iface.mac_addr.is_none_or(|m| m.octets() == [0u8; 6]) {
         let v4: Vec<Ipv4Addr> = iface.ipv4.iter().map(|n| n.addr()).collect();
         let v6: Vec<Ipv6Addr> = iface.ipv6.iter().map(|n| n.addr()).collect();
-        if vendor_from_addrs(&v4, &v6).is_some() {
+        if vendor_match(&v4, &v6).is_some() {
             return LinkMedium::Tunnel;
         }
     }
@@ -992,18 +992,10 @@ fn in_v6(addr: Ipv6Addr, net: Ipv6Addr, prefix: u32) -> bool {
     addr.to_bits() >> shift == net.to_bits() >> shift
 }
 
-/// Identify the VPN from the addresses assigned to its tunnel device.
+/// [`vendor_match`] without the trust level, for tests that only ask who.
+#[cfg(test)]
 fn vendor_from_addrs(v4: &[Ipv4Addr], v6: &[Ipv6Addr]) -> Option<&'static str> {
-    KNOWN_VPNS
-        .iter()
-        .find(|vpn| {
-            v4.iter()
-                .any(|a| vpn.v4.iter().any(|(n, p)| in_v4(*a, *n, *p)))
-                || v6
-                    .iter()
-                    .any(|a| vpn.v6.iter().any(|(n, p)| in_v6(*a, *n, *p)))
-        })
-        .map(|vpn| vpn.display)
+    vendor_match(v4, v6).map(|(vendor, _)| vendor)
 }
 
 /// A tunnel device and the addresses on it right now.
@@ -1100,7 +1092,40 @@ fn tunnel_vendor(t: &TunnelAddrs) -> Option<&'static str> {
             }
         }
     }
+    plausible_owners(&mut running, &t.v4, &t.v6);
     name_tunnel(by_addr, &running, t.kernel_wireguard)
+}
+
+/// Drop from `running` every client that cannot own a tunnel with these
+/// addresses: one whose addresses always come from its own blocks (Tailscale,
+/// WARP, Mullvad, NordVPN, Proton) when none of the tunnel's addresses is in
+/// them. A WireGuard tunnel at 10.9.8.10 beside a resident Tailscale is then
+/// named WireGuard, the one client left, instead of being left unnamed as
+/// ambiguous — and the name no longer comes and goes with what else happens
+/// to be running. A tunnel with no addresses yet is left to the process
+/// table as a whole.
+fn plausible_owners(
+    running: &mut std::collections::BTreeSet<&'static str>,
+    v4: &[Ipv4Addr],
+    v6: &[Ipv6Addr],
+) {
+    if v4.is_empty() && v6.is_empty() {
+        return;
+    }
+    running.retain(|name| {
+        KNOWN_VPNS
+            .iter()
+            .find(|vpn| vpn.display == *name)
+            .is_none_or(|vpn| {
+                (vpn.v4.is_empty() && vpn.v6.is_empty())
+                    || v4
+                        .iter()
+                        .any(|a| vpn.v4.iter().any(|(n, p)| in_v4(*a, *n, *p)))
+                    || v6
+                        .iter()
+                        .any(|a| vpn.v6.iter().any(|(n, p)| in_v6(*a, *n, *p)))
+            })
+    });
 }
 
 /// The vendor whose address block a tunnel's address falls in, with how far
@@ -1202,6 +1227,12 @@ fn addr_match(a: Ipv4Addr) -> AddrMatch {
 /// Zscaler's 100.64.0.1 is not Tailscale). With no address to go on, the
 /// process table decides only when it is unambiguous — two clients resident
 /// say nothing about which one is up.
+///
+/// One tie is broken by hand: a 100.64/10 address with both Tailscale and
+/// Zscaler resident. A real Tailscale tunnel nearly always carries its own
+/// v6 too, which names it outright, so a v4-only shared match beside a
+/// running Zscaler is more likely the corporate client's tunnel than the
+/// mesh's.
 fn pick_vendor(
     by_addr: Option<(&'static str, AddrMatch)>,
     running: &std::collections::BTreeSet<&'static str>,
@@ -1209,6 +1240,7 @@ fn pick_vendor(
     let sole = (running.len() == 1).then(|| *running.iter().next().unwrap());
     match by_addr {
         Some((vendor, AddrMatch::Own)) => Some(vendor),
+        Some(("Tailscale", AddrMatch::Shared)) if running.contains("Zscaler") => Some("Zscaler"),
         Some((vendor, _)) if running.contains(vendor) => Some(vendor),
         Some((vendor, AddrMatch::Shared)) => sole.or(Some(vendor)),
         Some((_, AddrMatch::Private)) | None => sole,
@@ -1292,9 +1324,11 @@ mod tests {
         let run = |names: &[&'static str]| names.iter().copied().collect::<BTreeSet<_>>();
         assert_eq!(pick_vendor(addr, &run(&["Zscaler"])), Some("Zscaler"));
         assert_eq!(pick_vendor(addr, &run(&["Tailscale"])), Some("Tailscale"));
+        // Both resident: the corporate client is the likelier owner of a
+        // v4-only CGNAT address (Tailscale's own tunnel carries its v6).
         assert_eq!(
             pick_vendor(addr, &run(&["Tailscale", "Zscaler"])),
-            Some("Tailscale")
+            Some("Zscaler")
         );
         assert_eq!(pick_vendor(addr, &run(&[])), Some("Tailscale"));
         assert_eq!(pick_vendor(None, &run(&["Zscaler"])), Some("Zscaler"));
@@ -1330,6 +1364,40 @@ mod tests {
             ),
             Some(("Mullvad", AddrMatch::Private))
         );
+    }
+
+    /// A client whose addresses always come from its own blocks cannot own a
+    /// tunnel outside them: a WireGuard tunnel at 10.9.8.10 beside a resident
+    /// Tailscale is WireGuard, the one client left, rather than ambiguous.
+    /// Clients with no block of their own, and the matched vendor, stay.
+    #[test]
+    fn clients_that_cannot_own_the_address_do_not_make_it_ambiguous() {
+        use super::plausible_owners;
+        use std::collections::BTreeSet;
+        let wg = [Ipv4Addr::new(10, 9, 8, 10)];
+        let mut running = BTreeSet::from(["Tailscale", "WireGuard", "Cloudflare WARP"]);
+        plausible_owners(&mut running, &wg, &[]);
+        assert_eq!(running, BTreeSet::from(["WireGuard"]));
+        assert_eq!(pick_vendor(None, &running), Some("WireGuard"));
+
+        // Mullvad's block: Mullvad stays, Tailscale goes, OpenVPN (no block)
+        // stays, so the private match still needs Mullvad's client and two
+        // candidates are still ambiguous without it.
+        let mullvad = [Ipv4Addr::new(10, 64, 0, 7)];
+        let mut running = BTreeSet::from(["Tailscale", "Mullvad", "OpenVPN"]);
+        plausible_owners(&mut running, &mullvad, &[]);
+        assert_eq!(running, BTreeSet::from(["Mullvad", "OpenVPN"]));
+
+        // A v6 in Tailscale's block keeps Tailscale.
+        let v6: [Ipv6Addr; 1] = ["fd7a:115c:a1e0::1".parse().unwrap()];
+        let mut running = BTreeSet::from(["Tailscale", "WireGuard"]);
+        plausible_owners(&mut running, &[], &v6);
+        assert_eq!(running, BTreeSet::from(["Tailscale", "WireGuard"]));
+
+        // No addresses yet: nothing can be ruled out.
+        let mut running = BTreeSet::from(["Tailscale", "WireGuard"]);
+        plausible_owners(&mut running, &[], &[]);
+        assert_eq!(running.len(), 2);
     }
 
     /// NetworkManager's "Trevor" with Tailscale running for something else:
