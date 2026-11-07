@@ -17,9 +17,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
     // Identifying the VPN behind a tunnel can fall back to scanning the process
     // table, so the answer is cached per tunnel rather than redone every tick
     // — for the tunnel carrying the traffic and for any sitting beside it.
-    // Keyed on the device *and* its addresses: macOS hands a freed utunN to
-    // whichever VPN connects next, and a name-only key kept the old vendor.
-    let mut vendor_cache: HashMap<String, (TunnelAddrs, Option<&'static str>)> = HashMap::new();
+    let mut vendor_cache = VendorCache::default();
     // The DHCP server behind the current lease barely ever changes, so it is
     // asked for once per attachment (a lease-file read or one-line shell-out)
     // and cached — keyed on interface + gateway, which is what a new
@@ -174,45 +172,37 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
             if info.tunnel.is_some() {
                 devices.push(info.tunnel_iface.clone());
             }
-            for dev in &devices {
-                let addrs = tunnel_addrs(&ifaces, dev);
-                if *dev == info.tunnel_iface && info.tunnel.is_some() {
-                    info.tunnel_addrs = addrs
-                        .v4
-                        .iter()
-                        .map(|a| a.to_string())
-                        .chain(addrs.v6.iter().map(|a| a.to_string()))
-                        .collect();
-                }
-                if vendor_cache.get(dev).is_none_or(|(had, _)| *had != addrs) {
-                    let key = addrs.clone();
-                    // A lookup that panicked isn't cached as "unnamed": the
-                    // next pass asks again.
-                    match tokio::task::spawn_blocking(move || tunnel_vendor(&key)).await {
-                        Ok(v) => {
-                            vendor_cache.insert(dev.clone(), (addrs, v));
-                        }
-                        Err(_) => {
-                            vendor_cache.remove(dev);
-                        }
-                    }
-                }
+            let devices: Vec<(String, TunnelAddrs)> = devices
+                .into_iter()
+                .map(|dev| {
+                    let addrs = tunnel_addrs(&ifaces, &dev);
+                    (dev, addrs)
+                })
+                .collect();
+            if info.tunnel.is_some()
+                && let Some((_, addrs)) = devices.iter().find(|(d, _)| *d == info.tunnel_iface)
+            {
+                info.tunnel_addrs = addrs
+                    .v4
+                    .iter()
+                    .map(|a| a.to_string())
+                    .chain(addrs.v6.iter().map(|a| a.to_string()))
+                    .collect();
             }
-            vendor_cache.retain(|dev, _| devices.contains(dev));
-            let vendor_of = |dev: &str| {
-                vendor_cache
-                    .get(dev)
-                    .and_then(|(_, v)| *v)
-                    .unwrap_or_default()
-                    .to_string()
-            };
+            vendor_cache
+                .refresh(&devices, |addrs| async move {
+                    tokio::task::spawn_blocking(move || tunnel_vendor(&addrs))
+                        .await
+                        .map_err(|_| Panicked)
+                })
+                .await;
             if info.tunnel.is_some() {
-                info.tunnel = Some(vendor_of(&info.tunnel_iface));
+                info.tunnel = Some(vendor_cache.vendor_of(&info.tunnel_iface));
             }
             info.bypassed_tunnels = bypassed
                 .into_iter()
                 .map(|iface| BypassedTunnel {
-                    vendor: vendor_of(&iface),
+                    vendor: vendor_cache.vendor_of(&iface),
                     iface,
                 })
                 .collect();
@@ -853,6 +843,10 @@ struct Vpn {
     v6: &'static [(Ipv6Addr, u32)],
     /// Lowercase process-name fragments, used only as a last resort.
     procs: &'static [&'static str],
+    /// The client only ever drives a tun/utun device, never an in-kernel
+    /// WireGuard one, so on Linux it cannot own a `DEVTYPE=wireguard` device
+    /// and is a bystander when one is being named.
+    tun_only: bool,
 }
 
 /// Ordered most-specific first: WARP's 100.96.0.0/12 sits inside Tailscale's
@@ -863,72 +857,84 @@ const KNOWN_VPNS: &[Vpn] = &[
         v4: &[(Ipv4Addr::new(100, 96, 0, 0), 12)],
         v6: &[(Ipv6Addr::new(0x2606, 0x4700, 0, 0, 0, 0, 0, 0), 32)],
         procs: &["warp-svc", "cloudflarewarp"],
+        tun_only: true,
     },
     Vpn {
         display: "Tailscale",
         v4: &[(Ipv4Addr::new(100, 64, 0, 0), 10)],
         v6: &[(Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0), 48)],
         procs: &["tailscaled", "tailscale"],
+        tun_only: true,
     },
     Vpn {
         display: "Mullvad",
         v4: &[(Ipv4Addr::new(10, 64, 0, 0), 10)],
         v6: &[(Ipv6Addr::new(0xfc00, 0xbbbb, 0xbbbb, 0, 0, 0, 0, 0), 48)],
         procs: &["mullvad"],
+        tun_only: false,
     },
     Vpn {
         display: "NordVPN",
         v4: &[(Ipv4Addr::new(10, 5, 0, 0), 16)],
         v6: &[],
         procs: &["nordvpn", "nordlynx"],
+        tun_only: false,
     },
     Vpn {
         display: "Proton VPN",
         v4: &[(Ipv4Addr::new(10, 2, 0, 0), 16)],
         v6: &[],
         procs: &["protonvpn"],
+        tun_only: false,
     },
     Vpn {
         display: "Cloudflare Tunnel",
         v4: &[],
         v6: &[],
         procs: &["cloudflared"],
+        tun_only: true,
     },
     Vpn {
         display: "ExpressVPN",
         v4: &[],
         v6: &[],
         procs: &["expressvpn"],
+        tun_only: true,
     },
     Vpn {
         display: "Surfshark",
         v4: &[],
         v6: &[],
         procs: &["surfshark"],
+        tun_only: false,
     },
     Vpn {
         display: "Private Internet Access",
         v4: &[],
         v6: &[],
         procs: &["pia-daemon", "privateinternetaccess"],
+        tun_only: false,
     },
     Vpn {
         display: "Windscribe",
         v4: &[],
         v6: &[],
         procs: &["windscribe"],
+        tun_only: false,
     },
     Vpn {
         display: "Zscaler",
         v4: &[],
         v6: &[],
         procs: &["zsatunnel", "zstunnel", "zscaler"],
+        tun_only: true,
     },
     Vpn {
         display: "FortiClient",
         v4: &[],
         v6: &[],
         procs: &["forticlient", "fortitray"],
+        tun_only: true,
     },
     // The open-source client for the same FortiGate SSL VPNs, usually as a
     // split tunnel (issue #27).
@@ -937,36 +943,42 @@ const KNOWN_VPNS: &[Vpn] = &[
         v4: &[],
         v6: &[],
         procs: &["openfortivpn"],
+        tun_only: true,
     },
     Vpn {
         display: "OpenVPN",
         v4: &[],
         v6: &[],
         procs: &["openvpn", "tunnelblick"],
+        tun_only: true,
     },
     Vpn {
         display: "WireGuard",
         v4: &[],
         v6: &[],
         procs: &["wireguard", "wg-quick"],
+        tun_only: false,
     },
     Vpn {
         display: "GlobalProtect",
         v4: &[],
         v6: &[],
         procs: &["globalprotect"],
+        tun_only: true,
     },
     Vpn {
         display: "Cisco AnyConnect",
         v4: &[],
         v6: &[],
         procs: &["anyconnect"],
+        tun_only: true,
     },
     Vpn {
         display: "ZeroTier",
         v4: &[],
         v6: &[],
         procs: &["zerotier"],
+        tun_only: true,
     },
 ];
 
@@ -1013,6 +1025,53 @@ fn tunnel_addrs(ifaces: &[netdev::Interface], iface_name: &str) -> TunnelAddrs {
             kernel_wireguard: kernel_tunnel(&iface.name) == Some(KernelTunnel::WireGuard),
         })
         .unwrap_or_default()
+}
+
+/// The vendor of each tunnel device in play, cached on the device *and* its
+/// addresses: macOS hands a freed utunN to whichever VPN connects next, and a
+/// name-only key kept the old vendor. Cached on the addresses also means a
+/// client started after its tunnel came up doesn't rename it until the
+/// addresses change.
+#[derive(Default)]
+struct VendorCache(HashMap<String, (TunnelAddrs, Option<&'static str>)>);
+
+/// A vendor lookup that panicked: its answer is not cached as "unnamed", so
+/// the next pass asks again.
+struct Panicked;
+
+impl VendorCache {
+    /// Name every device in `devices`, asking `lookup` only about one never
+    /// seen, or last seen with other addresses. Devices no longer in play are
+    /// forgotten, so a utunN that comes back belongs to whoever has it now.
+    async fn refresh<F, Fut>(&mut self, devices: &[(String, TunnelAddrs)], lookup: F)
+    where
+        F: Fn(TunnelAddrs) -> Fut,
+        Fut: std::future::Future<Output = Result<Option<&'static str>, Panicked>>,
+    {
+        for (dev, addrs) in devices {
+            if self.0.get(dev).is_none_or(|(had, _)| had != addrs) {
+                match lookup(addrs.clone()).await {
+                    Ok(v) => {
+                        self.0.insert(dev.clone(), (addrs.clone(), v));
+                    }
+                    Err(Panicked) => {
+                        self.0.remove(dev);
+                    }
+                }
+            }
+        }
+        self.0
+            .retain(|dev, _| devices.iter().any(|(d, _)| d == dev));
+    }
+
+    /// The cached vendor, or an empty name for a tunnel nothing could name.
+    fn vendor_of(&self, dev: &str) -> String {
+        self.0
+            .get(dev)
+            .and_then(|(_, v)| *v)
+            .unwrap_or_default()
+            .to_string()
+    }
 }
 
 /// Identify the VPN carrying a tunnel. `None` when nothing can be pinned
@@ -1067,11 +1126,12 @@ fn vendor_match(v4: &[Ipv4Addr], v6: &[Ipv6Addr]) -> Option<(&'static str, AddrM
 
 /// Name a tunnel from its address match and the running clients. A kernel
 /// WireGuard device (NetworkManager's, wg-quick's, NetBird's) has no process
-/// of its own, so neither a client resident for some other reason nor a
-/// shared-space address on its own names it: it takes a vendor's name only
-/// from that vendor's own block (Mullvad's v6), or from a shared or private
-/// match with that vendor's client running (wg0-mullvad on 10.64.x), and is
-/// otherwise plain WireGuard.
+/// of its own, so a client resident for some other reason must not lend it
+/// its name, and a shared-space address on its own does not either: it takes
+/// a vendor's name from that vendor's own block (Mullvad's v6), from a shared
+/// or private match with that vendor's client running (wg0-mullvad on
+/// 10.64.x), or from the one running client that drives such devices (PIA's
+/// wgpia0), and is otherwise plain WireGuard.
 fn name_tunnel(
     by_addr: Option<(&'static str, AddrMatch)>,
     running: &std::collections::BTreeSet<&'static str>,
@@ -1081,10 +1141,30 @@ fn name_tunnel(
         return Some(match by_addr {
             Some((vendor, AddrMatch::Own)) => vendor,
             Some((vendor, _)) if running.contains(vendor) => vendor,
-            _ => "WireGuard",
+            _ => {
+                // PIA, Surfshark and Windscribe drive kernel WireGuard devices
+                // on Linux with addresses in no table: the one such client
+                // running names the device. A client that only ever uses tun
+                // (Tailscale beside NetworkManager's "Trevor") is a bystander.
+                let mut drivers = running.iter().copied().filter(|v| !tun_only(v));
+                match (drivers.next(), drivers.next()) {
+                    (Some(one), None) => one,
+                    _ => "WireGuard",
+                }
+            }
         });
     }
     pick_vendor(by_addr, running)
+}
+
+/// Whether a known client, by display name, never drives a kernel WireGuard
+/// device. A name not in the table is treated as tun-only, so it cannot name
+/// one.
+fn tun_only(display: &str) -> bool {
+    KNOWN_VPNS
+        .iter()
+        .find(|v| v.display == display)
+        .is_none_or(|v| v.tun_only)
 }
 
 /// How far an address match on a tunnel can be trusted on its own.
@@ -1267,6 +1347,28 @@ mod tests {
 
         assert_eq!(name_tunnel(None, &tailscale, true), Some("WireGuard"));
         assert_eq!(name_tunnel(None, &none, true), Some("WireGuard"));
+        // PIA, Surfshark and Windscribe drive kernel WireGuard devices on
+        // Linux with addresses in no table: the one such client running
+        // names the device, and a tun-only client beside it stays a
+        // bystander. Two such clients, or a tun-only one alone, do not.
+        let surfshark = BTreeSet::from(["Surfshark"]);
+        assert_eq!(name_tunnel(None, &surfshark, true), Some("Surfshark"));
+        assert_eq!(
+            name_tunnel(None, &BTreeSet::from(["Surfshark", "Tailscale"]), true),
+            Some("Surfshark")
+        );
+        assert_eq!(
+            name_tunnel(None, &BTreeSet::from(["Surfshark", "Mullvad"]), true),
+            Some("WireGuard")
+        );
+        assert_eq!(
+            name_tunnel(None, &BTreeSet::from(["OpenVPN"]), true),
+            Some("WireGuard")
+        );
+        assert_eq!(
+            name_tunnel(None, &BTreeSet::from(["Private Internet Access"]), true),
+            Some("Private Internet Access")
+        );
         assert_eq!(name_tunnel(mullvad_addr, &mullvad, true), Some("Mullvad"));
         assert_eq!(name_tunnel(mullvad_addr, &none, true), Some("WireGuard"));
         assert_eq!(
@@ -1289,6 +1391,59 @@ mod tests {
         assert_eq!(name_tunnel(tailscale_addr, &none, false), Some("Tailscale"));
         assert_eq!(name_tunnel(None, &tailscale, false), Some("Tailscale"));
         assert_eq!(name_tunnel(None, &none, false), None);
+    }
+
+    /// The vendor cache asks once per device, again when the device's
+    /// addresses change (a freed utunN handed to the next VPN), not when a
+    /// lookup panicked, and forgets devices that are gone.
+    #[tokio::test]
+    async fn the_vendor_cache_asks_again_only_when_the_addresses_change() {
+        use super::{Panicked, TunnelAddrs, VendorCache};
+        use std::cell::RefCell;
+        let asked = RefCell::new(Vec::new());
+        let answers = RefCell::new(Vec::<Result<Option<&'static str>, Panicked>>::new());
+        let lookup = |a: TunnelAddrs| {
+            asked.borrow_mut().push(a.v4.clone());
+            let next = answers.borrow_mut().remove(0);
+            async move { next }
+        };
+        let addrs = |v4: &str| TunnelAddrs {
+            v4: vec![v4.parse().unwrap()],
+            ..Default::default()
+        };
+        let mut cache = VendorCache::default();
+
+        // First sight: asked, cached.
+        answers.borrow_mut().push(Ok(Some("Cloudflare WARP")));
+        let warp = vec![("utun4".to_string(), addrs("100.96.0.2"))];
+        cache.refresh(&warp, lookup).await;
+        assert_eq!(cache.vendor_of("utun4"), "Cloudflare WARP");
+        assert_eq!(asked.borrow().len(), 1);
+
+        // Same device, same addresses: not asked again.
+        cache.refresh(&warp, lookup).await;
+        assert_eq!(asked.borrow().len(), 1);
+
+        // Same device name, new addresses: a different VPN has it now.
+        answers.borrow_mut().push(Ok(Some("Tailscale")));
+        let reused = vec![("utun4".to_string(), addrs("100.101.2.3"))];
+        cache.refresh(&reused, lookup).await;
+        assert_eq!(cache.vendor_of("utun4"), "Tailscale");
+        assert_eq!(asked.borrow().len(), 2);
+
+        // A lookup that panicked is not remembered as "unnamed": the next
+        // pass asks again, and meanwhile the tunnel is simply unnamed.
+        answers.borrow_mut().push(Err(Panicked));
+        let other = vec![("utun5".to_string(), addrs("10.9.8.10"))];
+        cache.refresh(&other, lookup).await;
+        assert_eq!(cache.vendor_of("utun5"), "");
+        answers.borrow_mut().push(Ok(Some("WireGuard")));
+        cache.refresh(&other, lookup).await;
+        assert_eq!(cache.vendor_of("utun5"), "WireGuard");
+        assert_eq!(asked.borrow().len(), 4);
+
+        // utun4 left the device list above, so it was forgotten.
+        assert_eq!(cache.vendor_of("utun4"), "");
     }
 
     /// An up interface named `name` carrying `v4`, typed by its name alone.

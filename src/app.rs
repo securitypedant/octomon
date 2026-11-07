@@ -1059,9 +1059,8 @@ pub struct NetInfo {
     pub tunnel_iface: String,
     /// The addresses on the tunnel device itself, bare (no prefix length).
     /// On a split tunnel `ipv4`/`ipv6` describe the physical NIC, so this is
-    /// the only place the tunnel's own address is kept — and for a VPN no
-    /// vendor can be named for, that address is a steadier identity than a
-    /// utunN that macOS renumbers on every connect.
+    /// the only place the tunnel's own address is kept — which a split
+    /// WireGuard config's location keys on, and `--demo` disguises.
     pub tunnel_addrs: Vec<String>,
     /// True when the tunnel is a split route: the kernel's default route still
     /// points at a physical NIC, but internet traffic egresses via the tunnel.
@@ -3035,6 +3034,10 @@ pub struct AppState {
     /// The stored baselines couldn't be read when this network was loaded:
     /// `baseline` is learned in memory and never saved.
     pub baseline_unsaved: bool,
+    /// Collectors that crashed their way to a stop this session (see the
+    /// supervisor in `main`): their panels say so instead of silently
+    /// freezing.
+    pub stopped_collectors: Vec<&'static str>,
     /// Show the first-run explainer once the startup notice is dismissed.
     pub explainer_pending: bool,
     /// The startup version check found a newer release while another modal
@@ -3252,6 +3255,7 @@ impl AppState {
             baseline: None,
             baseline_key: None,
             baseline_unsaved: false,
+            stopped_collectors: Vec::new(),
             explainer_pending: false,
             update_pending: false,
             locations: None,

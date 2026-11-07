@@ -4556,8 +4556,12 @@ pub async fn run(state: std::sync::Arc<parking_lot::Mutex<AppState>>, cfg: crate
                     let loaded = match loaded {
                         Ok(b) => b,
                         Err(e) => {
+                            // Name the file, and the likeliest cause: a file an
+                            // earlier `sudo octomon` left root-owned, which a
+                            // `sudo octomon` run now repairs (store::hand_back).
+                            let file = crate::baseline::file_name();
                             let message = format!(
-                                "couldn't read the stored baselines ({e}) — learning this network for this session only"
+                                "couldn't read {file} ({e}) — learning this network for this session only; if an earlier run was under sudo, one `sudo octomon --check` gives the file back"
                             );
                             crate::errlog::log("baseline", &message);
                             s.notice_event(
@@ -4613,9 +4617,12 @@ pub async fn run(state: std::sync::Arc<parking_lot::Mutex<AppState>>, cfg: crate
                 }
             }
             BaselineIo::Save { key, baseline } => {
-                let _ =
-                    tokio::task::spawn_blocking(move || crate::baseline::save_one(&key, &baseline))
-                        .await;
+                // Only the one process holding the learner lock writes what
+                // it learns; the others watch (see `baseline::save_learned`).
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::baseline::save_learned(&key, &baseline)
+                })
+                .await;
             }
         }
     }
@@ -6404,6 +6411,38 @@ mod tests {
             .find(|f| f.cause == Cause::GatewayLan)
             .unwrap();
         assert!(!f.evidence.iter().any(|e| e.contains("normal at")));
+    }
+
+    /// A network whose stored baseline couldn't be read is learned in
+    /// memory, but a fold never asks for a save: the file may still hold what
+    /// it had learned before, and a one-network save would write over it.
+    #[test]
+    fn an_unreadable_store_is_learned_but_never_saved() {
+        let mut s = healthy_state();
+        if let Some(earlier) = Instant::now().checked_sub(Duration::from_secs(300)) {
+            s.started = earlier;
+        }
+        let (key, label) = crate::baseline::fingerprint(&s.netinfo).expect("fingerprintable");
+        s.baseline_key = Some(key);
+        s.baseline = Some(crate::baseline::Baseline {
+            label,
+            ..Default::default()
+        });
+        s.verdict.current = Verdict::Healthy;
+        s.baseline_unsaved = true;
+
+        let mut healthy_run = 59;
+        let mut run_suspect = false;
+        let mut last_speed = Some(0);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        assert!(matches!(io, BaselineIo::None), "no save while unsaved");
+        assert_eq!(s.baseline.as_ref().unwrap().samples, 1, "still learned");
+
+        // Once the store could be read again, the next fold saves as usual.
+        s.baseline_unsaved = false;
+        healthy_run = 59;
+        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        assert!(matches!(io, BaselineIo::Save { .. }));
     }
 
     /// The anti-poisoning rule: an active finding — even a caveat — means the

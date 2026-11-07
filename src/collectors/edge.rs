@@ -22,16 +22,23 @@ const REFRESH: Duration = Duration::from_secs(15 * 60);
 
 /// `interactive` is false for `--check` / `--doctor`, which have no screen
 /// for the update notice to open on.
+/// Whether this collector has anything to do: an empty `edge_check_url`
+/// (`--no-edge` clears it) turns it off, and the supervisor then never
+/// starts it.
+pub fn enabled(cfg: &Config) -> bool {
+    !cfg.edge_check_url.trim().is_empty()
+}
+
 pub async fn run(
     state: Arc<Mutex<AppState>>,
     cfg: Config,
     changed: Arc<Notify>,
     interactive: bool,
 ) {
-    let url = cfg.edge_check_url.trim().to_string();
-    if url.is_empty() {
+    if !enabled(&cfg) {
         return;
     }
+    let url = cfg.edge_check_url.trim().to_string();
     // One client per family, pinned by local address: on a dual-stack link
     // the v4 and v6 routes can land on different PoPs at different
     // distances, and an unpinned client would report whichever it happened

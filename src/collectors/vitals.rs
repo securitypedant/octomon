@@ -20,6 +20,7 @@ const THERMAL_EVERY: u32 = 30;
 const PROCS_EVERY: u32 = 2;
 
 pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
+    crate::debug_panic("collector");
     // sysinfo 0.40 made this fallible. Nothing here can recover from it, so
     // the panel stays at its zero state and the log says why.
     let mut sys = match System::new() {

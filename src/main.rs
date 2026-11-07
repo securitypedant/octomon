@@ -560,14 +560,21 @@ async fn main() -> Result<()> {
         let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
         move || collectors::http::run(st.clone(), cf.clone(), nc.clone())
     });
-    supervise("clock", &state, {
-        let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
-        move || collectors::clock::run(st.clone(), cf.clone(), nc.clone())
-    });
-    supervise("pmtu", &state, {
-        let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
-        move || collectors::pmtu::run(st.clone(), cf.clone(), nc.clone())
-    });
+    // A collector that is switched off is not started at all: started, it
+    // would return at once, and the supervisor would log that as a collector
+    // that stopped on its own.
+    if collectors::clock::enabled(&cfg) {
+        supervise("clock", &state, {
+            let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
+            move || collectors::clock::run(st.clone(), cf.clone(), nc.clone())
+        });
+    }
+    if collectors::pmtu::enabled(&cfg) {
+        supervise("pmtu", &state, {
+            let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
+            move || collectors::pmtu::run(st.clone(), cf.clone(), nc.clone())
+        });
+    }
     supervise("proxy", &state, {
         let (st, nc) = (state.clone(), network_changed.clone());
         move || collectors::proxy::run(st.clone(), nc.clone())
@@ -604,10 +611,12 @@ async fn main() -> Result<()> {
         let st = state.clone();
         move || collectors::signal::run(st.clone())
     });
-    supervise("procbw", &state, {
-        let (st, cf) = (state.clone(), cfg.clone());
-        move || collectors::procbw::run(st.clone(), cf.clone())
-    });
+    if collectors::procbw::available(&state, &cfg).await.is_some() {
+        supervise("procbw", &state, {
+            let (st, cf) = (state.clone(), cfg.clone());
+            move || collectors::procbw::run(st.clone(), cf.clone())
+        });
+    }
     supervise("web", &state, {
         let st = state.clone();
         move || collectors::web::run(st.clone())
@@ -616,15 +625,19 @@ async fn main() -> Result<()> {
         let (st, cf) = (state.clone(), cfg.clone());
         move || collectors::tcp::run(st.clone(), cf.clone())
     });
-    supervise("egress", &state, {
-        let (st, cf) = (state.clone(), cfg.clone());
-        move || collectors::egress::monitor(st.clone(), cf.clone())
-    });
-    supervise("edge", &state, {
-        let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
-        let interactive = !(cli.check || cli.doctor);
-        move || collectors::edge::run(st.clone(), cf.clone(), nc.clone(), interactive)
-    });
+    if collectors::egress::enabled(&cfg) {
+        supervise("egress", &state, {
+            let (st, cf) = (state.clone(), cfg.clone());
+            move || collectors::egress::monitor(st.clone(), cf.clone())
+        });
+    }
+    if collectors::edge::enabled(&cfg) {
+        supervise("edge", &state, {
+            let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
+            let interactive = !(cli.check || cli.doctor);
+            move || collectors::edge::run(st.clone(), cf.clone(), nc.clone(), interactive)
+        });
+    }
     supervise("resolve", &state, {
         let (st, pc, cf, nc) = (
             state.clone(),
@@ -788,9 +801,13 @@ async fn main() -> Result<()> {
     // screen then would wreck it, and printing would land on the dashboard.
     // Only the UI's own thread restores and prints; every other panic is
     // only logged.
+    // The UI's thread is whichever one this runs on (the main thread, under
+    // `#[tokio::main]`), recorded by id rather than assumed by name, so a
+    // future move of the loop onto a worker cannot leave the terminal raw.
+    let ui_thread = std::thread::current().id();
     let restore_and_report = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if std::thread::current().name() == Some("main") {
+        if std::thread::current().id() == ui_thread {
             restore_and_report(info);
         } else {
             log_panic(info);
@@ -820,10 +837,20 @@ fn tell_unsaved(state: &Arc<Mutex<AppState>>, message: String) {
     );
 }
 
-/// How long a collector that panicked waits before it is started again: long
-/// enough that one failing on every pass cannot spin, short enough that its
-/// panel is back before anyone wonders why it froze.
-const RESTART_DELAY: Duration = Duration::from_secs(5);
+/// How long a collector that panicked waits before it is started again, per
+/// consecutive crash: short enough that its panel is back before anyone
+/// wonders why it froze, and finite, so one failing on every pass is stopped
+/// after the last of these rather than flooding the timeline with a crash
+/// every few seconds for the rest of the session.
+const RESTART_DELAYS: &[Duration] = &[
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+    Duration::from_secs(45),
+];
+
+/// A collector that ran this long before crashing had been working: its
+/// crash count starts over, so one crash a day is tolerated forever.
+const STABLE_AFTER: Duration = Duration::from_secs(10 * 60);
 
 /// Run a long-lived collector, starting it again whenever it panics. Without
 /// this a panic ended the task silently: its panel froze on its last reading
@@ -835,7 +862,7 @@ where
     F: FnMut() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
-    supervise_with(name, state, RESTART_DELAY, Finish::Unexpected, start);
+    supervise_with(name, state, RESTART_DELAYS, Finish::Unexpected, start);
 }
 
 /// [`supervise`] for a task that is meant to finish, such as one startup pass.
@@ -844,7 +871,7 @@ where
     F: FnMut() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
-    supervise_with(name, state, RESTART_DELAY, Finish::Expected, start);
+    supervise_with(name, state, RESTART_DELAYS, Finish::Expected, start);
 }
 
 /// Whether a supervised task returning on its own is news.
@@ -855,7 +882,17 @@ enum Finish {
 }
 
 /// Record a panic in errors.log with its thread and location.
+///
+/// A panic hook must not panic: a second panic while one is being handled
+/// aborts the process, with no terminal restore and no log line. The logging
+/// here goes through `errlog`, so a panic raised inside `errlog` itself would
+/// bring the hook straight back into `errlog` on the same thread, onto a
+/// mutex that thread may still hold. The guard makes that re-entry a no-op.
 fn log_panic(info: &std::panic::PanicHookInfo) {
+    thread_local!(static IN_HOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+    if IN_HOOK.replace(true) {
+        return;
+    }
     let thread = std::thread::current();
     let at = info
         .location()
@@ -869,6 +906,18 @@ fn log_panic(info: &std::panic::PanicHookInfo) {
             panic_message(info.payload())
         ),
     );
+    IN_HOOK.set(false);
+}
+
+/// Panic on purpose at a named point when `OCTOMON_DEBUG_PANIC` names it, in
+/// debug builds only: the one way to see the hooks, the supervisor and the
+/// crash limit work in a live session (`collector` panics the vitals
+/// collector on every start; `ui` panics the dashboard loop on its first
+/// frame). A release build never panics here, whatever the environment.
+pub(crate) fn debug_panic(point: &str) {
+    if cfg!(debug_assertions) && std::env::var("OCTOMON_DEBUG_PANIC").as_deref() == Ok(point) {
+        panic!("OCTOMON_DEBUG_PANIC={point}");
+    }
 }
 
 /// A panic's message: the payload of `panic!("…")` is a `&str` or a
@@ -881,10 +930,13 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "unknown panic".to_string())
 }
 
+/// `delays` is one wait per restart; a crash past the last of them stops the
+/// collector for the session, with one final timeline event and its name in
+/// `AppState::stopped_collectors` for its panel to show.
 fn supervise_with<F, Fut>(
     name: &'static str,
     state: &Arc<Mutex<AppState>>,
-    delay: Duration,
+    delays: &'static [Duration],
     finish: Finish,
     mut start: F,
 ) -> tokio::task::JoinHandle<()>
@@ -894,10 +946,31 @@ where
 {
     let state = state.clone();
     tokio::spawn(async move {
+        let mut crashes = 0;
         loop {
+            let started = std::time::Instant::now();
             match tokio::spawn(start()).await {
                 Err(e) if e.is_panic() => {
+                    if started.elapsed() >= STABLE_AFTER {
+                        crashes = 0;
+                    }
                     let why = panic_message(e.into_panic().as_ref());
+                    let Some(delay) = delays.get(crashes) else {
+                        let message = format!(
+                            "{name} collector crashed {} times ({why}) — stopped for this session, see errors.log",
+                            crashes + 1
+                        );
+                        errlog::log("supervisor", &message);
+                        let mut s = state.lock();
+                        s.notice_event(
+                            verdict::Severity::Degraded,
+                            app::EventCategory::Logging,
+                            message,
+                        );
+                        s.stopped_collectors.push(name);
+                        return;
+                    };
+                    crashes += 1;
                     let message = format!("{name} collector crashed ({why}) — restarting");
                     errlog::log("supervisor", &message);
                     state.lock().notice_event(
@@ -905,7 +978,7 @@ where
                         app::EventCategory::Logging,
                         message,
                     );
-                    tokio::time::sleep(delay).await;
+                    tokio::time::sleep(*delay).await;
                 }
                 Ok(()) if finish == Finish::Unexpected => {
                     errlog::log("supervisor", format!("{name} collector stopped on its own"));
@@ -1065,6 +1138,7 @@ async fn run_ui(
             Some(key) = rx.recv() => handle_key(ctx, key),
         }
 
+        debug_panic("ui");
         let mut s = ctx.state.lock();
         if s.should_quit {
             break;
@@ -3915,6 +3989,78 @@ fn prev_panel(p: Panel) -> Panel {
 
 #[cfg(test)]
 mod tests {
+    /// Three restarts with no wait, as `RESTART_DELAYS` but for a test.
+    const AT_ONCE: &[super::Duration] = &[super::Duration::ZERO; 3];
+
+    /// Each setting that turns a collector off also keeps the supervisor from
+    /// starting it, so a disabled collector is never logged as one that
+    /// stopped on its own. `--no-edge` clears the URL, so it is covered too.
+    #[test]
+    fn a_switched_off_collector_is_known_before_it_is_started() {
+        use super::collectors::{clock, edge, egress, pmtu};
+        let on = super::config::Config::default();
+        assert!(clock::enabled(&on) && pmtu::enabled(&on) && edge::enabled(&on));
+        assert_eq!(egress::enabled(&on), !on.egress_monitor_checks.is_empty());
+
+        let mut off = on.clone();
+        off.ntp_server = " ".into();
+        off.pmtu_probe_host = String::new();
+        off.edge_check_url.clear();
+        off.egress_monitor = false;
+        assert!(!clock::enabled(&off));
+        assert!(!pmtu::enabled(&off));
+        assert!(!edge::enabled(&off));
+        assert!(!egress::enabled(&off));
+        let mut no_checks = on;
+        no_checks.egress_monitor_checks.clear();
+        assert!(!egress::enabled(&no_checks));
+    }
+
+    /// A collector that panics on every pass is restarted once per delay,
+    /// then stopped for the session: one last event, and its name where its
+    /// panel can find it.
+    #[tokio::test]
+    async fn a_collector_that_keeps_panicking_is_stopped() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let state = super::Arc::new(super::Mutex::new(super::AppState::new(vec![])));
+        let runs = super::Arc::new(AtomicU32::new(0));
+        let counter = runs.clone();
+        let supervisor = super::supervise_with(
+            "test",
+            &state,
+            AT_ONCE,
+            super::Finish::Unexpected,
+            move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    panic!("every time");
+                }
+            },
+        );
+        supervisor.await.expect("supervisor itself never panics");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            4,
+            "first run plus one per delay"
+        );
+        let s = state.lock();
+        let messages: Vec<&str> = s.events.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.starts_with("test collector crashed (every time) — restarting"))
+                .count(),
+            3
+        );
+        assert_eq!(
+            messages.last().copied(),
+            Some(
+                "test collector crashed 4 times (every time) — stopped for this session, see errors.log"
+            )
+        );
+        assert_eq!(s.stopped_collectors, ["test"]);
+    }
+
     /// A collector that panics is started again, the crash is put on the
     /// timeline, and one that then returns normally is left finished.
     #[tokio::test]
@@ -3926,7 +4072,7 @@ mod tests {
         let supervisor = super::supervise_with(
             "test",
             &state,
-            super::Duration::ZERO,
+            AT_ONCE,
             super::Finish::Expected,
             move || {
                 let n = counter.fetch_add(1, Ordering::SeqCst);

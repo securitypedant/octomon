@@ -262,6 +262,42 @@ fn own_roots() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Whether this run hands anything back at all: a `sudo` run (see
+/// [`invoker`]) whose data or config directory lies in the invoking user's
+/// home. Linux's default `sudo` resets `HOME` to `/root`, so octomon's
+/// directories there are root's own, correctly: nothing needs giving back,
+/// and logging every file as "left root-owned" would be noise about files
+/// that are exactly where and whose they should be. Computed once.
+#[cfg(unix)]
+fn hand_back_active() -> bool {
+    static ACTIVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ACTIVE.get_or_init(|| {
+        invoker().is_some()
+            && invoker_home().is_some_and(|home| {
+                [data_dir(), crate::config::Config::dir()]
+                    .into_iter()
+                    .flatten()
+                    .any(|dir| in_home(&dir, home))
+            })
+    })
+}
+
+/// Whether `dir` — which may not exist yet, on a first run — lies strictly
+/// inside `home`, judged from its longest existing ancestor, resolved, so a
+/// `$HOME` reached through a symlink still counts and `..` does not.
+#[cfg(unix)]
+fn in_home(dir: &std::path::Path, home: &std::path::Path) -> bool {
+    let Some(existing) = dir.ancestors().find(|a| a.exists()) else {
+        return false;
+    };
+    let Ok(resolved) = std::fs::canonicalize(existing) else {
+        return false;
+    };
+    let rest = dir.strip_prefix(existing).unwrap_or(dir);
+    let full = resolved.join(rest);
+    full != home && full.starts_with(home)
+}
+
 /// Give a file or directory octomon holds open back to the user who ran
 /// `sudo octomon` (see [`invoker`]). A no-op unprivileged, and for anything
 /// not owned by root: a file that already belongs to the user stays theirs,
@@ -351,7 +387,7 @@ fn hand_back_failed(message: String) {
 /// unprivileged. Shaped to slot into `open(..).inspect(store::hand_back)`.
 #[cfg(unix)]
 pub fn hand_back<F: std::os::fd::AsFd>(file: &F) {
-    if invoker().is_some() {
+    if hand_back_active() {
         hand_back_fd(file.as_fd(), Scope::Own);
     }
 }
@@ -387,7 +423,7 @@ fn open_nofollow(path: &std::path::Path, dir: bool) -> Option<std::fs::File> {
 /// touch its mode.
 pub fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
-    let created: Vec<PathBuf> = if invoker().is_some() {
+    let created: Vec<PathBuf> = if hand_back_active() {
         dir.ancestors()
             .take_while(|a| std::fs::symlink_metadata(a).is_err())
             .map(std::path::Path::to_path_buf)
@@ -404,7 +440,7 @@ pub fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
         if owned_by_me(dir) {
             let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(DIR_MODE));
         }
-        if invoker().is_some() {
+        if hand_back_active() {
             // The leaf is octomon's own whether or not this call made it, so
             // one a past `sudo` run left root-owned is repaired here too. Its
             // parents are handed back only if this call created them.
@@ -761,7 +797,7 @@ pub fn tighten_permissions() {
         .into_iter()
         .flatten()
     {
-        if invoker().is_some() {
+        if hand_back_active() {
             hand_back_tree(&dir);
         }
         // Only a directory this user owns, and never through a symlink: an
@@ -1352,6 +1388,35 @@ mod tests {
         drop(held);
         assert!(rewrite_locked(&path, |_| Some("b\n".into())).unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "b\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The hand-back is only in play when octomon's directories are in the
+    /// invoking user's home. Linux's default `sudo` puts them under `/root`,
+    /// where they are correctly root's and nothing is to be given back; a
+    /// directory that does not exist yet is judged by where it would be.
+    #[cfg(unix)]
+    #[test]
+    fn hand_back_is_only_in_play_inside_the_invokers_home() {
+        use std::path::Path;
+        let dir = std::env::temp_dir().join(format!("octomon-in-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("home/alice")).unwrap();
+        std::fs::create_dir_all(dir.join("root")).unwrap();
+        let home = std::fs::canonicalize(dir.join("home/alice")).unwrap();
+        let raw = |p: &str| dir.join(p);
+        assert!(in_home(&raw("home/alice/.local/share/octomon"), &home));
+        assert!(in_home(&raw("home/alice/.config/octomon"), &home));
+        assert!(!in_home(&raw("root/.local/share/octomon"), &home));
+        assert!(!in_home(&raw("home/alice"), &home));
+        assert!(!in_home(
+            &raw("home/alice/../bob/.local/share/octomon"),
+            &home
+        ));
+        assert!(!in_home(Path::new("/nonexistent-root-xyz/octomon"), &home));
+        // Through a symlink to the home: still inside it.
+        std::os::unix::fs::symlink(&home, dir.join("alice-link")).unwrap();
+        assert!(in_home(&raw("alice-link/.local/share/octomon"), &home));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
