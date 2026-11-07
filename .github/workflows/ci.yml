@@ -41,6 +41,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      worker: ${{ steps.filter.outputs.worker }}
+      dist: ${{ steps.filter.outputs.dist }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -58,10 +60,14 @@ jobs:
         run: |
           set -euo pipefail
           decide() { echo "code=$1" >> "$GITHUB_OUTPUT"; echo "→ code=$1: $2"; }
+          # The Worker and the dist check have their own, cheaper jobs; they
+          # run when their files moved, or when nothing can be diffed.
+          also() { echo "worker=$1" >> "$GITHUB_OUTPUT"; echo "dist=$2" >> "$GITHUB_OUTPUT"; echo "→ worker=$1 dist=$2"; }
 
           # The weekly run exists for the audit alone.
           if [ "$EVENT" = "schedule" ]; then
             decide false "scheduled audit"
+            also false false
             exit 0
           fi
 
@@ -70,6 +76,7 @@ jobs:
           # because guessing wrong in that direction is the cheap mistake.
           if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
             decide true "no usable base to diff against (${base:-none})"
+            also true true
             exit 0
           fi
 
@@ -78,15 +85,25 @@ jobs:
 
           # Everything that cannot reach a compiler. No markdown is pulled in
           # with include_str!, so documentation really is inert; add future
-          # web-only trees (a blog, say) here rather than to the trigger.
-          inert='^(website/|octomon-brand/|packaging/|\.github/ISSUE_TEMPLATE/|screenshot\.png$|LICENSE|.*\.md$)'
+          # web-only trees (a blog, say) here rather than to the trigger. The
+          # Worker is inert to the Rust build too: it has its own job below.
+          inert='^(website/|worker/|octomon-brand/|packaging/|\.github/ISSUE_TEMPLATE/|screenshot\.png$|LICENSE|.*\.md$)'
           if [ -z "$changed" ]; then
             decide true "empty diff — not trusting it"
+            also true true
+            exit 0
           elif echo "$changed" | grep -qvE "$inert"; then
             decide true "something outside the web/docs set changed"
           else
             decide false "web, docs and art only — nothing to compile"
           fi
+          worker=false; dist=false
+          echo "$changed" | grep -qE '^worker/' && worker=true
+          # release.yml is generated from dist-workspace.toml; a change to
+          # either (Dependabot bumps the pins in release.yml directly) has
+          # to be checked against the other, or the next release refuses.
+          echo "$changed" | grep -qE '^(\.github/workflows/release\.yml|dist-workspace\.toml|Cargo\.toml)$' && dist=true
+          also "$worker" "$dist"
 
   check:
     name: fmt · clippy · build · test (${{ matrix.os }})
@@ -187,6 +204,49 @@ jobs:
           path: ${{ matrix.bin }}
           retention-days: 14
           if-no-files-found: error
+
+  # The Cloudflare Worker behind octomon.dev: plain Node tests with fetch
+  # stubbed, nothing reaches Cloudflare. Its own job, so a Worker change
+  # does not compile five platforms to prove nothing broke.
+  worker:
+    name: worker tests
+    needs: changes
+    if: needs.changes.outputs.worker == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: node --test worker/
+
+  # release.yml is written by dist from dist-workspace.toml, and dist's own
+  # `plan` step on a release refuses to run if the two disagree — which a
+  # hand edit, or Dependabot bumping the pinned actions in release.yml,
+  # makes them do. Caught here, on the pull request, with the fix in the
+  # message: edit dist-workspace.toml and run `dist generate`.
+  dist:
+    name: release.yml matches dist-workspace.toml
+    needs: changes
+    if: needs.changes.outputs.dist == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # The release pinned in dist-workspace.toml, fetched as a tarball and
+      # checked against the digest dist publishes beside it, rather than
+      # its `curl | sh` installer. Bump both lines together.
+      - name: Install dist 0.32.0
+        run: |
+          set -euo pipefail
+          url=https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-x86_64-unknown-linux-musl.tar.xz
+          curl --proto '=https' --tlsv1.2 -sSfL "$url" -o dist.tar.xz
+          echo "0d9dc001b0e937e9cc18e0dc11784aa7a3fd566656b07828d5e1d10ce1c1c48c  dist.tar.xz" | sha256sum -c -
+          tar -xJf dist.tar.xz --strip-components=1 -C "$HOME/.cargo/bin" cargo-dist-x86_64-unknown-linux-musl/dist
+      - run: dist generate --check
 
   # One stable check for branch protection to require.
   #
