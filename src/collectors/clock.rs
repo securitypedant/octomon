@@ -33,15 +33,21 @@ pub struct NtpReading {
     pub rtt_ms: f64,
 }
 
+/// Whether this collector has anything to do: an empty `ntp_server` turns
+/// it off, and the supervisor then never starts it.
+pub fn enabled(cfg: &crate::config::Config) -> bool {
+    !cfg.ntp_server.trim().is_empty()
+}
+
 pub async fn run(
     state: Arc<Mutex<AppState>>,
     cfg: crate::config::Config,
     changed: Arc<tokio::sync::Notify>,
 ) {
-    let server = cfg.ntp_server.trim().to_string();
-    if server.is_empty() {
+    if !enabled(&cfg) {
         return;
     }
+    let server = cfg.ntp_server.trim().to_string();
     // Let the network settle before the first exchange.
     tokio::time::sleep(Duration::from_secs(4)).await;
     loop {

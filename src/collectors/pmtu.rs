@@ -43,15 +43,21 @@ const SETTLE: Duration = Duration::from_secs(8);
 /// Re-probe cadence when nothing changed; MTUs don't move on their own.
 const PERIOD: Duration = Duration::from_secs(30 * 60);
 
+/// Whether this collector has anything to do: an empty `pmtu_probe_host`
+/// turns it off, and the supervisor then never starts it.
+pub fn enabled(cfg: &crate::config::Config) -> bool {
+    !cfg.pmtu_probe_host.trim().is_empty()
+}
+
 pub async fn run(
     state: Arc<Mutex<AppState>>,
     cfg: crate::config::Config,
     changed: Arc<tokio::sync::Notify>,
 ) {
-    let host = cfg.pmtu_probe_host.trim().to_string();
-    if host.is_empty() {
+    if !enabled(&cfg) {
         return;
     }
+    let host = cfg.pmtu_probe_host.trim().to_string();
     loop {
         tokio::time::sleep(SETTLE).await;
         let (iface_mtu, available) = {

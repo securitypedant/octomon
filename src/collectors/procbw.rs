@@ -282,33 +282,42 @@ async fn full_names() -> HashMap<u32, String> {
     map
 }
 
-pub async fn run(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
+/// Whether this collector has a source to read: `Some(true)` with per-socket
+/// counters, `Some(false)` with only a container source, `None` with
+/// neither. Probes support, records the answer in `proc_status` (unsupported,
+/// or "needs elevated privileges", rather than just "empty") and logs it, so
+/// the supervisor can leave the collector unstarted on a platform that has
+/// neither without that reading as a collector that stopped on its own.
+pub async fn available(state: &Arc<Mutex<AppState>>, cfg: &crate::config::Config) -> Option<bool> {
     // Containers come from their own source and need neither `ss` nor ETW,
     // so a platform without per-socket counters still gets container rows.
-    let mut ct = containers::Source::new(&cfg);
-    // Probe support once; mark unsupported (not just "empty") if unavailable.
     let sockets_ok = platform::proc_net_sample().await.is_some();
-    if !sockets_ok {
-        let needs_privilege = platform::proc_needs_privilege();
-        crate::errlog::log(
-            "talkers",
-            if needs_privilege {
-                "per-process bandwidth needs elevated privileges — the talkers table stays empty"
-            } else {
-                "per-process bandwidth is unavailable on this platform — the talkers table stays empty"
-            },
-        );
-        state.lock().proc_status = if needs_privilege {
-            ProcStatus::NeedsPrivilege
-        } else {
-            ProcStatus::Unsupported
-        };
-        if !ct.enabled() {
-            return;
-        }
-    } else {
+    if sockets_ok {
         state.lock().proc_status = ProcStatus::Supported;
+        return Some(true);
     }
+    let needs_privilege = platform::proc_needs_privilege();
+    crate::errlog::log(
+        "talkers",
+        if needs_privilege {
+            "per-process bandwidth needs elevated privileges — the talkers table stays empty"
+        } else {
+            "per-process bandwidth is unavailable on this platform — the talkers table stays empty"
+        },
+    );
+    state.lock().proc_status = if needs_privilege {
+        ProcStatus::NeedsPrivilege
+    } else {
+        ProcStatus::Unsupported
+    };
+    containers::Source::new(cfg).enabled().then_some(false)
+}
+
+pub async fn run(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
+    let Some(sockets_ok) = available(&state, &cfg).await else {
+        return;
+    };
+    let mut ct = containers::Source::new(&cfg);
 
     // Counter key -> (bytes_in, bytes_out, retx) from the previous sample. Keyed
     // by the counter, not the process: on Linux each sample is one socket, and

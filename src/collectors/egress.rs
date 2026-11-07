@@ -383,8 +383,14 @@ impl Monitor {
 /// while it stays dark, stops when it clears — and says so both ways on the
 /// timeline, because probing third-party ports is something a person
 /// should be able to see octomon doing.
+/// Whether the monitor has anything to do: `egress_monitor = false`, or no
+/// checks configured, turns it off, and the supervisor then never starts it.
+pub fn enabled(cfg: &crate::config::Config) -> bool {
+    cfg.egress_monitor && !cfg.egress_monitor_checks.is_empty()
+}
+
 pub async fn monitor(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
-    if !cfg.egress_monitor || cfg.egress_monitor_checks.is_empty() {
+    if !enabled(&cfg) {
         return;
     }
     let checks = cfg.egress_monitor_checks.clone();

@@ -560,14 +560,21 @@ async fn main() -> Result<()> {
         let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
         move || collectors::http::run(st.clone(), cf.clone(), nc.clone())
     });
-    supervise("clock", &state, {
-        let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
-        move || collectors::clock::run(st.clone(), cf.clone(), nc.clone())
-    });
-    supervise("pmtu", &state, {
-        let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
-        move || collectors::pmtu::run(st.clone(), cf.clone(), nc.clone())
-    });
+    // A collector that is switched off is not started at all: started, it
+    // would return at once, and the supervisor would log that as a collector
+    // that stopped on its own.
+    if collectors::clock::enabled(&cfg) {
+        supervise("clock", &state, {
+            let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
+            move || collectors::clock::run(st.clone(), cf.clone(), nc.clone())
+        });
+    }
+    if collectors::pmtu::enabled(&cfg) {
+        supervise("pmtu", &state, {
+            let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
+            move || collectors::pmtu::run(st.clone(), cf.clone(), nc.clone())
+        });
+    }
     supervise("proxy", &state, {
         let (st, nc) = (state.clone(), network_changed.clone());
         move || collectors::proxy::run(st.clone(), nc.clone())
@@ -604,10 +611,12 @@ async fn main() -> Result<()> {
         let st = state.clone();
         move || collectors::signal::run(st.clone())
     });
-    supervise("procbw", &state, {
-        let (st, cf) = (state.clone(), cfg.clone());
-        move || collectors::procbw::run(st.clone(), cf.clone())
-    });
+    if collectors::procbw::available(&state, &cfg).await.is_some() {
+        supervise("procbw", &state, {
+            let (st, cf) = (state.clone(), cfg.clone());
+            move || collectors::procbw::run(st.clone(), cf.clone())
+        });
+    }
     supervise("web", &state, {
         let st = state.clone();
         move || collectors::web::run(st.clone())
@@ -616,15 +625,19 @@ async fn main() -> Result<()> {
         let (st, cf) = (state.clone(), cfg.clone());
         move || collectors::tcp::run(st.clone(), cf.clone())
     });
-    supervise("egress", &state, {
-        let (st, cf) = (state.clone(), cfg.clone());
-        move || collectors::egress::monitor(st.clone(), cf.clone())
-    });
-    supervise("edge", &state, {
-        let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
-        let interactive = !(cli.check || cli.doctor);
-        move || collectors::edge::run(st.clone(), cf.clone(), nc.clone(), interactive)
-    });
+    if collectors::egress::enabled(&cfg) {
+        supervise("egress", &state, {
+            let (st, cf) = (state.clone(), cfg.clone());
+            move || collectors::egress::monitor(st.clone(), cf.clone())
+        });
+    }
+    if collectors::edge::enabled(&cfg) {
+        supervise("edge", &state, {
+            let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
+            let interactive = !(cli.check || cli.doctor);
+            move || collectors::edge::run(st.clone(), cf.clone(), nc.clone(), interactive)
+        });
+    }
     supervise("resolve", &state, {
         let (st, pc, cf, nc) = (
             state.clone(),
@@ -3951,6 +3964,30 @@ fn prev_panel(p: Panel) -> Panel {
 mod tests {
     /// Three restarts with no wait, as `RESTART_DELAYS` but for a test.
     const AT_ONCE: &[super::Duration] = &[super::Duration::ZERO; 3];
+
+    /// Each setting that turns a collector off also keeps the supervisor from
+    /// starting it, so a disabled collector is never logged as one that
+    /// stopped on its own. `--no-edge` clears the URL, so it is covered too.
+    #[test]
+    fn a_switched_off_collector_is_known_before_it_is_started() {
+        use super::collectors::{clock, edge, egress, pmtu};
+        let on = super::config::Config::default();
+        assert!(clock::enabled(&on) && pmtu::enabled(&on) && edge::enabled(&on));
+        assert_eq!(egress::enabled(&on), !on.egress_monitor_checks.is_empty());
+
+        let mut off = on.clone();
+        off.ntp_server = " ".into();
+        off.pmtu_probe_host = String::new();
+        off.edge_check_url.clear();
+        off.egress_monitor = false;
+        assert!(!clock::enabled(&off));
+        assert!(!pmtu::enabled(&off));
+        assert!(!edge::enabled(&off));
+        assert!(!egress::enabled(&off));
+        let mut no_checks = on;
+        no_checks.egress_monitor_checks.clear();
+        assert!(!egress::enabled(&no_checks));
+    }
 
     /// A collector that panics on every pass is restarted once per delay,
     /// then stopped for the session: one last event, and its name where its
