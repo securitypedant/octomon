@@ -1574,6 +1574,30 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
 fn startup_notice(f: &mut Frame, s: &AppState, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
+    if let Some(report) = &s.crash_report {
+        lines.push(Line::from(Span::styled(
+            " ⚠ octomon crashed internally in its last session",
+            Style::new().fg(theme::warn()).bold(),
+        )));
+        let log = crate::errlog::path()
+            .map_or_else(|| "errors.log".to_string(), |p| p.display().to_string());
+        for part in [
+            format!(" {}", report.summary()),
+            " These are bugs in octomon, not problems with your network.".to_string(),
+            " Please open an issue at https://github.com/securitypedant/octomon/issues".to_string(),
+            format!(" and attach {log}"),
+            " The log can name hosts and addresses on your network; look it over first."
+                .to_string(),
+            " This notice is shown once for these errors.".to_string(),
+        ] {
+            lines.push(Line::from(Span::styled(
+                part,
+                Style::new().fg(theme::text()),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
+
     if let Some(err) = &s.icmp_error {
         lines.push(Line::from(Span::styled(
             " ⚠ Latency features are disabled",
@@ -7577,6 +7601,35 @@ mod tests {
             1,
             "never on the current entry: {out}"
         );
+    }
+
+    /// The startup notice asks for last session's crash log in the approved
+    /// words, with the counts, the times and the file, and says the log may
+    /// name the user's own hosts.
+    #[test]
+    fn startup_notice_asks_for_last_sessions_crash_log() {
+        let mut s = AppState::new(vec![]);
+        s.overlay = Overlay::Startup;
+        s.crash_report = Some(crate::errlog::CrashReport {
+            crashes: 2,
+            panics: 1,
+            first: "08:20".into(),
+            last: "09:05".into(),
+            banner: "=== octomon ===".into(),
+        });
+        let out = draw(&s, 100, 30);
+        for line in [
+            "⚠ octomon crashed internally in its last session",
+            "2 collector crashes and 1 panic were logged between 08:20 and 09:05.",
+            "These are bugs in octomon, not problems with your network.",
+            "Please open an issue at https://github.com/securitypedant/octomon/issues",
+            "and attach ",
+            "errors.log",
+            "The log can name hosts and addresses on your network; look it over first.",
+            "This notice is shown once for these errors.",
+        ] {
+            assert!(out.contains(line), "missing {line:?} in:\n{out}");
+        }
     }
 
     /// The relative wording and the stale mark, at their boundaries.

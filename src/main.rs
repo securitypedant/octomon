@@ -287,6 +287,11 @@ async fn main() -> Result<()> {
     // quietly by design, so the file is the only place a later "why did I have
     // to restart it?" can be answered from.
     errlog::start_session();
+    // What the previous session logged about octomon's own crashes, to ask
+    // for once (the startup notice, or a line under --watch) and then mark
+    // seen. Read before anything else can log, so this run's lines never mix
+    // into the previous session's.
+    let crash_report = errlog::previous_session_crashes();
 
     // Answers "where does it keep things?" without starting anything. Honours
     // --config, so asking about a profile reports that profile's file.
@@ -510,8 +515,16 @@ async fn main() -> Result<()> {
         // starts straight into the dashboard.
         let mut s = state.lock();
         let headless = cli.check || cli.doctor;
-        if !headless && (s.icmp_error.is_some() || !s.missing_tools.is_empty()) {
+        if !headless && !cli.watch {
+            s.crash_report = crash_report.clone();
+        }
+        if !headless
+            && (s.icmp_error.is_some() || !s.missing_tools.is_empty() || s.crash_report.is_some())
+        {
             s.overlay = Overlay::Startup;
+            if let Some(report) = &s.crash_report {
+                errlog::acknowledge(report);
+            }
         }
         // First run: explain what the tool answers and that it learns each
         // network's normal. Setup problems keep precedence; the explainer then
@@ -768,6 +781,14 @@ async fn main() -> Result<()> {
     // terminal is touched — it must be safe under a service manager with no
     // TTY at all.
     if cli.watch {
+        if let Some(report) = &crash_report {
+            println!(
+                "⚠ octomon crashed internally in its last session — please open an issue and attach {}",
+                errlog::path()
+                    .map_or_else(|| "errors.log".to_string(), |p| p.display().to_string())
+            );
+            errlog::acknowledge(report);
+        }
         return watch(&state, &cfg).await;
     }
 

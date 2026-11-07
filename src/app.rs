@@ -3038,6 +3038,9 @@ pub struct AppState {
     /// supervisor in `main`): their panels say so instead of silently
     /// freezing.
     pub stopped_collectors: Vec<&'static str>,
+    /// What the previous session logged about octomon's own crashes, when it
+    /// has not been shown yet: the startup notice asks for it to be reported.
+    pub crash_report: Option<crate::errlog::CrashReport>,
     /// Show the first-run explainer once the startup notice is dismissed.
     pub explainer_pending: bool,
     /// The startup version check found a newer release while another modal
@@ -3256,6 +3259,7 @@ impl AppState {
             baseline_key: None,
             baseline_unsaved: false,
             stopped_collectors: Vec::new(),
+            crash_report: None,
             explainer_pending: false,
             update_pending: false,
             locations: None,
