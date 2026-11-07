@@ -392,6 +392,12 @@ fn path() -> Option<std::path::PathBuf> {
     crate::store::data_dir().map(|d| d.join("baselines.json"))
 }
 
+/// The store's path for a message, or its bare name when there is no data
+/// directory to put it in.
+pub fn file_name() -> String {
+    path().map_or_else(|| "baselines.json".to_string(), |p| p.display().to_string())
+}
+
 /// Every stored baseline, for display. Any error is logged and read as
 /// empty, which is all a display needs; only a save ([`update_at`]) acts on
 /// a file that won't parse.
