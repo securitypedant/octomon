@@ -548,6 +548,85 @@ pub fn save_one(key: &str, b: &Baseline) {
     let _ = update(|all| put_keeping_name(all, key, b));
 }
 
+/// The learner lock, held for the life of the process once taken: see
+/// [`save_learned`]. A sibling of the baselines file rather than the file's
+/// own lock, which is held only across one save.
+static LEARNER: parking_lot::Mutex<Option<crate::store::FileLock>> = parking_lot::const_mutex(None);
+
+/// What became of a learned sample offered for saving.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Learned {
+    /// Written to the store.
+    Saved,
+    /// Another octomon process holds the learner lock and saves what it
+    /// learns from this same network; this one only watches.
+    LeftToPeer,
+}
+
+/// Save what the analysis loop learned about a network — but only from the
+/// one process that holds the learner lock. A dashboard and a `--watch`
+/// service (or two of either) on the same network each learn the same
+/// minutes; saved by both, the stored copy flipped between two in-memory
+/// ones on every fold. The first process to reach a save takes the lock
+/// and keeps it; the others learn in memory and skip the save, and try
+/// again at each fold, so when the holder exits the next one takes over.
+/// Renames, deletes and the visit stamp are not learning, and go through
+/// [`save_one`] from any process.
+pub fn save_learned(key: &str, b: &Baseline) -> Learned {
+    match path() {
+        Some(p) => save_learned_at(&p, &LEARNER, key, b),
+        // Nothing to lock: `update` logs the missing directory.
+        None => {
+            save_one(key, b);
+            Learned::Saved
+        }
+    }
+}
+
+fn save_learned_at(
+    p: &std::path::Path,
+    holder: &parking_lot::Mutex<Option<crate::store::FileLock>>,
+    key: &str,
+    b: &Baseline,
+) -> Learned {
+    let mut held = holder.lock();
+    if held.is_none() {
+        let learner = p.with_file_name("baselines.json.learner");
+        match crate::store::FileLock::acquire_now(&learner) {
+            Ok(lock) => *held = Some(lock),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                static TOLD: std::sync::Once = std::sync::Once::new();
+                TOLD.call_once(|| {
+                    crate::errlog::log(
+                        "baseline",
+                        "another octomon is saving what is learned here — this one only watches",
+                    );
+                });
+                return Learned::LeftToPeer;
+            }
+            // A lock that can't be had for any other reason (an unwritable
+            // directory, no locking on this platform) must not stop learning
+            // from being saved at all: save as before, unlocked.
+            Err(e) => {
+                crate::errlog::log(
+                    "baseline",
+                    format!(
+                        "{}: saving without the learner lock: {e}",
+                        learner.display()
+                    ),
+                );
+            }
+        }
+    }
+    let _ = update_at(p, |all| put_keeping_name(all, key, b)).inspect_err(|e| {
+        crate::errlog::log(
+            "baseline",
+            format!("{}: {e} — learned networks not saved", p.display()),
+        );
+    });
+    Learned::Saved
+}
+
 fn put_keeping_name(all: &mut Store, key: &str, b: &Baseline) {
     let name = all.get(key).and_then(|old| old.name.clone());
     all.insert(key.to_string(), Baseline { name, ..b.clone() });
@@ -1210,6 +1289,52 @@ mod tests {
         });
         assert!(r.is_err());
         assert_eq!(load_from(&p).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two processes learning the same network: only the one holding the
+    /// learner lock writes, the other leaves it to its peer, and takes over
+    /// once the holder lets go. Two holders stand in for two processes,
+    /// since each lock is its own open.
+    #[test]
+    fn only_one_process_saves_what_it_learns() {
+        let dir =
+            std::env::temp_dir().join(format!("octomon-baseline-learner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("baselines.json");
+        let dashboard = parking_lot::const_mutex(None);
+        let watcher = parking_lot::const_mutex(None);
+        let learned = |samples| Baseline {
+            samples,
+            ..Default::default()
+        };
+        assert_eq!(
+            save_learned_at(&p, &dashboard, "home", &learned(1)),
+            Learned::Saved
+        );
+        assert_eq!(
+            save_learned_at(&p, &watcher, "home", &learned(7)),
+            Learned::LeftToPeer
+        );
+        assert_eq!(
+            load_from(&p)["home"].samples,
+            1,
+            "the peer's copy did not land"
+        );
+        // The holder keeps saving without taking the lock again.
+        assert_eq!(
+            save_learned_at(&p, &dashboard, "home", &learned(2)),
+            Learned::Saved
+        );
+        // The holder exits: the lock goes with it, and the watcher takes over.
+        *dashboard.lock() = None;
+        assert_eq!(
+            save_learned_at(&p, &watcher, "home", &learned(8)),
+            Learned::Saved
+        );
+        assert_eq!(load_from(&p)["home"].samples, 8);
+        assert!(dir.join(".baselines.json.learner.lock").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

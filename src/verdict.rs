@@ -4613,9 +4613,12 @@ pub async fn run(state: std::sync::Arc<parking_lot::Mutex<AppState>>, cfg: crate
                 }
             }
             BaselineIo::Save { key, baseline } => {
-                let _ =
-                    tokio::task::spawn_blocking(move || crate::baseline::save_one(&key, &baseline))
-                        .await;
+                // Only the one process holding the learner lock writes what
+                // it learns; the others watch (see `baseline::save_learned`).
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::baseline::save_learned(&key, &baseline)
+                })
+                .await;
             }
         }
     }
