@@ -801,9 +801,13 @@ async fn main() -> Result<()> {
     // screen then would wreck it, and printing would land on the dashboard.
     // Only the UI's own thread restores and prints; every other panic is
     // only logged.
+    // The UI's thread is whichever one this runs on (the main thread, under
+    // `#[tokio::main]`), recorded by id rather than assumed by name, so a
+    // future move of the loop onto a worker cannot leave the terminal raw.
+    let ui_thread = std::thread::current().id();
     let restore_and_report = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if std::thread::current().name() == Some("main") {
+        if std::thread::current().id() == ui_thread {
             restore_and_report(info);
         } else {
             log_panic(info);
@@ -878,7 +882,17 @@ enum Finish {
 }
 
 /// Record a panic in errors.log with its thread and location.
+///
+/// A panic hook must not panic: a second panic while one is being handled
+/// aborts the process, with no terminal restore and no log line. The logging
+/// here goes through `errlog`, so a panic raised inside `errlog` itself would
+/// bring the hook straight back into `errlog` on the same thread, onto a
+/// mutex that thread may still hold. The guard makes that re-entry a no-op.
 fn log_panic(info: &std::panic::PanicHookInfo) {
+    thread_local!(static IN_HOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+    if IN_HOOK.replace(true) {
+        return;
+    }
     let thread = std::thread::current();
     let at = info
         .location()
@@ -892,6 +906,18 @@ fn log_panic(info: &std::panic::PanicHookInfo) {
             panic_message(info.payload())
         ),
     );
+    IN_HOOK.set(false);
+}
+
+/// Panic on purpose at a named point when `OCTOMON_DEBUG_PANIC` names it, in
+/// debug builds only: the one way to see the hooks, the supervisor and the
+/// crash limit work in a live session (`collector` panics the vitals
+/// collector on every start; `ui` panics the dashboard loop on its first
+/// frame). A release build never panics here, whatever the environment.
+pub(crate) fn debug_panic(point: &str) {
+    if cfg!(debug_assertions) && std::env::var("OCTOMON_DEBUG_PANIC").as_deref() == Ok(point) {
+        panic!("OCTOMON_DEBUG_PANIC={point}");
+    }
 }
 
 /// A panic's message: the payload of `panic!("…")` is a `&str` or a
@@ -1112,6 +1138,7 @@ async fn run_ui(
             Some(key) = rx.recv() => handle_key(ctx, key),
         }
 
+        debug_panic("ui");
         let mut s = ctx.state.lock();
         if s.should_quit {
             break;
