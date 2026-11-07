@@ -102,17 +102,320 @@ pub fn owned_by_me(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// The account a `sudo` run is acting for, as `(uid, gid)`: set only when the
+/// effective uid is 0 and sudo's `SUDO_UID` / `SUDO_GID` name somebody other
+/// than root. That is the run whose `$HOME` can still be the invoking user's
+/// (macOS keeps it; `sudo -E` keeps it on Linux), so the files it creates
+/// there would otherwise be root-owned and owner-only — and the next
+/// unprivileged run could neither read nor append its own baselines, history
+/// or logs, failing as quietly as every other best-effort write here.
+/// Computed once: none of the inputs change for the life of the process.
+#[cfg(unix)]
+fn invoker() -> Option<(u32, u32)> {
+    static INVOKER: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    *INVOKER.get_or_init(|| {
+        // SAFETY: geteuid() takes no arguments, cannot fail, and only reads the
+        // calling process's own credentials.
+        let euid = unsafe { libc::geteuid() };
+        invoker_from(
+            euid,
+            std::env::var("SUDO_UID").ok().as_deref(),
+            std::env::var("SUDO_GID").ok().as_deref(),
+        )
+    })
+}
+
+/// [`invoker`]'s decision, apart from the process it reads. A `SUDO_UID` of 0
+/// (root sudo-ing to root) has nobody to hand anything back to, and a value
+/// that does not parse is not guessed at: the files simply stay root's, which
+/// is what happened before this existed.
+#[cfg(unix)]
+fn invoker_from(euid: u32, uid: Option<&str>, gid: Option<&str>) -> Option<(u32, u32)> {
+    if euid != 0 {
+        return None;
+    }
+    let uid: u32 = uid?.trim().parse().ok()?;
+    let gid: u32 = gid?.trim().parse().ok()?;
+    (uid != 0).then_some((uid, gid))
+}
+
+/// The invoking user's home directory, from the password database rather than
+/// `$HOME` — the environment is exactly what is in question under `sudo` —
+/// and with symlinks resolved, so it compares against the resolved path of an
+/// open file. Computed once; `None` when not under `sudo`.
+#[cfg(unix)]
+fn invoker_home() -> Option<&'static std::path::Path> {
+    static HOME: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        use std::os::unix::ffi::OsStrExt as _;
+        let (uid, _) = invoker()?;
+        // SAFETY: an all-zero `passwd` is a valid value for getpwuid_r to fill
+        // in (every field is an integer or a pointer).
+        let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut buf = vec![0 as libc::c_char; 16 * 1024];
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: every pointer is to a live local of the size passed, and the
+        // strings it fills in point into `buf`, which outlives their use below.
+        let rc =
+            unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut found) };
+        if rc != 0 || found.is_null() || pwd.pw_dir.is_null() {
+            return None;
+        }
+        // SAFETY: getpwuid_r succeeded, so pw_dir is a NUL-terminated string
+        // inside `buf`.
+        let dir = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) };
+        std::fs::canonicalize(std::ffi::OsStr::from_bytes(dir.to_bytes())).ok()
+    })
+    .as_deref()
+}
+
+/// Where an open file or directory actually is, asked of the descriptor rather
+/// than worked out from the path it was opened by. The path's directories sit
+/// in the invoking user's home, where anything running as that user can swap
+/// one for a symlink between a check and a use; the descriptor's own answer
+/// cannot be redirected that way. Platforms without a way to ask return
+/// `None`, and nothing is handed back there.
+#[cfg(target_os = "macos")]
+fn real_path(fd: std::os::fd::RawFd) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes at most MAXPATHLEN (== PATH_MAX) bytes,
+    // NUL-terminated, into the buffer, which is that size.
+    if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } == -1 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0)?;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..end])))
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn real_path(fd: std::os::fd::RawFd) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/self/fd/{fd}")).ok()
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "linux", target_os = "android"))
+))]
+fn real_path(_fd: std::os::fd::RawFd) -> Option<PathBuf> {
+    None
+}
+
+/// What a resolved path is to octomon, for deciding whether a `sudo` run may
+/// give it to the invoking user.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Scope {
+    /// One of octomon's own directories, or something inside one.
+    Own,
+    /// A directory between the home directory and one of octomon's own that
+    /// this very call had to create (`~/.local/share` on a Mac that never had
+    /// one). Left root-owned, it would break every other program that keeps
+    /// its data there, not just octomon.
+    CreatedParent,
+}
+
+/// Whether `real` — a resolved path, from [`real_path`] — may be chowned to the
+/// invoking user. Never the home directory itself and never anything outside
+/// it: that is the line that keeps a planted link from turning "give the user
+/// back their file" into "give the user a file of root's". And within the
+/// home, only octomon's own directories (`roots`, also resolved) and what is
+/// in them, or a parent of one that octomon just created. A home of `/` would
+/// make every path qualify, so it disqualifies everything instead.
+#[cfg(unix)]
+fn may_hand_back(
+    real: &std::path::Path,
+    home: &std::path::Path,
+    roots: &[PathBuf],
+    scope: Scope,
+) -> bool {
+    use std::path::Component;
+    let plain = |p: &std::path::Path| {
+        p.is_absolute()
+            && p.components()
+                .all(|c| !matches!(c, Component::ParentDir | Component::CurDir))
+    };
+    if !plain(real) || !plain(home) || home.parent().is_none() {
+        return false;
+    }
+    if real == home || !real.starts_with(home) {
+        return false;
+    }
+    roots
+        .iter()
+        .filter(|r| plain(r) && r.starts_with(home) && r.as_path() != home)
+        .any(|r| match scope {
+            Scope::Own => real.starts_with(r),
+            Scope::CreatedParent => r.starts_with(real),
+        })
+}
+
+/// octomon's own directories, resolved: the data directory and the default
+/// config directory. A `--config` file elsewhere is not among them — its
+/// directory is whatever the user named, and is not octomon's to give away.
+#[cfg(unix)]
+fn own_roots() -> Vec<PathBuf> {
+    [data_dir(), crate::config::Config::dir()]
+        .into_iter()
+        .flatten()
+        .filter_map(|d| std::fs::canonicalize(d).ok())
+        .collect()
+}
+
+/// Give a file or directory octomon holds open back to the user who ran
+/// `sudo octomon` (see [`invoker`]). A no-op unprivileged, and for anything
+/// not owned by root: a file that already belongs to the user stays theirs,
+/// and one that belongs to some third account is not ours to give away.
+///
+/// Everything is decided from the descriptor — `fstat` for what it is and who
+/// owns it, [`real_path`] for where it is — and the change is an `fchown` of
+/// that same descriptor, so no symlink planted along the path can point it at
+/// anything else. A regular file with more than one link is left alone: a
+/// hard link to a root file (macOS does not stop a user making one) would
+/// otherwise hand the user that file.
+#[cfg(unix)]
+fn hand_back_fd(fd: std::os::fd::BorrowedFd<'_>, scope: Scope) {
+    use std::os::fd::AsRawFd as _;
+    let Some((uid, gid)) = invoker() else { return };
+    let raw = fd.as_raw_fd();
+    // SAFETY: an all-zero `stat` is a valid value for fstat to overwrite.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `raw` is a descriptor borrowed for this call, and `st` is a
+    // live local of the right type.
+    if unsafe { libc::fstat(raw, &mut st) } != 0 || st.st_uid != 0 {
+        return;
+    }
+    let kind = st.st_mode & libc::S_IFMT;
+    let real = real_path(raw);
+    let shown = || {
+        real.as_deref()
+            .map_or_else(|| format!("descriptor {raw}"), |p| p.display().to_string())
+    };
+    if kind == libc::S_IFREG && st.st_nlink != 1 {
+        hand_back_failed(format!(
+            "{} has {} hard links — left root-owned",
+            shown(),
+            st.st_nlink
+        ));
+        return;
+    }
+    if kind != libc::S_IFREG && kind != libc::S_IFDIR {
+        return;
+    }
+    let Some(home) = invoker_home() else {
+        hand_back_failed(format!(
+            "no home directory for uid {uid} — {} left root-owned",
+            shown()
+        ));
+        return;
+    };
+    let Some(real) = real.as_deref() else {
+        hand_back_failed(format!("{} has no path — left root-owned", shown()));
+        return;
+    };
+    if !may_hand_back(real, home, &own_roots(), scope) {
+        hand_back_failed(format!(
+            "{} is outside octomon's directories in {} — left root-owned",
+            real.display(),
+            home.display()
+        ));
+        return;
+    }
+    // A failure leaves the file root-owned, which is no worse than before,
+    // but the next unprivileged run will fail on it, so it is recorded.
+    // SAFETY: `raw` is a live descriptor for the duration of this call.
+    if unsafe { libc::fchown(raw, uid, gid) } != 0 {
+        hand_back_failed(format!(
+            "could not give {} back to uid {uid}: {}",
+            real.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+}
+
+/// Record a file left root-owned. errors.log hands its own file back too, so
+/// a failure there would come straight back here: only the outer call logs.
+#[cfg(unix)]
+fn hand_back_failed(message: String) {
+    thread_local!(static LOGGING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+    if LOGGING.replace(true) {
+        return;
+    }
+    crate::errlog::log("sudo", message);
+    LOGGING.set(false);
+}
+
+/// [`hand_back_fd`] for a file just opened in one of octomon's own
+/// directories. Call it on every file octomon creates there — it costs one
+/// `fstat` once the file is already the user's, and nothing at all
+/// unprivileged. Shaped to slot into `open(..).inspect(store::hand_back)`.
+#[cfg(unix)]
+pub fn hand_back<F: std::os::fd::AsFd>(file: &F) {
+    if invoker().is_some() {
+        hand_back_fd(file.as_fd(), Scope::Own);
+    }
+}
+
+#[cfg(not(unix))]
+pub fn hand_back<F>(_file: &F) {}
+
+/// Open `path` without following a symlink and without blocking (a planted
+/// FIFO would otherwise hang the open), for [`hand_back_fd`]. Read-only is
+/// enough: `fchown` needs ownership privileges, not write access.
+#[cfg(unix)]
+fn open_nofollow(path: &std::path::Path, dir: bool) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut flags = libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+    if dir {
+        flags |= libc::O_DIRECTORY;
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)
+        .ok()
+}
+
 /// `create_dir_all`, then make the leaf owner-only — when it is ours. A
 /// directory somebody else owns (their `$XDG_DATA_HOME`, or the user's own
 /// tree seen from a `sudo` run) is not ours to re-permission.
+///
+/// Under `sudo`, the leaf (whether or not this call created it) and any
+/// parents this call created are then given to the invoking user (see
+/// [`hand_back`]) — the leaf after it has been made
+/// owner-only, since once it is theirs [`owned_by_me`] no longer lets root
+/// touch its mode.
 pub fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    let created: Vec<PathBuf> = if invoker().is_some() {
+        dir.ancestors()
+            .take_while(|a| std::fs::symlink_metadata(a).is_err())
+            .map(std::path::Path::to_path_buf)
+            .collect()
+    } else {
+        Vec::new()
+    };
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
+        use std::os::fd::AsFd as _;
         use std::os::unix::fs::PermissionsExt as _;
         // Best-effort: failing here would cost the write.
         if owned_by_me(dir) {
             let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(DIR_MODE));
+        }
+        if invoker().is_some() {
+            // The leaf is octomon's own whether or not this call made it, so
+            // one a past `sudo` run left root-owned is repaired here too. Its
+            // parents are handed back only if this call created them.
+            if let Some(f) = open_nofollow(dir, true) {
+                hand_back_fd(f.as_fd(), Scope::Own);
+            }
+            for parent in created.iter().filter(|p| p.as_path() != dir) {
+                if let Some(f) = open_nofollow(parent, true) {
+                    hand_back_fd(f.as_fd(), Scope::CreatedParent);
+                }
+            }
         }
     }
     Ok(())
@@ -148,6 +451,13 @@ pub fn private_options() -> std::fs::OpenOptions {
 /// the previous file intact rather than a truncated one — which, for
 /// config.toml and baselines.json, would read as every setting or every
 /// learned network gone at the next start.
+///
+/// The rename means the target takes the temporary file's owner, so under
+/// `sudo` a file the user owned would come back root's at every save. The
+/// temporary file is handed back (see [`hand_back`]) before the rename for
+/// that reason. It is also always a fresh one: a leftover from a crash is
+/// removed and the new one created exclusively, so a hard link planted under
+/// that name can neither be truncated through nor end up in place.
 pub fn write_private(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
     use std::io::Write as _;
     // A symlinked target (a config.toml kept in a dotfiles repo) is written
@@ -173,11 +483,15 @@ pub fn write_private(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std:
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "octomon".to_string())
     ));
-    let mut f = private_options()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&tmp)?;
+    let fresh = || private_options().write(true).create_new(true).open(&tmp);
+    let mut f = match fresh() {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(&tmp)?;
+            fresh()?
+        }
+        opened => opened?,
+    };
+    hand_back(&f);
     let written = f
         .write_all(contents.as_ref())
         .and_then(|()| f.sync_all())
@@ -188,11 +502,258 @@ pub fn write_private(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std:
     written
 }
 
+/// How long to wait for another octomon process to let go of a data file
+/// before giving up: an append then goes ahead unlocked, a rewrite or a
+/// baselines save fails. Holders only ever append a line or rewrite a
+/// few hundred kilobytes, so anything past this is a stuck or stopped process
+/// (a dashboard suspended with Ctrl+Z mid-write), and the verdict loop must not
+/// hang behind it.
+const LOCK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// An exclusive, cross-process hold on one data file, released on drop.
+///
+/// Two octomon processes routinely share the data directory — the dashboard
+/// and a `--watch` service, say — and both append to the same history files.
+/// An append is safe on its own (`O_APPEND` lands each line whole at the end),
+/// but a rewrite is read → tmp file → rename: a line another process appends
+/// between the read and the rename goes to the inode the rename then unlinks,
+/// and is gone. So every rewrite of a shared file takes this first and
+/// re-reads the file once it holds it, and every append tries to take it
+/// ([`append_locked`] goes ahead without it rather than drop the line; the
+/// `errors.log` roll tries once). `baselines.json` takes it across its whole
+/// load, edit and save.
+///
+/// The lock is a sibling `.<name>.lock` rather than the file itself, because
+/// the rewrite replaces the file's inode: a lock on the old one would not stop
+/// a writer that opened the new one. Advisory — it only orders octomon against
+/// octomon, which is all that writes here.
+#[must_use = "the lock is released as soon as this is dropped"]
+pub struct FileLock {
+    _file: std::fs::File,
+}
+
+impl FileLock {
+    /// Take the lock for `path`, waiting up to [`LOCK_PATIENCE`] — blocking
+    /// the calling thread, so keep it off the shared state lock. A peer that
+    /// held on past the deadline is a `WouldBlock` error saying so; any other
+    /// error is the real one (an unopenable lock file, say), so the log says
+    /// what actually went wrong. Callers decide whether to go ahead unlocked
+    /// (an append — a racy line beats a lost one) or give up (a rewrite —
+    /// never safe unlocked).
+    pub fn acquire(path: &std::path::Path) -> std::io::Result<FileLock> {
+        Self::acquire_within(path, LOCK_PATIENCE)
+    }
+
+    /// One attempt, no waiting: for writers that must never stall, and go
+    /// ahead unlocked when a peer has it.
+    pub fn acquire_now(path: &std::path::Path) -> std::io::Result<FileLock> {
+        Self::acquire_within(path, std::time::Duration::ZERO)
+    }
+
+    fn acquire_within(
+        path: &std::path::Path,
+        patience: std::time::Duration,
+    ) -> std::io::Result<FileLock> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| std::io::Error::other("no file name to lock"))?;
+        let lock = path.with_file_name(format!(".{}.lock", name.to_string_lossy()));
+        let deadline = std::time::Instant::now() + patience;
+        loop {
+            match Self::try_acquire(&lock)? {
+                Some(held) => return Ok(held),
+                None if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                None => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        if cfg!(windows) {
+                            format!(
+                                "{} is still open elsewhere after {patience:?} (another octomon, or a scanner)",
+                                lock.display()
+                            )
+                        } else {
+                            format!(
+                                "another octomon process held {} past {patience:?}",
+                                lock.display()
+                            )
+                        },
+                    ));
+                }
+            }
+        }
+    }
+
+    /// One non-blocking attempt: `Ok(None)` when another process holds it.
+    /// Non-blocking plus a deadline rather than a blocking `flock`, so a peer
+    /// that never lets go costs at most [`LOCK_PATIENCE`] and not the rest
+    /// of the session.
+    #[cfg(unix)]
+    fn try_acquire(lock: &std::path::Path) -> std::io::Result<Option<FileLock>> {
+        use std::os::fd::AsRawFd as _;
+        let file = private_options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock)
+            .inspect(hand_back)?;
+        loop {
+            // SAFETY: the descriptor is open for the duration of the call (it
+            // is borrowed from `file`), and flock only reads its arguments.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                // Released by the kernel when `file` closes — on drop, or when
+                // the process dies, so a crash never leaves it held.
+                return Ok(Some(FileLock { _file: file }));
+            }
+            let e = std::io::Error::last_os_error();
+            match e.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::EWOULDBLOCK) => return Ok(None),
+                _ => return Err(e),
+            }
+        }
+    }
+
+    /// Windows has no `flock`, but a handle opened with no sharing is the same
+    /// thing: while it is open,
+    /// every other open of the file fails with a sharing violation, and the
+    /// OS closes it if the process dies.
+    #[cfg(windows)]
+    fn try_acquire(lock: &std::path::Path) -> std::io::Result<Option<FileLock>> {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        /// `ERROR_SHARING_VIOLATION`: somebody else has it open.
+        const SHARING_VIOLATION: i32 = 32;
+        match private_options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(lock)
+        {
+            Ok(file) => Ok(Some(FileLock { _file: file })),
+            Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Anything else has no lock: appends go ahead unlocked as before, but
+    /// rewrites and baselines saves fail rather than race.
+    #[cfg(not(any(unix, windows)))]
+    fn try_acquire(_: &std::path::Path) -> std::io::Result<Option<FileLock>> {
+        Err(std::io::Error::other("no file locking on this platform"))
+    }
+}
+
+/// Append `text` to `path` (creating it owner-only), holding its [`FileLock`]
+/// so the line cannot land in the middle of another process's rewrite. When
+/// the lock cannot be had the append goes ahead anyway: losing the line to a
+/// race that may not even be happening is worse than risking it. That is
+/// logged, once per file per run, so a lost line has an explanation.
+pub fn append_locked(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        create_dir_private(dir)?;
+    }
+    let _held = FileLock::acquire(path)
+        .inspect_err(|e| {
+            static TOLD: parking_lot::Mutex<Vec<PathBuf>> = parking_lot::const_mutex(Vec::new());
+            let mut told = TOLD.lock();
+            if !told.iter().any(|p| p == path) {
+                told.push(path.to_path_buf());
+                drop(told);
+                crate::errlog::log(
+                    "store",
+                    format!("{}: appending without the lock: {e}", path.display()),
+                );
+            }
+        })
+        .ok();
+    private_options()
+        .create(true)
+        .append(true)
+        .open(path)
+        .inspect(hand_back)?
+        .write_all(text.as_bytes())
+}
+
+/// Rewrite `path` from its current contents, under its [`FileLock`]. The file
+/// is read *after* the lock is taken, so whatever another process appended
+/// since the caller last looked is in what `edit` sees and survives. `edit`
+/// returns the new contents, or `None` to leave the file alone. `Ok(false)`
+/// when nothing needed writing (no file, or no change). A lock that stays
+/// busy is an error rather than a quiet skip: never writing unlocked is what
+/// makes this safe, but a [x] delete that silently didn't happen should say
+/// why in the error log.
+pub fn rewrite_locked(
+    path: &std::path::Path,
+    edit: impl FnOnce(&str) -> Option<String>,
+) -> std::io::Result<bool> {
+    let _held = FileLock::acquire(path)?;
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    match edit(&text) {
+        Some(body) => write_private(path, body).map(|()| true),
+        None => Ok(false),
+    }
+}
+
+/// How often a long run re-checks a growing file against its bound. Startup
+/// prunes too, but a `--watch` service can run for weeks without one; hourly
+/// keeps the files near their bound at the cost of one small read an hour,
+/// and the rewrite itself still only happens when something is due to go.
+pub const PRUNE_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// When a file was last checked against its bound, so the append path can
+/// prune once per interval without rewriting on every append. A check is
+/// claimed when it is asked for, not when it finishes, so a prune that fails
+/// waits for the next interval.
+pub struct PruneClock {
+    every: std::time::Duration,
+    // parking_lot's doesn't poison, so a panic elsewhere can't stop pruning
+    // for the rest of the run.
+    last: parking_lot::Mutex<Option<std::time::Instant>>,
+}
+
+impl PruneClock {
+    pub const fn new(every: std::time::Duration) -> Self {
+        Self {
+            every,
+            last: parking_lot::const_mutex(None),
+        }
+    }
+
+    /// Record a check made now (the startup load counts as one).
+    pub fn mark(&self) {
+        *self.last.lock() = Some(std::time::Instant::now());
+    }
+
+    /// Claim a check if one is due, so concurrent appenders in this process
+    /// don't both run it. Never checked counts as due.
+    pub fn claim_if_due(&self) -> bool {
+        let mut last = self.last.lock();
+        if last.is_some_and(|t| t.elapsed() < self.every) {
+            return false;
+        }
+        *last = Some(std::time::Instant::now());
+        true
+    }
+}
+
 /// Re-permission everything octomon has already written. `OpenOptions::mode`
 /// only applies at creation, so an install that predates owner-only files would
 /// keep its world-readable history forever without a pass like this. Runs once
 /// at startup, best-effort, and never recurses — the data and config
 /// directories are flat.
+///
+/// Under `sudo` it also gives back to the invoking user whatever an earlier
+/// `sudo` run left root-owned there (see [`hand_back`]) — without that, an
+/// install hit before files were handed back would stay unwritable to its
+/// own user.
 #[cfg(unix)]
 pub fn tighten_permissions() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -200,6 +761,9 @@ pub fn tighten_permissions() {
         .into_iter()
         .flatten()
     {
+        if invoker().is_some() {
+            hand_back_tree(&dir);
+        }
         // Only a directory this user owns, and never through a symlink: an
         // elevated run over the invoking user's home must not chmod whatever
         // a planted link points at (see `owned_by_me`).
@@ -218,6 +782,29 @@ pub fn tighten_permissions() {
             if regular && owned_by_me(&path) {
                 let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(FILE_MODE));
             }
+        }
+    }
+}
+
+/// The `sudo` half of [`tighten_permissions`]: one of octomon's directories
+/// and the regular files directly in it, each opened without following links
+/// and handed back through its descriptor. Flat, like the directories.
+#[cfg(unix)]
+fn hand_back_tree(dir: &std::path::Path) {
+    use std::os::fd::AsFd as _;
+    let Some(d) = open_nofollow(dir, true) else {
+        return;
+    };
+    hand_back_fd(d.as_fd(), Scope::Own);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        if let Some(f) = open_nofollow(&entry.path(), false) {
+            hand_back_fd(f.as_fd(), Scope::Own);
         }
     }
 }
@@ -253,8 +840,13 @@ fn net_history_path() -> Option<PathBuf> {
     Some(data_dir()?.join("net_history.jsonl"))
 }
 
+/// When net_history.jsonl was last checked against its cap.
+static NET_HISTORY_PRUNED: PruneClock = PruneClock::new(PRUNE_EVERY);
+
 /// Append network changes (best-effort) — the verdict tick calls this with
-/// whatever the collectors pushed since its last pass.
+/// whatever the collectors pushed since its last pass. Every
+/// [`PRUNE_EVERY`] it also trims the file the way the startup load does, so a
+/// `--watch` that runs for weeks stays as bounded as one restarted daily.
 pub fn append_net_changes(changes: &[crate::app::NetChange]) {
     if changes.is_empty() {
         return;
@@ -266,66 +858,111 @@ pub fn append_net_changes(changes: &[crate::app::NetChange]) {
         );
         return;
     };
-    if let Some(dir) = path.parent() {
-        let _ = create_dir_private(dir);
+    let body: String = changes
+        .iter()
+        .filter_map(|c| serde_json::to_string(c).ok())
+        .map(|l| l + "\n")
+        .collect();
+    if let Err(e) = append_locked(&path, &body) {
+        crate::errlog::log(
+            "store",
+            format!(
+                "could not append to {}: {e} — {} network changes not persisted",
+                path.display(),
+                changes.len()
+            ),
+        );
+        return;
     }
-    let mut f = match private_options().create(true).append(true).open(&path) {
-        Ok(f) => f,
-        Err(e) => {
-            crate::errlog::log(
-                "store",
-                format!(
-                    "could not open {}: {e} — {} network changes not persisted",
-                    path.display(),
-                    changes.len()
-                ),
-            );
-            return;
-        }
-    };
-    for c in changes {
-        if let Ok(line) = serde_json::to_string(c) {
-            let _ = writeln!(f, "{line}");
-        }
+    if NET_HISTORY_PRUNED.claim_if_due() {
+        prune_net_history(&path);
     }
+}
+
+/// Trim net_history.jsonl to its tail, under the lock and from a fresh read,
+/// when [`net_history_tail`] says it has outgrown its slack.
+fn prune_net_history(path: &std::path::Path) {
+    if let Err(e) = rewrite_locked(path, |text| net_history_tail(text).1) {
+        crate::errlog::log("store", format!("could not trim {}: {e}", path.display()));
+    }
+}
+
+/// The last [`crate::app::NET_HISTORY_CAP`] changes in `text`, plus — when the
+/// file holds several caps' worth — the body to rewrite it down to them. The
+/// slack is what keeps this from rewriting on every append once the file sits
+/// at the cap: a trimmed file has to grow by three caps before it is due again.
+/// The rewrite keeps the file's own lines from the first one kept, including
+/// any this version can't parse — a newer octomon beside this one may have
+/// written them — and drops only what lies before.
+fn net_history_tail(
+    text: &str,
+) -> (
+    std::collections::VecDeque<crate::app::NetChange>,
+    Option<String>,
+) {
+    let all: Vec<(usize, crate::app::NetChange)> = text
+        .lines()
+        .enumerate()
+        .filter_map(|(i, l)| serde_json::from_str(l).ok().map(|c| (i, c)))
+        .collect();
+    let cap = crate::app::NET_HISTORY_CAP;
+    let skip = all.len().saturating_sub(cap);
+    let first_kept = all.get(skip).map_or(0, |(i, _)| *i);
+    let tail: std::collections::VecDeque<_> = all.into_iter().skip(skip).map(|(_, c)| c).collect();
+    let rewrite = (skip > cap * 3).then(|| {
+        text.lines()
+            .skip(first_kept)
+            .map(|l| format!("{l}\n"))
+            .collect()
+    });
+    (tail, rewrite)
 }
 
 /// The stored network history, oldest → newest, capped to what the pane
 /// keeps. A file grown to several caps' worth is rewritten down to the tail
 /// while we're here, so an always-on machine doesn't accrete an unbounded
-/// log of DHCP renewals. Unparseable lines (older formats) are skipped.
+/// log of DHCP renewals; [`append_net_changes`] repeats that during a long
+/// run. Lines this version can't parse are skipped here, and kept on disk
+/// unless a trim removes everything before them. An unreadable file is
+/// logged and shows as empty.
 pub fn load_net_history() -> std::collections::VecDeque<crate::app::NetChange> {
     let Some(path) = net_history_path() else {
         return Default::default();
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Some(text) = read_logged(&path, "store") else {
         return Default::default();
     };
-    let all: Vec<crate::app::NetChange> = text
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    let cap = crate::app::NET_HISTORY_CAP;
-    let skip = all.len().saturating_sub(cap);
-    let tail: std::collections::VecDeque<_> = all.into_iter().skip(skip).collect();
-    if skip > cap * 3 {
-        let mut out = String::new();
-        for c in &tail {
-            if let Ok(line) = serde_json::to_string(c) {
-                out.push_str(&line);
-                out.push('\n');
-            }
-        }
-        let _ = write_private(&path, out);
+    NET_HISTORY_PRUNED.mark();
+    let (tail, rewrite) = net_history_tail(&text);
+    // The rewrite re-reads under the lock rather than writing `rewrite`
+    // as-is: a `--watch` beside us may have appended since the read above.
+    if rewrite.is_some() {
+        prune_net_history(&path);
     }
     tail
 }
 
+/// Read a history file for display. Missing is `None` quietly; anything else
+/// that stops the read is logged first, since an unreadable file (say, one an
+/// old `sudo` run left root-owned) would otherwise just look empty.
+pub fn read_logged(path: &std::path::Path, area: &str) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(t) => Some(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            crate::errlog::log(area, format!("could not read {}: {e}", path.display()));
+            None
+        }
+    }
+}
+
 /// Delete the whole data directory — baselines, incident history, speed-test
-/// history and session CSVs. The total-reset path; best-effort.
-pub fn erase() {
-    if let Some(dir) = data_dir() {
-        let _ = std::fs::remove_dir_all(dir);
+/// history and session CSVs. The total-reset path; an error if it was there
+/// and couldn't be removed.
+pub fn erase() -> std::io::Result<()> {
+    match data_dir().map(std::fs::remove_dir_all) {
+        Some(Err(e)) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
     }
 }
 
@@ -337,37 +974,43 @@ pub fn append(rec: &SpeedRecord) {
         crate::errlog::log("store", "no data directory — speed test not saved");
         return;
     };
-    if let Some(dir) = path.parent() {
-        let _ = create_dir_private(dir);
-    }
-    match (
-        private_options().create(true).append(true).open(&path),
-        serde_json::to_string(rec),
-    ) {
-        (Ok(mut f), Ok(line)) => {
-            if let Err(e) = writeln!(f, "{line}") {
-                crate::errlog::log("store", format!("speed test not saved: {e}"));
+    match serde_json::to_string(rec) {
+        Ok(line) => {
+            if let Err(e) = append_locked(&path, &(line + "\n")) {
+                crate::errlog::log(
+                    "store",
+                    format!(
+                        "could not append to {}: {e} — speed test not saved",
+                        path.display()
+                    ),
+                );
             }
         }
-        (Err(e), _) => crate::errlog::log(
-            "store",
-            format!(
-                "could not open {}: {e} — speed test not saved",
-                path.display()
-            ),
-        ),
-        (_, Err(e)) => crate::errlog::log("store", format!("speed test not serializable: {e}")),
+        Err(e) => crate::errlog::log("store", format!("speed test not serializable: {e}")),
     }
 }
 
 /// Remove one record from the history file (blocking file rewrite — call off
-/// the lock). Matched on timestamp + provider + the speeds, first match only:
+/// the state lock). Matched on timestamp + provider + the speeds, first match only:
 /// `at` alone can collide when two providers are raced in the same second.
+/// Rewritten under the file lock from a fresh read, so a speed test another
+/// octomon process records meanwhile is not swept away with this one.
 pub fn forget(rec: &SpeedRecord) {
     let Some(path) = path() else { return };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return;
-    };
+    let rewrote = rewrite_locked(&path, |text| without_record(text, rec));
+    if let Err(e) = rewrote {
+        crate::errlog::log(
+            "store",
+            format!(
+                "could not rewrite {}: {e} — speed test not removed",
+                path.display()
+            ),
+        );
+    }
+}
+
+/// `text` without the first line that is `rec`, or `None` when no line is.
+fn without_record(text: &str, rec: &SpeedRecord) -> Option<String> {
     let mut removed = false;
     let kept: Vec<&str> = text
         .lines()
@@ -385,13 +1028,13 @@ pub fn forget(rec: &SpeedRecord) {
             !same
         })
         .collect();
-    if removed {
+    removed.then(|| {
         let mut out = kept.join("\n");
         if !out.is_empty() {
             out.push('\n');
         }
-        let _ = write_private(&path, out);
-    }
+        out
+    })
 }
 
 /// Load the most recent `n` records (oldest → newest), plus how many are stored
@@ -401,7 +1044,7 @@ pub fn load_recent(n: usize) -> (Vec<SpeedRecord>, usize) {
     let Some(path) = path() else {
         return (Vec::new(), 0);
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Some(text) = read_logged(&path, "store") else {
         return (Vec::new(), 0);
     };
     let mut recs: Vec<SpeedRecord> = text
@@ -455,6 +1098,396 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&rec).unwrap()).unwrap();
         assert_eq!(back.network.as_deref(), Some("United WiFi"));
         assert_eq!(back.medium.as_deref(), Some("Wi-Fi (wireless)"));
+    }
+
+    /// A scratch directory under the system temp dir, unique to this test and
+    /// this process — never the real data directory.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("octomon-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn change(at: i64) -> String {
+        let c = crate::app::NetChange {
+            at,
+            kind: crate::app::NetChangeKind::LinkLost,
+            iface: "en0".into(),
+            summary: format!("change {at}"),
+            detail: Vec::new(),
+        };
+        serde_json::to_string(&c).unwrap() + "\n"
+    }
+
+    /// The trim has slack, so a file sitting at the cap is not rewritten on
+    /// every append — only once it has grown three caps past it.
+    #[test]
+    fn net_history_is_trimmed_only_once_it_outgrows_the_slack() {
+        let cap = crate::app::NET_HISTORY_CAP;
+        let lines = |n: usize| (0..n as i64).map(change).collect::<String>();
+
+        let (tail, rewrite) = net_history_tail(&lines(cap / 2));
+        assert_eq!(tail.len(), cap / 2);
+        assert!(rewrite.is_none());
+
+        // Over the cap but within the slack: the pane still gets only the
+        // tail, and the file is left alone.
+        let (tail, rewrite) = net_history_tail(&lines(cap * 4));
+        assert_eq!(tail.len(), cap);
+        assert_eq!(tail.front().unwrap().at, (cap * 3) as i64);
+        assert!(rewrite.is_none());
+
+        let (tail, rewrite) = net_history_tail(&lines(cap * 4 + 1));
+        let body = rewrite.expect("past the slack");
+        assert_eq!(body.lines().count(), cap);
+        assert_eq!(tail.back().unwrap().at, (cap * 4) as i64);
+        // What would be written is exactly what the pane shows, newest last.
+        let (again, rewrite) = net_history_tail(&body);
+        assert_eq!(again.len(), cap);
+        assert_eq!(again.back().unwrap().at, (cap * 4) as i64);
+        assert!(rewrite.is_none());
+    }
+
+    /// The periodic prune claims its slot, so it runs once per interval no
+    /// matter how often the append path asks — and the startup load counts.
+    #[test]
+    fn the_prune_clock_is_due_once_per_interval() {
+        let clock = PruneClock::new(PRUNE_EVERY);
+        assert!(clock.claim_if_due(), "never checked is due");
+        assert!(!clock.claim_if_due(), "claimed by the first ask");
+        let always = PruneClock::new(std::time::Duration::ZERO);
+        assert!(always.claim_if_due() && always.claim_if_due());
+
+        let clock = PruneClock::new(PRUNE_EVERY);
+        clock.mark();
+        assert!(!clock.claim_if_due(), "a startup load counts as a check");
+    }
+
+    /// Appenders and a rewriter running at once, as a dashboard and a
+    /// `--watch` do: every appended line must survive every rewrite. Threads
+    /// stand in for processes, since each lock is its own open.
+    #[test]
+    fn appends_survive_concurrent_rewrites() {
+        let dir = scratch("append-race");
+        let path = dir.join("net_history.jsonl");
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let rewriter = {
+            let (path, done) = (path.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut rewrites = 0;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    if rewrite_locked(&path, |t| Some(t.to_string())).is_ok() {
+                        rewrites += 1;
+                    }
+                    // flock isn't fair: without a pause the rewriter could
+                    // re-take the lock every time, an appender would give up
+                    // after LOCK_PATIENCE and append unlocked, and the test
+                    // would fail for a reason it isn't testing.
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                rewrites
+            })
+        };
+        let appenders: Vec<_> = (0..4)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for j in 0..50 {
+                        append_locked(&path, &format!("{i}-{j}\n")).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for a in appenders {
+            a.join().unwrap();
+        }
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(rewriter.join().unwrap() > 0, "the rewriter ran");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 200, "no line lost to a rewrite");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The race this lock exists for: a line another process appends after
+    /// the rewriter first read the file must survive the rewrite, because
+    /// the rewrite re-reads once it holds the lock.
+    #[test]
+    fn a_locked_rewrite_keeps_a_line_appended_after_the_first_read() {
+        let dir = scratch("rewrite");
+        let path = dir.join("net_history.jsonl");
+        append_locked(&path, &(change(1) + &change(2))).unwrap();
+
+        let stale = std::fs::read_to_string(&path).unwrap();
+        append_locked(&path, &change(3)).unwrap();
+
+        // Drop the first line, as a prune would.
+        let drop_first =
+            |text: &str| Some(text.lines().skip(1).map(|l| format!("{l}\n")).collect());
+        assert_eq!(stale.lines().count(), 2);
+        assert!(rewrite_locked(&path, drop_first).unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, change(2) + &change(3));
+
+        // Nothing to change means nothing written, and no file is not an error.
+        assert!(!rewrite_locked(&path, |_| None).unwrap());
+        assert!(!rewrite_locked(&dir.join("absent.jsonl"), |_| Some(String::new())).unwrap());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, FILE_MODE, "rewritten file stays owner-only");
+            let lock = dir.join(".net_history.jsonl.lock");
+            let mode = std::fs::metadata(&lock).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, FILE_MODE, "the lock file is owner-only too");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// While another holder has the file, a rewrite gives up with an error
+    /// instead of writing unlocked — and once it lets go, it goes through.
+    /// An append doesn't wait forever on a held lock or drop its line: after
+    /// LOCK_PATIENCE it goes ahead without it.
+    #[test]
+    fn an_append_goes_ahead_when_the_lock_stays_busy() {
+        let dir = scratch("append-held");
+        let path = dir.join("history.jsonl");
+        let held = FileLock::acquire(&path).expect("free to start with");
+        append_locked(&path, "kept\n").expect("appends anyway");
+        drop(held);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept\n");
+    }
+
+    /// A lock that can't be taken for a reason other than a busy peer says
+    /// so at once, instead of waiting out LOCK_PATIENCE and blaming a peer.
+    #[test]
+    fn a_lock_error_is_the_real_error_and_immediate() {
+        let dir = scratch("lock-missing");
+        let started = std::time::Instant::now();
+        let Err(err) = FileLock::acquire(&dir.join("missing/sub/f")) else {
+            panic!("locked a file in a missing directory")
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(started.elapsed() < LOCK_PATIENCE / 2);
+
+        let path = dir.join("f");
+        let _held = FileLock::acquire(&path).unwrap();
+        let started = std::time::Instant::now();
+        let Err(err) = FileLock::acquire_now(&path) else {
+            panic!("took a held lock")
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(
+            started.elapsed() < LOCK_PATIENCE / 2,
+            "acquire_now never waits"
+        );
+    }
+
+    /// [x] on a speed test removes that one record and nothing else.
+    #[test]
+    fn forgetting_a_speed_test_removes_only_the_first_match() {
+        let rec = |at, down| SpeedRecord {
+            at,
+            provider: "Cloudflare".into(),
+            down_mbps: down,
+            up_mbps: 10.0,
+            idle_ms: None,
+            loaded_ms: None,
+            network: None,
+            medium: None,
+            server: None,
+        };
+        let line = |r: &SpeedRecord| serde_json::to_string(r).unwrap();
+        let text = [
+            line(&rec(1, 50.0)),
+            "not json".into(),
+            line(&rec(1, 50.0)),
+            line(&rec(1, 60.0)),
+        ]
+        .join("\n")
+            + "\n";
+        let out = without_record(&text, &rec(1, 50.0)).expect("one matched");
+        assert_eq!(
+            out,
+            [
+                "not json".to_string(),
+                line(&rec(1, 50.0)),
+                line(&rec(1, 60.0))
+            ]
+            .join("\n")
+                + "\n"
+        );
+        assert!(without_record(&text, &rec(2, 50.0)).is_none());
+        assert_eq!(
+            without_record(&(line(&rec(1, 50.0)) + "\n"), &rec(1, 50.0)).as_deref(),
+            Some("")
+        );
+    }
+
+    /// A trim keeps lines this version can't parse once they're past the cut:
+    /// a newer octomon beside it may have written them.
+    #[test]
+    fn a_net_history_trim_keeps_lines_it_cannot_parse() {
+        let cap = crate::app::NET_HISTORY_CAP;
+        let mut text: String = (0..(cap * 4) as i64).map(change).collect();
+        text.push_str("{\"from\":\"a newer octomon\"}\n");
+        text.push_str(&change((cap * 4) as i64));
+        let body = net_history_tail(&text).1.expect("past the slack");
+        assert!(body.contains("a newer octomon"));
+        assert_eq!(body.lines().count(), cap + 1);
+    }
+
+    #[test]
+    fn a_rewrite_never_runs_while_someone_else_holds_the_lock() {
+        let dir = scratch("held");
+        let path = dir.join("history.jsonl");
+        append_locked(&path, "a\nb\n").unwrap();
+
+        let held = FileLock::acquire(&path).expect("free to start with");
+        let err = rewrite_locked(&path, |_| Some(String::new())).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n");
+
+        drop(held);
+        assert!(rewrite_locked(&path, |_| Some("b\n".into())).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "b\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only a real `sudo` run hands anything back: root with a non-root
+    /// `SUDO_UID`. An unprivileged process with sudo's variables inherited
+    /// (a shell spawned from a sudo session) has nothing to give away, and a
+    /// mangled variable is not guessed at.
+    #[cfg(unix)]
+    #[test]
+    fn only_root_acting_for_someone_else_has_an_invoker() {
+        assert_eq!(invoker_from(0, Some("501"), Some("20")), Some((501, 20)));
+        assert_eq!(invoker_from(501, Some("501"), Some("20")), None);
+        assert_eq!(invoker_from(0, Some("0"), Some("0")), None);
+        assert_eq!(invoker_from(0, None, Some("20")), None);
+        assert_eq!(invoker_from(0, Some("501"), None), None);
+        assert_eq!(invoker_from(0, Some("-1"), Some("20")), None);
+        assert_eq!(invoker_from(0, Some("alice"), Some("20")), None);
+    }
+
+    /// The line between "give the user back their file" and "give the user a
+    /// file of root's" — every case a planted link could steer a resolved path
+    /// into.
+    #[cfg(unix)]
+    #[test]
+    fn only_octomons_own_files_under_the_home_are_handed_back() {
+        use std::path::Path;
+        let home = Path::new("/Users/alice");
+        let roots = [
+            PathBuf::from("/Users/alice/.local/share/octomon"),
+            PathBuf::from("/Users/alice/.config/octomon"),
+        ];
+        let own = |p: &str| may_hand_back(Path::new(p), home, &roots, Scope::Own);
+        let parent = |p: &str| may_hand_back(Path::new(p), home, &roots, Scope::CreatedParent);
+
+        // octomon's directories and what is in them.
+        assert!(own("/Users/alice/.local/share/octomon"));
+        assert!(own("/Users/alice/.local/share/octomon/baselines.json"));
+        assert!(own("/Users/alice/.config/octomon/.config.toml.tmp"));
+
+        // A link steered the open somewhere else entirely.
+        assert!(!own("/etc/sudoers"));
+        assert!(!own("/Users/bob/.local/share/octomon/history.jsonl"));
+        // A sibling whose name merely starts the same way.
+        assert!(!own("/Users/alice/.local/share/octomon-old/history.jsonl"));
+        assert!(!own("/Users/alicex/.local/share/octomon/history.jsonl"));
+        // In the home, but not octomon's.
+        assert!(!own("/Users/alice/.ssh/authorized_keys"));
+        assert!(!own("/Users/alice"));
+        // Lexical tricks never count as inside.
+        assert!(!own(
+            "/Users/alice/.local/share/octomon/../../../../etc/passwd"
+        ));
+        assert!(!own("relative/octomon/x"));
+
+        // Parents: only directories on the way to one of octomon's own, and
+        // never the home itself.
+        assert!(parent("/Users/alice/.local"));
+        assert!(parent("/Users/alice/.local/share"));
+        assert!(parent("/Users/alice/.config"));
+        assert!(!parent("/Users/alice"));
+        assert!(!parent("/Users"));
+        assert!(!parent("/Users/alice/Library"));
+        // `Own` does not stretch to the parents, nor `CreatedParent` to files.
+        assert!(!own("/Users/alice/.local/share"));
+        assert!(!parent("/Users/alice/.local/share/octomon/errors.log"));
+    }
+
+    /// A home or a root that would make the containment checks vacuous
+    /// disqualifies rather than qualifies.
+    #[cfg(unix)]
+    #[test]
+    fn a_degenerate_home_or_root_hands_back_nothing() {
+        use std::path::Path;
+        let anywhere = [PathBuf::from("/etc")];
+        assert!(!may_hand_back(
+            Path::new("/etc/sudoers"),
+            Path::new("/"),
+            &anywhere,
+            Scope::Own
+        ));
+        // An `$XDG_DATA_HOME` pointing outside the home is not octomon's to
+        // hand out, even though it is octomon's directory.
+        let home = Path::new("/Users/alice");
+        assert!(!may_hand_back(
+            Path::new("/etc/sudoers"),
+            home,
+            &anywhere,
+            Scope::Own
+        ));
+        // The home named as a root does not make the whole home fair game.
+        let whole = [PathBuf::from("/Users/alice")];
+        assert!(!may_hand_back(
+            Path::new("/Users/alice/.ssh/id_ed25519"),
+            home,
+            &whole,
+            Scope::Own
+        ));
+    }
+
+    /// Everything [`hand_back_fd`] decides rests on the descriptor reporting
+    /// where it really is: through a symlinked directory, the resolved path,
+    /// not the one it was opened by.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_descriptor_reports_its_resolved_path() {
+        use std::os::fd::AsRawFd as _;
+        let dir = std::env::temp_dir().join(format!("octomon-realpath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+        std::fs::write(dir.join("real/f"), "x").unwrap();
+
+        let f = std::fs::File::open(dir.join("link/f")).unwrap();
+        let want = std::fs::canonicalize(dir.join("real/f")).unwrap();
+        assert_eq!(real_path(f.as_raw_fd()), Some(want));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The temporary file `write_private` renames into place is created fresh
+    /// even when a stale one is lying there — a hard link under that name must
+    /// be replaced, not truncated through. Runs in a scratch directory, never
+    /// the real data directory.
+    #[test]
+    fn a_stale_temporary_file_is_replaced_not_written_through() {
+        let dir = std::env::temp_dir().join(format!("octomon-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "keep me").unwrap();
+        let target = dir.join("baselines.json");
+        std::fs::hard_link(&victim, dir.join(".baselines.json.tmp")).unwrap();
+
+        write_private(&target, "{}").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{}");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

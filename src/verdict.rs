@@ -4402,7 +4402,7 @@ pub fn session_state(v: &Verdict) -> crate::session::SessionState {
     }
 }
 
-pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::config::Config) {
+pub async fn run(state: std::sync::Arc<parking_lot::Mutex<AppState>>, cfg: crate::config::Config) {
     let mut tick = tokio::time::interval(cfg.sample_interval());
     let sinks = cfg.alert.sinks();
     // Consecutive fully-healthy ticks; a fold happens each time this hits 60.
@@ -4418,7 +4418,7 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
         let mut episodes: Vec<crate::history::Episode> = Vec::new();
         let net_changes: Vec<crate::app::NetChange>;
         let io = {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             let triage = evaluate(&s);
             let insufficient = insufficient_reason(&s);
             let network = s.baseline_key.clone();
@@ -4537,7 +4537,7 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
                         // Stamp the visit and write it back, so recency
                         // ordering survives visits that never reach a
                         // healthy minute (which is when folds would save).
-                        if let Some(b) = b.as_mut() {
+                        if let Ok(Some(b)) = b.as_mut() {
                             b.last_seen = Some(chrono::Utc::now().timestamp());
                             crate::baseline::save_one(&key, b);
                         }
@@ -4545,11 +4545,29 @@ pub async fn run(state: std::sync::Arc<std::sync::Mutex<AppState>>, cfg: crate::
                     }
                 })
                 .await
-                .ok()
-                .flatten();
-                let mut s = state.lock().unwrap();
+                .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+                let mut s = state.lock();
                 // The network may have moved again while we read the file.
                 if crate::baseline::fingerprint(&s.netinfo).map(|f| f.0) == Some(key.clone()) {
+                    // A read that failed is not a new network: learn this
+                    // visit in memory, but never save it over what the file
+                    // may still hold for it.
+                    s.baseline_unsaved = loaded.is_err();
+                    let loaded = match loaded {
+                        Ok(b) => b,
+                        Err(e) => {
+                            let message = format!(
+                                "couldn't read the stored baselines ({e}) — learning this network for this session only"
+                            );
+                            crate::errlog::log("baseline", &message);
+                            s.notice_event(
+                                Severity::Degraded,
+                                crate::app::EventCategory::Logging,
+                                message,
+                            );
+                            None
+                        }
+                    };
                     // A stored baseline means this is a location we have been
                     // to before: say so, by name, in the histories — the
                     // network-changed entry preceding this fired before the
@@ -4772,7 +4790,7 @@ fn baseline_step(
         }
     }
 
-    match (changed, s.baseline.clone()) {
+    match (changed && !s.baseline_unsaved, s.baseline.clone()) {
         (true, Some(baseline)) => BaselineIo::Save {
             key,
             baseline: Box::new(baseline),

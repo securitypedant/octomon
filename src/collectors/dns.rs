@@ -27,8 +27,9 @@
 //!   ad page — ISP "assistance", or a captive network. That silently breaks
 //!   anything that relies on a name *not* resolving.
 
+use parking_lot::Mutex;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
@@ -55,11 +56,11 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         // Follow whatever resolvers the current interface reports; these change
         // when the network does, or when a VPN installs its own proxy.
         let (mut servers, scope): (Vec<IpAddr>, u32) = {
-            let s = state.lock().unwrap();
+            let s = state.lock();
             (canonical_servers(&s.netinfo.dns), s.netinfo.iface_index)
         };
         if servers.is_empty() {
-            state.lock().unwrap().dns.clear();
+            state.lock().dns.clear();
             continue;
         }
         // The reference rides along unless it *is* one of the system resolvers,
@@ -84,7 +85,6 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
             // yet — the name that must not exist.
             let unjudged = state
                 .lock()
-                .unwrap()
                 .dns
                 .iter()
                 .find(|p| p.server == server)
@@ -97,7 +97,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
                 None
             };
 
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             // Keep history across ticks, and drop probes for resolvers that are
             // no longer configured.
             let idx = match s.dns.iter().position(|p| p.server == server) {
@@ -139,7 +139,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         }
 
         // Forget resolvers that dropped out of the configuration.
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         let mut live = canonical_servers(&s.netinfo.dns);
         live.extend(references.iter().copied());
         s.dns.retain(|p| live.contains(&p.server));

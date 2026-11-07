@@ -12,8 +12,9 @@
 //! before it stands — one endpoint having a bad day must not read as "your
 //! network is broken" (same philosophy as multi-anchor ping consensus).
 
+use parking_lot::Mutex;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use futures_util::StreamExt;
@@ -291,7 +292,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config, changed: Arc<Notify>)
         }
 
         let (v6_applicable, proxy_url) = {
-            let s = state.lock().unwrap();
+            let s = state.lock();
             (
                 has_global_v6(&s.netinfo.ipv6),
                 s.proxy.as_ref().and_then(|p| p.https_url()),
@@ -318,7 +319,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config, changed: Arc<Notify>)
             }
         };
 
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         if let Some(skew) = skew4.or(skew6) {
             s.clock.record_http_skew(skew);
         }

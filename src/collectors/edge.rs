@@ -5,7 +5,8 @@
 //! website's /privacy page shows everything its operator can see), and
 //! `edge_check_url = ""` disables it entirely.
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Notify;
@@ -65,7 +66,7 @@ pub async fn run(
         // *network change* is different: the old answer describes the old
         // path, so it is cleared below before the re-fetch.
         if let Some((info, latest)) = fetch(&client, &with_reason(&url, why)).await {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             s.edge = Some(info);
             // A newer release exists: the startup check raises the notice,
             // a later one only writes the timeline (see `announce_update`).
@@ -73,22 +74,22 @@ pub async fn run(
                 s.announce_update(latest, interactive && why == "start");
             }
         }
-        let v6_applicable = cfg.probe_ipv6
-            && crate::collectors::http::has_global_v6(&state.lock().unwrap().netinfo.ipv6);
+        let v6_applicable =
+            cfg.probe_ipv6 && crate::collectors::http::has_global_v6(&state.lock().netinfo.ipv6);
         if let Some(c6) = client6.as_ref().filter(|_| v6_applicable) {
             let info6 = fetch(c6, &with_reason(&url, why))
                 .await
                 .map(|(info, _)| info);
             // A failed v6 fetch on a link that claims v6 is itself telling:
             // the row goes empty rather than keeping a stale answer.
-            state.lock().unwrap().edge6 = info6;
+            state.lock().edge6 = info6;
         } else {
-            state.lock().unwrap().edge6 = None;
+            state.lock().edge6 = None;
         }
         tokio::select! {
             _ = changed.notified() => {
                 {
-                    let mut s = state.lock().unwrap();
+                    let mut s = state.lock();
                     s.edge = None;
                     s.edge6 = None;
                 }

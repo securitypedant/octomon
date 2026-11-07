@@ -5,7 +5,8 @@
 //! load average, and (on macOS and Windows) whether the OS is holding the
 //! CPU back — which can cap a speed test or an encrypted tunnel.
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -116,7 +117,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: Config) {
         let uptime = System::uptime().unwrap_or(0);
         tick = tick.wrapping_add(1);
 
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         if let Some((top, own)) = top {
             s.vitals.top_procs = top;
             s.vitals.own = own;

@@ -170,12 +170,24 @@ const BANNER_PREFIX: &str = "\n=== octomon ";
 /// can be erased underneath us (Ctrl+R), and an open handle would go on
 /// writing to an unlinked file for the rest of the session.
 fn append(line: &str) {
+    // A test that exercises a failure path must not write into the real
+    // data directory of whoever runs `cargo test`.
+    if cfg!(test) {
+        return;
+    }
     let Some(path) = path() else { return };
     if let Some(dir) = path.parent()
         && crate::store::create_dir_private(dir).is_err()
     {
         return;
     }
+    // Held across the roll and the write: with two octomon processes
+    // logging, both can see the file past the limit, and the second rename
+    // would then roll the first one's fresh, near-empty log over the
+    // generation it just kept. One attempt, no waiting: logging happens on
+    // async workers, sometimes under the state lock, and must never stall
+    // them behind a peer; unlocked is still better than unlogged.
+    let _held = crate::store::FileLock::acquire_now(&path).ok();
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_BYTES) {
         // One generation back is enough to cover "it happened before the
         // roll"; more would be an archive nobody reads.
@@ -185,6 +197,7 @@ fn append(line: &str) {
         .create(true)
         .append(true)
         .open(&path)
+        .inspect(crate::store::hand_back)
     {
         let _ = f.write_all(line.as_bytes());
     }

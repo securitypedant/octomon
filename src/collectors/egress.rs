@@ -18,8 +18,9 @@
 //! announces itself on the timeline and in the analysis, and
 //! `egress_monitor = false` turns it off.
 
+use parking_lot::Mutex;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -400,7 +401,7 @@ pub async fn monitor(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
     loop {
         ticker.tick().await;
         let (dark, active) = {
-            let s = state.lock().unwrap();
+            let s = state.lock();
             (
                 crate::verdict::https_dark(&s),
                 s.egress_monitor.as_ref().is_some_and(|m| m.active),
@@ -422,7 +423,7 @@ pub async fn monitor(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
                 }
             }
             let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             let web_too = crate::verdict::web_dark(&s);
             s.egress_monitor = Some(Monitor {
                 rows: checks
@@ -459,7 +460,7 @@ pub async fn monitor(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
         }
 
         if active && clear_for >= MONITOR_STOP_AFTER_SECS {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             let why = if s.link_lost || s.netinfo.iface.is_empty() {
                 "the link went down"
             } else if matches!(s.http.v4, crate::app::FamilyProbe::Captive(_))
@@ -492,7 +493,7 @@ pub async fn monitor(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
             last_round = Some(Instant::now());
             // Snapshot the rows under the lock, probe without it.
             let (started, rows) = {
-                let s = state.lock().unwrap();
+                let s = state.lock();
                 match s.egress_monitor.as_ref() {
                     Some(m) => (
                         Some(m.started),
@@ -516,7 +517,7 @@ pub async fn monitor(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
                 (i, outcome)
             });
             let results = futures_util::future::join_all(probes).await;
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             if let Some(m) = s.egress_monitor.as_mut()
                 && Some(m.started) == started
                 && m.active
@@ -548,7 +549,7 @@ async fn resolve_all(checks: &[EgressCheck]) -> Vec<Option<SocketAddr>> {
 /// Start (or restart) a scan of `checks`; each row updates as it completes.
 pub fn start(state: Arc<Mutex<AppState>>, mut checks: Vec<EgressCheck>, with_v6: bool) {
     {
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         // The v6 rows ride along on a dual-stack link, skipping any the
         // user already listed themselves.
         if with_v6 && crate::collectors::http::has_global_v6(&s.netinfo.ipv6) {
@@ -577,7 +578,7 @@ pub fn start(state: Arc<Mutex<AppState>>, mut checks: Vec<EgressCheck>, with_v6:
         });
     }
     tokio::spawn(async move {
-        let started = state.lock().unwrap().egress.as_ref().map(|s| s.started);
+        let started = state.lock().egress.as_ref().map(|s| s.started);
         // All rows at once: a filtered port costs a full timeout, and twelve
         // of those in series is a long wait for a yes/no table.
         let tasks: Vec<_> = checks
@@ -596,7 +597,7 @@ pub fn start(state: Arc<Mutex<AppState>>, mut checks: Vec<EgressCheck>, with_v6:
                             format!("{} {}:{} check failed: {e}", c.proto, c.host, c.port),
                         );
                     }
-                    let mut s = state.lock().unwrap();
+                    let mut s = state.lock();
                     // A newer scan may have replaced this one meanwhile.
                     if let Some(scan) = s.egress.as_mut()
                         && Some(scan.started) == started
@@ -610,7 +611,7 @@ pub fn start(state: Arc<Mutex<AppState>>, mut checks: Vec<EgressCheck>, with_v6:
         for t in tasks {
             let _ = t.await;
         }
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         if let Some(scan) = s.egress.as_mut()
             && Some(scan.started) == started
         {

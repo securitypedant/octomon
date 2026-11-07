@@ -7,9 +7,10 @@
 //! the current rate alongside. Exits early (marking unsupported) where the
 //! platform has no unprivileged source.
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::app::{AppState, ContainerInfo, ProcBandwidth, ProcStatus, RemoteBandwidth};
@@ -297,7 +298,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
                 "per-process bandwidth is unavailable on this platform — the talkers table stays empty"
             },
         );
-        state.lock().unwrap().proc_status = if needs_privilege {
+        state.lock().proc_status = if needs_privilege {
             ProcStatus::NeedsPrivilege
         } else {
             ProcStatus::Unsupported
@@ -306,7 +307,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
             return;
         }
     } else {
-        state.lock().unwrap().proc_status = ProcStatus::Supported;
+        state.lock().proc_status = ProcStatus::Supported;
     }
 
     // Counter key -> (bytes_in, bytes_out, retx) from the previous sample. Keyed
@@ -359,7 +360,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
         let secs = now.duration_since(prev_at).as_secs_f64().max(0.001);
 
         // A reset from the UI wipes the session, not just the tables.
-        if state.lock().unwrap().bw_reset {
+        if state.lock().bw_reset {
             procs.clear();
             remotes.clear();
         }
@@ -487,7 +488,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, cfg: crate::config::Config) {
         prev_at = now;
         primed = true;
 
-        let mut st = state.lock().unwrap();
+        let mut st = state.lock();
         st.bw_reset = false;
         // Presence and lifecycle are facts about the machine, recorded
         // whether or not the tables are paused.

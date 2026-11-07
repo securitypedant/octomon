@@ -2,7 +2,8 @@
 //! the platform probe (CoreWLAN on macOS — fast and unprivileged) so the
 //! Network panel can graph how signal and link rate change over time.
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::app::AppState;
@@ -14,7 +15,7 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
         ticker.tick().await;
         match platform::wifi_signal() {
             Some(sig) => {
-                let mut s = state.lock().unwrap();
+                let mut s = state.lock();
                 let sd = &mut s.signal;
                 sd.present = true;
                 sd.rssi_dbm = sig.rssi_dbm;
@@ -23,7 +24,7 @@ pub async fn run(state: Arc<Mutex<AppState>>) {
                 sd.rssi_hist.push(sig.rssi_dbm as f64);
                 sd.tx_hist.push(sig.tx_rate_mbps);
             }
-            None => state.lock().unwrap().signal.present = false,
+            None => state.lock().signal.present = false,
         }
     }
 }

@@ -3,8 +3,9 @@
 //! datagram ICMP sockets (`SOCK_DGRAM`), so no root is required on macOS or
 //! Linux. Targets can be added at runtime via [`spawn_for`].
 
+use parking_lot::Mutex;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use surge_ping::{Client, PingIdentifier, PingSequence};
 
@@ -80,7 +81,7 @@ pub fn spawn_for(
     let Some(client) = clients.for_addr(addr) else {
         // No client for this family: say so once rather than accumulating
         // losses that read as a network fault.
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         let family = if addr.is_ipv6() { "IPv6" } else { "IPv4" };
         crate::errlog::log(
             "icmp",
@@ -138,7 +139,7 @@ pub fn spawn_with_client(
             seq = seq.wrapping_add(1);
             let result = pinger.ping(PingSequence(seq), &payload).await;
             let rebind = {
-                let mut s = state.lock().unwrap();
+                let mut s = state.lock();
                 // Look up by id; if the target was deleted, end this task.
                 let Some(target) = s.targets.iter_mut().find(|t| t.id == id) else {
                     break;
@@ -163,7 +164,7 @@ pub fn spawn_with_client(
 /// Spawn ping loops for all targets currently in the state.
 pub fn spawn_all(state: Arc<Mutex<AppState>>, clients: Clients, cfg: Config) {
     let snapshot: Vec<(u64, IpAddr)> = {
-        let s = state.lock().unwrap();
+        let s = state.lock();
         s.targets.iter().map(|t| (t.id, t.addr)).collect()
     };
     for (id, addr) in snapshot {

@@ -20,8 +20,9 @@ mod ui;
 mod util;
 mod verdict;
 
+use parking_lot::Mutex;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -270,6 +271,13 @@ async fn main() -> Result<()> {
         .expect("install rustls crypto provider before any TLS use");
     use_utf8_console();
     let cli = Cli::parse();
+    // Every panic goes to errors.log, in every mode: a `--watch` under a
+    // service manager has no stderr anyone reads. It still prints as usual.
+    let print = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log_panic(info);
+        print(info);
+    }));
     // Everything octomon stores describes someone's network, so it is all
     // owner-only. New files are created that way; this catches the ones an
     // older version wrote under the umask. Before the first write, so the
@@ -414,7 +422,7 @@ async fn main() -> Result<()> {
             .position(|n| norm(n) == norm(&cfg.speedtest_provider))
             .unwrap_or(0);
 
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         s.speedtest_enabled = !cli.no_speedtest;
         s.samples_per_sec = 1000.0 / cfg.ping_interval_ms.max(1) as f64;
         s.graph_marker = cfg.marker();
@@ -495,12 +503,12 @@ async fn main() -> Result<()> {
     let (ping_clients, v4_err) = collectors::ping::Clients::open();
     if let Some(e) = v4_err {
         tracing::error!("failed to create ICMP client: {e}");
-        state.lock().unwrap().icmp_error = Some(icmp_help(&e));
+        state.lock().icmp_error = Some(icmp_help(&e));
     }
     {
         // Interrupt only for things that will visibly not work. A clean setup
         // starts straight into the dashboard.
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         let headless = cli.check || cli.doctor;
         if !headless && (s.icmp_error.is_some() || !s.missing_tools.is_empty()) {
             s.overlay = Overlay::Startup;
@@ -527,73 +535,110 @@ async fn main() -> Result<()> {
         // that isn't usable yet — launched on hotel Wi-Fi before the portal is
         // signed in to — gets the same retries a start-then-join does.
         if !cli.check {
-            tokio::spawn(collectors::discovery::refresh(
-                state.clone(),
-                ping_clients.clone(),
-                cfg.clone(),
-            ));
-            tokio::spawn(collectors::discovery::watch(
-                state.clone(),
-                ping_clients.clone(),
-                cfg.clone(),
-                network_changed.clone(),
-            ));
+            supervise_once("discovery", &state, {
+                let (st, pc, cf) = (state.clone(), ping_clients.clone(), cfg.clone());
+                move || collectors::discovery::refresh(st.clone(), pc.clone(), cf.clone())
+            });
+            supervise("discovery watch", &state, {
+                let (st, pc, cf, nc) = (
+                    state.clone(),
+                    ping_clients.clone(),
+                    cfg.clone(),
+                    network_changed.clone(),
+                );
+                move || collectors::discovery::watch(st.clone(), pc.clone(), cf.clone(), nc.clone())
+            });
         }
     }
 
-    // Spawn collectors, each on its own cadence.
-    tokio::spawn(verdict::run(state.clone(), cfg.clone()));
-    tokio::spawn(collectors::http::run(
-        state.clone(),
-        cfg.clone(),
-        network_changed.clone(),
-    ));
-    tokio::spawn(collectors::clock::run(
-        state.clone(),
-        cfg.clone(),
-        network_changed.clone(),
-    ));
-    tokio::spawn(collectors::pmtu::run(
-        state.clone(),
-        cfg.clone(),
-        network_changed.clone(),
-    ));
-    tokio::spawn(collectors::proxy::run(
-        state.clone(),
-        network_changed.clone(),
-    ));
-    tokio::spawn(collectors::throughput::run(state.clone(), cfg.clone()));
-    tokio::spawn(collectors::vitals::run(state.clone(), cfg.clone()));
-    tokio::spawn(collectors::dns::run(state.clone(), cfg.clone()));
-    tokio::spawn(collectors::logger::run(state.clone(), cfg.clone()));
-    tokio::spawn(collectors::netinfo::run(
-        state.clone(),
-        netinfo_refresh.clone(),
-        network_changed.clone(),
-    ));
-    tokio::spawn(collectors::wifi::run(state.clone(), wifi_refresh.clone()));
-    tokio::spawn(collectors::signal::run(state.clone()));
-    tokio::spawn(collectors::procbw::run(state.clone(), cfg.clone()));
-    tokio::spawn(collectors::web::run(state.clone()));
-    tokio::spawn(collectors::tcp::run(state.clone(), cfg.clone()));
-    tokio::spawn(collectors::egress::monitor(state.clone(), cfg.clone()));
-    tokio::spawn(collectors::edge::run(
-        state.clone(),
-        cfg.clone(),
-        network_changed.clone(),
-        !(cli.check || cli.doctor),
-    ));
-    tokio::spawn(collectors::resolve::run(
-        state.clone(),
-        ping_clients.clone(),
-        cfg.clone(),
-        network_changed.clone(),
-    ));
-    if !cli.no_speedtest {
-        tokio::spawn(collectors::speedtest::run(
+    // Spawn collectors, each on its own cadence, each restarted if it panics.
+    supervise("analysis", &state, {
+        let (st, cf) = (state.clone(), cfg.clone());
+        move || verdict::run(st.clone(), cf.clone())
+    });
+    supervise("http", &state, {
+        let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
+        move || collectors::http::run(st.clone(), cf.clone(), nc.clone())
+    });
+    supervise("clock", &state, {
+        let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
+        move || collectors::clock::run(st.clone(), cf.clone(), nc.clone())
+    });
+    supervise("pmtu", &state, {
+        let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
+        move || collectors::pmtu::run(st.clone(), cf.clone(), nc.clone())
+    });
+    supervise("proxy", &state, {
+        let (st, nc) = (state.clone(), network_changed.clone());
+        move || collectors::proxy::run(st.clone(), nc.clone())
+    });
+    supervise("throughput", &state, {
+        let (st, cf) = (state.clone(), cfg.clone());
+        move || collectors::throughput::run(st.clone(), cf.clone())
+    });
+    supervise("vitals", &state, {
+        let (st, cf) = (state.clone(), cfg.clone());
+        move || collectors::vitals::run(st.clone(), cf.clone())
+    });
+    supervise("dns", &state, {
+        let (st, cf) = (state.clone(), cfg.clone());
+        move || collectors::dns::run(st.clone(), cf.clone())
+    });
+    supervise("logger", &state, {
+        let (st, cf) = (state.clone(), cfg.clone());
+        move || collectors::logger::run(st.clone(), cf.clone())
+    });
+    supervise("netinfo", &state, {
+        let (st, nr, nc) = (
             state.clone(),
-            speedtest_trigger.clone(),
-        ));
+            netinfo_refresh.clone(),
+            network_changed.clone(),
+        );
+        move || collectors::netinfo::run(st.clone(), nr.clone(), nc.clone())
+    });
+    supervise("wifi", &state, {
+        let (st, wr) = (state.clone(), wifi_refresh.clone());
+        move || collectors::wifi::run(st.clone(), wr.clone())
+    });
+    supervise("signal", &state, {
+        let st = state.clone();
+        move || collectors::signal::run(st.clone())
+    });
+    supervise("procbw", &state, {
+        let (st, cf) = (state.clone(), cfg.clone());
+        move || collectors::procbw::run(st.clone(), cf.clone())
+    });
+    supervise("web", &state, {
+        let st = state.clone();
+        move || collectors::web::run(st.clone())
+    });
+    supervise("tcp", &state, {
+        let (st, cf) = (state.clone(), cfg.clone());
+        move || collectors::tcp::run(st.clone(), cf.clone())
+    });
+    supervise("egress", &state, {
+        let (st, cf) = (state.clone(), cfg.clone());
+        move || collectors::egress::monitor(st.clone(), cf.clone())
+    });
+    supervise("edge", &state, {
+        let (st, cf, nc) = (state.clone(), cfg.clone(), network_changed.clone());
+        let interactive = !(cli.check || cli.doctor);
+        move || collectors::edge::run(st.clone(), cf.clone(), nc.clone(), interactive)
+    });
+    supervise("resolve", &state, {
+        let (st, pc, cf, nc) = (
+            state.clone(),
+            ping_clients.clone(),
+            cfg.clone(),
+            network_changed.clone(),
+        );
+        move || collectors::resolve::run(st.clone(), pc.clone(), cf.clone(), nc.clone())
+    });
+    if !cli.no_speedtest {
+        supervise("speedtest", &state, {
+            let (st, tr) = (state.clone(), speedtest_trigger.clone());
+            move || collectors::speedtest::run(st.clone(), tr.clone())
+        });
     }
 
     // Headless verification mode: collect for a few seconds, run one speed test,
@@ -610,7 +655,7 @@ async fn main() -> Result<()> {
         }
         if cli.demo || cli.demo_mac {
             let mut d = demo::Disguise::new();
-            let s = state.lock().unwrap();
+            let s = state.lock();
             let view = if cli.demo {
                 demo::disguise(&s, &mut d)
             } else {
@@ -618,7 +663,7 @@ async fn main() -> Result<()> {
             };
             print_snapshot(&view);
         } else {
-            print_snapshot(&state.lock().unwrap());
+            print_snapshot(&state.lock());
         }
         return Ok(());
     }
@@ -660,7 +705,7 @@ async fn main() -> Result<()> {
         // --bundle wins when both are given: it contains the doctor report
         // anyway, so printing it as well would be the same text twice.
         if let Some(dest) = &cli.bundle {
-            let snapshot = state.lock().unwrap().clone();
+            let snapshot = state.lock().clone();
             let path = match dest.trim() {
                 "" => match store::bundle_path() {
                     Some(p) => p,
@@ -692,7 +737,7 @@ async fn main() -> Result<()> {
         }
 
         let (report, code) = {
-            let s = state.lock().unwrap();
+            let s = state.lock();
             if cli.json {
                 doctor_json(&s, cli.full)
             } else {
@@ -735,8 +780,22 @@ async fn main() -> Result<()> {
     });
 
     // ratatui::init() enables raw mode + alt screen and installs a panic hook
-    // that restores the terminal, so a panic never leaves it wedged.
+    // that restores the terminal, then runs the logging hook above.
     let mut terminal = ratatui::init();
+    // That hook restores the terminal on *any* panic, but a panic off the
+    // UI's thread doesn't end the session — a supervised collector is
+    // restarted, and the dashboard keeps drawing — so leaving the alternate
+    // screen then would wreck it, and printing would land on the dashboard.
+    // Only the UI's own thread restores and prints; every other panic is
+    // only logged.
+    let restore_and_report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().name() == Some("main") {
+            restore_and_report(info);
+        } else {
+            log_panic(info);
+        }
+    }));
     let ctx = Ctx {
         state,
         speedtest_trigger,
@@ -750,6 +809,112 @@ async fn main() -> Result<()> {
     let result = run_ui(&mut terminal, &ctx, rx).await;
     ratatui::restore();
     result
+}
+
+/// A change the user asked for didn't reach the disk: say so where they look.
+fn tell_unsaved(state: &Arc<Mutex<AppState>>, message: String) {
+    state.lock().notice_event(
+        verdict::Severity::Degraded,
+        app::EventCategory::Logging,
+        message,
+    );
+}
+
+/// How long a collector that panicked waits before it is started again: long
+/// enough that one failing on every pass cannot spin, short enough that its
+/// panel is back before anyone wonders why it froze.
+const RESTART_DELAY: Duration = Duration::from_secs(5);
+
+/// Run a long-lived collector, starting it again whenever it panics. Without
+/// this a panic ended the task silently: its panel froze on its last reading
+/// and, for the analysis loop, a `--watch` stopped alerting with nothing said.
+/// These run for the life of the process, so one that returns on its own is
+/// left alone but logged: its panel has stopped updating.
+fn supervise<F, Fut>(name: &'static str, state: &Arc<Mutex<AppState>>, start: F)
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    supervise_with(name, state, RESTART_DELAY, Finish::Unexpected, start);
+}
+
+/// [`supervise`] for a task that is meant to finish, such as one startup pass.
+fn supervise_once<F, Fut>(name: &'static str, state: &Arc<Mutex<AppState>>, start: F)
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    supervise_with(name, state, RESTART_DELAY, Finish::Expected, start);
+}
+
+/// Whether a supervised task returning on its own is news.
+#[derive(Clone, Copy, PartialEq)]
+enum Finish {
+    Expected,
+    Unexpected,
+}
+
+/// Record a panic in errors.log with its thread and location.
+fn log_panic(info: &std::panic::PanicHookInfo) {
+    let thread = std::thread::current();
+    let at = info
+        .location()
+        .map(|l| format!(" at {}:{}", l.file(), l.line()))
+        .unwrap_or_default();
+    errlog::log(
+        "panic",
+        format!(
+            "{} panicked{at}: {}",
+            thread.name().unwrap_or("a task thread"),
+            panic_message(info.payload())
+        ),
+    );
+}
+
+/// A panic's message: the payload of `panic!("…")` is a `&str` or a
+/// `String`; anything else is named as such.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
+}
+
+fn supervise_with<F, Fut>(
+    name: &'static str,
+    state: &Arc<Mutex<AppState>>,
+    delay: Duration,
+    finish: Finish,
+    mut start: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            match tokio::spawn(start()).await {
+                Err(e) if e.is_panic() => {
+                    let why = panic_message(e.into_panic().as_ref());
+                    let message = format!("{name} collector crashed ({why}) — restarting");
+                    errlog::log("supervisor", &message);
+                    state.lock().notice_event(
+                        verdict::Severity::Degraded,
+                        app::EventCategory::Logging,
+                        message,
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Ok(()) if finish == Finish::Unexpected => {
+                    errlog::log("supervisor", format!("{name} collector stopped on its own"));
+                    return;
+                }
+                _ => return,
+            }
+        }
+    })
 }
 
 /// Wait for the signal that means "stop": Ctrl-C, or the SIGTERM a service
@@ -822,7 +987,7 @@ async fn watch(state: &Arc<Mutex<AppState>>, cfg: &config::Config) -> Result<()>
         loop {
             tick.tick().await;
             let line = {
-                let s = state.lock().unwrap();
+                let s = state.lock();
                 match &s.verdict.current {
                     verdict::Verdict::Insufficient(_) => None,
                     verdict::Verdict::Healthy => Some("● connection healthy".to_string()),
@@ -854,7 +1019,7 @@ async fn watch(state: &Arc<Mutex<AppState>>, cfg: &config::Config) -> Result<()>
     // A closing count, so a run that is stopped after a week says what it saw
     // without anyone reading back through the journal.
     let (elapsed, raised) = {
-        let s = state.lock().unwrap();
+        let s = state.lock();
         (
             s.started.elapsed(),
             s.events
@@ -900,7 +1065,7 @@ async fn run_ui(
             Some(key) = rx.recv() => handle_key(ctx, key),
         }
 
-        let mut s = ctx.state.lock().unwrap();
+        let mut s = ctx.state.lock();
         if s.should_quit {
             break;
         }
@@ -1315,7 +1480,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
     let mut side = Side::None;
 
     {
-        let mut s = ctx.state.lock().unwrap();
+        let mut s = ctx.state.lock();
         s.notice = None; // any key clears a transient notice
 
         // The setup modal is dismissed by any key, and swallows it so a stray
@@ -2633,7 +2798,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     ctx.cfg.clone(),
                 ));
             } else {
-                ctx.state.lock().unwrap().notice = Some("ICMP unavailable".to_string());
+                ctx.state.lock().notice = Some("ICMP unavailable".to_string());
             }
         }
         Side::AddTarget(input) => {
@@ -2645,7 +2810,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     input,
                 ));
             } else {
-                ctx.state.lock().unwrap().notice = Some("ICMP unavailable".to_string());
+                ctx.state.lock().notice = Some("ICMP unavailable".to_string());
             }
         }
         Side::Traceroute(addr, label) => {
@@ -2661,7 +2826,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     label,
                 );
             } else {
-                ctx.state.lock().unwrap().notice = Some("ICMP unavailable".to_string());
+                ctx.state.lock().notice = Some("ICMP unavailable".to_string());
             }
         }
         Side::Whois(addr) => collectors::whois::start(ctx.state.clone(), addr),
@@ -2682,7 +2847,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 let lines = tokio::task::spawn_blocking(platform::routing_table)
                     .await
                     .unwrap_or_default();
-                state.lock().unwrap().routes = Some(lines);
+                state.lock().routes = Some(lines);
             });
         }
         Side::SaveProvider(name) => {
@@ -2748,27 +2913,51 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                         );
                     }
                 }
-                state.lock().unwrap().proc_details = map;
+                state.lock().proc_details = map;
             });
         }
         Side::ForgetLocation(key) => {
-            tokio::task::spawn_blocking(move || baseline::forget(&key));
+            let state = ctx.state.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = baseline::forget(&key) {
+                    tell_unsaved(&state, format!("couldn't forget the location: {e}"));
+                }
+            });
         }
         Side::TotalReset => {
             let state = ctx.state.clone();
             tokio::task::spawn_blocking(move || {
-                config::Config::erase();
-                store::erase();
-                state.lock().unwrap().notice_event(
-                    verdict::Severity::Info,
-                    app::EventCategory::Logging,
-                    "TOTAL RESET — all config and stored data erased; restart octomon for a fully fresh start"
-                        .to_string(),
-                );
+                let failed: Vec<String> = [
+                    ("config", config::Config::erase()),
+                    ("stored data", store::erase()),
+                ]
+                .into_iter()
+                .filter_map(|(what, r)| r.err().map(|e| format!("{what}: {e}")))
+                .collect();
+                let (severity, message) = if failed.is_empty() {
+                    (
+                        verdict::Severity::Info,
+                        "TOTAL RESET — all config and stored data erased; restart octomon for a fully fresh start"
+                            .to_string(),
+                    )
+                } else {
+                    (
+                        verdict::Severity::Degraded,
+                        format!("TOTAL RESET incomplete — not erased: {}", failed.join("; ")),
+                    )
+                };
+                state
+                    .lock()
+                    .notice_event(severity, app::EventCategory::Logging, message);
             });
         }
         Side::NameNetwork { key, label, name } => {
-            tokio::task::spawn_blocking(move || baseline::name_network(&key, &label, &name));
+            let state = ctx.state.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = baseline::name_network(&key, &label, &name) {
+                    tell_unsaved(&state, format!("couldn't save the network's name: {e}"));
+                }
+            });
         }
         Side::LoadLocations => {
             let state = ctx.state.clone();
@@ -2793,7 +2982,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                                 .cmp(&b.1.display_name().to_lowercase())
                         })
                 });
-                state.lock().unwrap().locations = Some(all);
+                state.lock().locations = Some(all);
             });
         }
         Side::EgressScan => {
@@ -2811,7 +3000,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                     tokio::task::spawn_blocking(move || collectors::logger::export_events(events))
                         .await
                         .unwrap_or_else(|e| Err(e.to_string()));
-                let mut s = state.lock().unwrap();
+                let mut s = state.lock();
                 // Lands on the timeline as well as the notice, so the file's
                 // location is still findable after the notice has gone.
                 match result {
@@ -2837,7 +3026,7 @@ fn handle_key(ctx: &Ctx, key: KeyEvent) {
                 let result = tokio::task::spawn_blocking(move || write_bundle(&snap))
                     .await
                     .unwrap_or_else(|e| Err(e.to_string()));
-                let mut s = state.lock().unwrap();
+                let mut s = state.lock();
                 // Lands on the timeline as well as the notice, so the file's
                 // location is still findable after the notice has gone.
                 match result {
@@ -3015,20 +3204,20 @@ async fn add_target(
                 Some(sa) => (sa.ip(), Some(input.clone())),
                 None => {
                     errlog::log("add-target", format!("{input} resolved to no addresses"));
-                    state.lock().unwrap().notice = Some(format!("no address for {input}"));
+                    state.lock().notice = Some(format!("no address for {input}"));
                     return;
                 }
             },
             Err(e) => {
                 errlog::log("add-target", format!("{input} did not resolve: {e}"));
-                state.lock().unwrap().notice = Some(format!("could not resolve {input}"));
+                state.lock().notice = Some(format!("could not resolve {input}"));
                 return;
             }
         },
     };
 
     let id = {
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         let idx = s.targets.len();
         let mut target = TargetStat::new(input.clone(), addr);
         target.hostname = hostname.clone();
@@ -3726,6 +3915,40 @@ fn prev_panel(p: Panel) -> Panel {
 
 #[cfg(test)]
 mod tests {
+    /// A collector that panics is started again, the crash is put on the
+    /// timeline, and one that then returns normally is left finished.
+    #[tokio::test]
+    async fn a_panicking_collector_is_restarted() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let state = super::Arc::new(super::Mutex::new(super::AppState::new(vec![])));
+        let runs = super::Arc::new(AtomicU32::new(0));
+        let counter = runs.clone();
+        let supervisor = super::supervise_with(
+            "test",
+            &state,
+            super::Duration::ZERO,
+            super::Finish::Expected,
+            move || {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    assert!(n >= 2, "deliberate crash {n}");
+                }
+            },
+        );
+        supervisor.await.expect("supervisor itself never panics");
+        assert_eq!(runs.load(Ordering::SeqCst), 3);
+        let s = state.lock();
+        let crashes = s
+            .events
+            .iter()
+            .filter(|e| {
+                e.message
+                    .starts_with("test collector crashed (deliberate crash")
+            })
+            .count();
+        assert_eq!(crashes, 2);
+    }
+
     use super::*;
     use app::{HopMonitor, MonitoredHop, QualityView, TargetStat};
     use std::net::Ipv4Addr;

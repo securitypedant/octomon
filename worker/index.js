@@ -98,15 +98,40 @@ async function edgeAnswer(request, url, env, ctx) {
 }
 
 // The public aggregate behind the /privacy graph: daily request counts per
-// octomon version for the last 30 days, queried from Analytics Engine and
-// cached for an hour. Day buckets keep it coarse in time; the version names
-// a public software build, not a person.
-async function edgeStats(env) {
-  if (!env.AE_QUERY_TOKEN || !env.CF_ACCOUNT_ID) {
-    return new Response(JSON.stringify({ series: [] }) + "\n", {
-      headers: { "content-type": "application/json; charset=utf-8" },
-    });
-  }
+// octomon version for the last 30 days, queried from Analytics Engine. Day
+// buckets keep it coarse in time; the version names a public software build,
+// not a person.
+//
+// The query runs on AE_QUERY_TOKEN, and the endpoint is public, so the
+// answer is memoized in the isolate like latestVersion() (same reasoning
+// for not using the Cache API). The response's cache-control header does
+// NOT do this job: Cloudflare runs a Worker before its cache, and
+// wrangler.jsonc doesn't opt the Worker's own responses into caching — so
+// without the memo every hit on /edge/stats would spend the token's quota.
+// A good answer is kept for an hour; a failed query only for a minute, so a
+// hiccup neither sticks for the hour nor lets a burst of requests retry
+// upstream each time, and the last good series keeps being served
+// meanwhile. While one request's refresh is running, others serve the memo
+// as it stands rather than awaiting that request's promise: Workers ties
+// I/O to the request that started it, and a promise shared across requests
+// can be left unsettled for good if its owner is cancelled. The refresh is
+// bounded by a timeout and kept alive with waitUntil, so a client that
+// disconnects mid-query can't wedge the memo either. A refresh that settles
+// after a newer one has landed is dropped. An answer that isn't a fresh
+// good series says so with `stale: true`, so the page can tell "failing"
+// from "no data yet". The memo holds only the aggregate every caller gets
+// anyway — nothing about who asked.
+const STATS_TTL_MS = 60 * 60 * 1000;
+const STATS_FAIL_TTL_MS = 60 * 1000;
+const STATS_QUERY_TIMEOUT_MS = 10 * 1000;
+let statsMemo = { series: [], ok: false, at: 0 };
+// When the running refresh started, 0 when none is. Stale after the timeout,
+// so a refresh that never reports back only delays the next one.
+let statsRefreshing = 0;
+// When the refresh whose answer is in the memo started.
+let statsFrom = 0;
+
+async function queryEdgeStats(env) {
   const sql = `
     SELECT toStartOfInterval(timestamp, INTERVAL '1' DAY) AS day,
            blob1 AS version,
@@ -116,33 +141,70 @@ async function edgeStats(env) {
     WHERE timestamp > now() - INTERVAL '30' DAY
     GROUP BY day, version, why
     ORDER BY day, version, why`;
-  const resp = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/analytics_engine/sql`,
-    {
-      method: "POST",
-      headers: { authorization: `Bearer ${env.AE_QUERY_TOKEN}` },
-      body: sql,
-    },
-  );
-  if (!resp.ok) {
+  try {
+    const resp = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/analytics_engine/sql`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.AE_QUERY_TOKEN}` },
+        body: sql,
+        signal: AbortSignal.timeout(STATS_QUERY_TIMEOUT_MS),
+      },
+    );
+    // Only the upstream status or error goes to the log (visible in
+    // `wrangler tail`; Workers Logs stay off): nothing about the caller.
+    if (!resp.ok) {
+      console.error(`edge stats: Analytics Engine answered ${resp.status}`);
+      return { series: [], ok: false, at: Date.now() };
+    }
+    const data = await resp.json();
+    // A 200 without rows is not an empty graph to keep for an hour.
+    if (!Array.isArray(data?.data)) {
+      console.error("edge stats: Analytics Engine answer has no data array");
+      return { series: [], ok: false, at: Date.now() };
+    }
+    const series = data.data.map((r) => ({
+      day: r.day,
+      version: r.version,
+      why: r.why ?? "",
+      calls: Math.round(Number(r.calls) || 0),
+    }));
+    return { series, ok: true, at: Date.now() };
+  } catch (e) {
+    console.error(`edge stats: ${e}`);
+    return { series: [], ok: false, at: Date.now() };
+  }
+}
+
+async function edgeStats(env, ctx) {
+  if (!env.AE_QUERY_TOKEN || !env.CF_ACCOUNT_ID) {
     return new Response(JSON.stringify({ series: [] }) + "\n", {
-      status: 200,
       headers: { "content-type": "application/json; charset=utf-8" },
     });
   }
-  const data = await resp.json();
-  const series = (data.data ?? []).map((r) => ({
-    day: r.day,
-    version: r.version,
-    why: r.why ?? "",
-    calls: Math.round(Number(r.calls) || 0),
-  }));
-  return new Response(JSON.stringify({ series }) + "\n", {
+  const now = Date.now();
+  const ttl = statsMemo.ok ? STATS_TTL_MS : STATS_FAIL_TTL_MS;
+  if (now - statsMemo.at >= ttl && now - statsRefreshing >= STATS_QUERY_TIMEOUT_MS) {
+    statsRefreshing = now;
+    const started = now;
+    const refresh = queryEdgeStats(env).then((m) => {
+      if (started >= statsFrom) {
+        statsMemo = m.ok ? m : { ...m, series: statsMemo.series };
+        statsFrom = started;
+      }
+      if (statsRefreshing === started) statsRefreshing = 0;
+    });
+    ctx.waitUntil(refresh);
+    await refresh;
+  }
+  const fresh = statsMemo.ok && Date.now() - statsMemo.at < STATS_TTL_MS;
+  const body = fresh ? { series: statsMemo.series } : { series: statsMemo.series, stale: true };
+  return new Response(JSON.stringify(body) + "\n", {
     headers: {
       "content-type": "application/json; charset=utf-8",
-      // One aggregate an hour is plenty; the cache also shields the API
-      // token path from being hammered through the public page.
-      "cache-control": "public, max-age=3600",
+      // For browsers only (see above). A stale or failed series must not be
+      // held on to.
+      "cache-control": fresh ? "public, max-age=3600" : "no-store",
     },
   });
 }
@@ -169,7 +231,7 @@ export default {
       return await edgeAnswer(request, url, env, ctx);
     }
     if (url.pathname === "/edge/stats") {
-      return edgeStats(env);
+      return edgeStats(env, ctx);
     }
     if (!url.pathname.startsWith("/apt/")) {
       // Non-asset paths that reach the worker have no answer of their own, so

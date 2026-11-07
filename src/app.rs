@@ -1,7 +1,9 @@
 //! Shared application state written by collectors and read by the renderer.
 //!
-//! All mutation happens under a single [`std::sync::Mutex`]; critical sections are
-//! short and never span an `.await`, so a std mutex is appropriate here.
+//! All mutation happens under a single [`parking_lot::Mutex`]; critical sections are
+//! short and never span an `.await`, so a blocking mutex is appropriate here. It
+//! does not poison: a collector that panics mid-update is restarted by its
+//! supervisor, and every other reader carries on instead of panicking in turn.
 
 use std::collections::VecDeque;
 use std::net::IpAddr;
@@ -1055,6 +1057,12 @@ pub struct NetInfo {
     pub tunnel: Option<String>,
     /// The tunnel's interface name ("utun0"), when one was detected.
     pub tunnel_iface: String,
+    /// The addresses on the tunnel device itself, bare (no prefix length).
+    /// On a split tunnel `ipv4`/`ipv6` describe the physical NIC, so this is
+    /// the only place the tunnel's own address is kept — and for a VPN no
+    /// vendor can be named for, that address is a steadier identity than a
+    /// utunN that macOS renumbers on every connect.
+    pub tunnel_addrs: Vec<String>,
     /// True when the tunnel is a split route: the kernel's default route still
     /// points at a physical NIC, but internet traffic egresses via the tunnel.
     /// The gateway shown is then the real LAN gateway, not the tunnel endpoint.
@@ -3024,6 +3032,9 @@ pub struct AppState {
     pub baseline: Option<crate::baseline::Baseline>,
     /// Fingerprint key of the current network, for persisting the baseline.
     pub baseline_key: Option<String>,
+    /// The stored baselines couldn't be read when this network was loaded:
+    /// `baseline` is learned in memory and never saved.
+    pub baseline_unsaved: bool,
     /// Show the first-run explainer once the startup notice is dismissed.
     pub explainer_pending: bool,
     /// The startup version check found a newer release while another modal
@@ -3240,6 +3251,7 @@ impl AppState {
             link_lost: false,
             baseline: None,
             baseline_key: None,
+            baseline_unsaved: false,
             explainer_pending: false,
             update_pending: false,
             locations: None,

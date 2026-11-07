@@ -15,13 +15,28 @@ pub const PROGRAM: &str = "tracert";
 #[cfg(not(windows))]
 pub const PROGRAM: &str = "traceroute";
 
+/// The Linux traceroute's own name on Debian and Ubuntu, where `traceroute`
+/// is an alternative that GNU inetutils can take over. Ubuntu 26.04 ranks
+/// inetutils first even with the `traceroute` package installed, and its
+/// dialect rejects `-n` and prints `2.9ms` with no space, so every trace
+/// failed with "answered no hops".
+#[cfg(target_os = "linux")]
+const LINUX_TRACEROUTE: &str = "/usr/bin/traceroute.db";
+
 /// The binary for this destination. macOS's `traceroute` is v4-only and
 /// refuses a v6 literal; `traceroute6` takes the same flags. Linux's
 /// `traceroute` and Windows's `tracert` infer the family from the address.
+/// On Linux the real traceroute is used by its own name when it is installed
+/// (`/usr/bin/traceroute.db`). Every trace goes through here, so the binary
+/// that runs and the one named in an error are the same.
 pub fn program(dest: &str) -> &'static str {
     #[cfg(target_os = "macos")]
     if dest.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_ipv6()) {
         return "traceroute6";
+    }
+    #[cfg(target_os = "linux")]
+    if std::path::Path::new(LINUX_TRACEROUTE).exists() {
+        return LINUX_TRACEROUTE;
     }
     let _ = dest;
     PROGRAM
@@ -161,13 +176,23 @@ mod tests {
             args(4, "2606:4700:4700::1111").contains(&"-6".to_string()),
             !cfg!(target_os = "macos")
         );
-        assert_eq!(program("1.1.1.1"), PROGRAM);
+        // On Debian and Ubuntu the Linux traceroute is run by its own name
+        // whenever it is installed, so the answer depends on this machine.
+        #[cfg(target_os = "linux")]
+        let unix = if std::path::Path::new(LINUX_TRACEROUTE).exists() {
+            LINUX_TRACEROUTE
+        } else {
+            PROGRAM
+        };
+        #[cfg(not(target_os = "linux"))]
+        let unix = PROGRAM;
+        assert_eq!(program("1.1.1.1"), unix);
         assert_eq!(
             program("2606:4700:4700::1111"),
             if cfg!(target_os = "macos") {
                 "traceroute6"
             } else {
-                PROGRAM
+                unix
             }
         );
     }

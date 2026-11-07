@@ -8,7 +8,8 @@
 //! idle/loaded latency pair is measured — the ping columns above tell that
 //! story live while the transfer saturates the link.
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::AsyncBufReadExt as _;
@@ -168,7 +169,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs the iperf3 binary installed"]
     async fn live_localhost_roundtrip() {
-        use std::sync::{Arc, Mutex};
+        use parking_lot::Mutex;
+        use std::sync::Arc;
         let mut server = std::process::Command::new("iperf3")
             .args(["-s", "-p", "5277"])
             .stdout(std::process::Stdio::null())

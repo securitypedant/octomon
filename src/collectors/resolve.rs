@@ -12,8 +12,9 @@
 //! lands on the timeline — making "did my network degrade, or did the CDN move
 //! me?" answerable at a glance.
 
+use parking_lot::Mutex;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Notify;
@@ -39,7 +40,7 @@ pub async fn run(
         }
 
         let named: Vec<(u64, String, IpAddr)> = {
-            let s = state.lock().unwrap();
+            let s = state.lock();
             s.targets
                 .iter()
                 .filter_map(|t| t.hostname.clone().map(|h| (t.id, h, t.addr)))
@@ -79,7 +80,7 @@ pub async fn run(
             }
 
             let monitored = {
-                let mut s = state.lock().unwrap();
+                let mut s = state.lock();
                 let Some(t) = s.targets.iter_mut().find(|t| t.id == id) else {
                     continue;
                 };
