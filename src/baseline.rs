@@ -224,30 +224,30 @@ fn tunnel_identity_addr<'a>(addrs: impl IntoIterator<Item = &'a String>) -> Opti
         })
 }
 
-/// Self-hosted protocols (WireGuard, OpenVPN) name the software, not the
-/// server: two configs for two different exits would share one location.
-/// Their tunnel address is fixed per config, so it tells them apart where the
-/// vendor alone cannot.
-fn self_hosted_tunnel_addr<'a>(n: &'a NetInfo, vendor: &str) -> Option<&'a str> {
-    if !matches!(vendor, "WireGuard" | "OpenVPN") {
+/// WireGuard names the software, not the server: two configs for two
+/// different exits would share one location. A WireGuard config carries its
+/// own address (`Address =`), fixed until the file is edited, so it tells the
+/// configs apart where the vendor alone cannot. No other protocol gets this:
+/// OpenVPN and every corporate client are handed an address from a pool per
+/// session, and keyed on that, each connect would mint a new location.
+fn self_hosted_tunnel_addr<'a>(
+    vendor: &str,
+    addrs: impl IntoIterator<Item = &'a String>,
+) -> Option<&'a str> {
+    if vendor != "WireGuard" {
         return None;
     }
-    tunnel_identity_addr(n.ipv4.iter().chain(&n.ipv6))
+    tunnel_identity_addr(addrs)
 }
 
-/// Identity (key part, label part) for a tunnel no vendor could be named
-/// for. The device name is no identity on macOS: utunN renumbers across
-/// connects, so the same VPN would mint a new location each time — losing its
-/// normals and its name — and a freed utunN reused by another VPN would merge
-/// two places. The tunnel's own address is fixed per config, as for
-/// [`self_hosted_tunnel_addr`]; the device name stays only as the last resort
-/// when the tunnel carries no usable address. The `Option` is that address.
-fn unidentified_tunnel(n: &NetInfo) -> (String, String, Option<&str>) {
-    match tunnel_identity_addr(&n.tunnel_addrs) {
-        Some(addr) => (format!("VPN|{addr}"), format!("VPN {addr}"), Some(addr)),
-        None => (n.tunnel_iface.clone(), "VPN".to_string(), None),
-    }
-}
+/// The identity of a tunnel no vendor could be named for: the constant "VPN",
+/// and nothing else. The device name is no identity on macOS, where utunN
+/// renumbers across connects; the tunnel's address is none either, since an
+/// unidentified VPN is usually a corporate one that assigns from a pool. Either
+/// would mint a new location per connect, losing the normals and the name.
+/// So two unknown VPNs used from one network share a location, which is the
+/// rarer and smaller harm.
+const UNIDENTIFIED: &str = "VPN";
 
 /// Fingerprint "which network is this" → (stable key, human label).
 ///
@@ -262,10 +262,11 @@ fn unidentified_tunnel(n: &NetInfo) -> (String, String, Option<&str>) {
 /// uplink and the exit PoP both shape the normal: "HomeNet via Cloudflare
 /// WARP" ≠ "HotelNet via Cloudflare WARP". Split tunnels key on the physical
 /// network's own identity; full tunnels on the gatewayed physical interface
-/// found beneath the tunnel. With no underlay visible at all, a named
-/// commercial VPN falls back to one location per vendor; a self-hosted
-/// WireGuard or OpenVPN config, or an unidentified tunnel, to one per tunnel
-/// address.
+/// found beneath the tunnel. A WireGuard config adds its own address to the
+/// identity, full or split, so two configs from one LAN are two exits (see
+/// [`self_hosted_tunnel_addr`]); an unidentified tunnel is one "VPN" per
+/// network (see [`UNIDENTIFIED`]). With no underlay visible at all, the VPN
+/// half alone is the location.
 pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
     let mac_known = mac_is_known(&n.gateway_mac);
     let ip_known = !n.gateway_ip.is_empty() && n.gateway_ip != "-";
@@ -279,10 +280,10 @@ pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
         .unwrap_or("");
     // A full-tunnel VPN (the tunnel itself holds the default route) is its own
     // place, whatever LAN sits underneath: latency, DNS and loss all describe
-    // the tunnel, not the room. Keyed on the vendor (and, for a self-hosted or
-    // unidentified tunnel, its own address), so reconnecting — or macOS
-    // renumbering utunN — comes back to the same location instead of minting
-    // a new one each time. This is also the
+    // the tunnel, not the room. Keyed on the vendor (plus a WireGuard
+    // config's own address), so reconnecting — or macOS renumbering utunN —
+    // comes back to the same location instead of minting a new one each
+    // time. This is also the
     // only identity a tunnel like WARP on Windows has: a /32, no gateway, no
     // MAC — nothing below would key on it at all.
     let full_tunnel = n.medium == LinkMedium::Tunnel && n.tunnel.is_some();
@@ -292,10 +293,10 @@ pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
 
     let (raw, label) = if full_tunnel {
         let vendor = n.tunnel.as_deref().unwrap_or("");
-        let unnamed = vendor.is_empty().then(|| unidentified_tunnel(n));
-        let (vkey, vshown) = if let Some((key, shown, _)) = &unnamed {
-            (key.clone(), shown.clone())
-        } else if let Some(addr) = self_hosted_tunnel_addr(n, vendor) {
+        // The tunnel is the link here, so its addresses are `ipv4`/`ipv6`.
+        let (vkey, vshown) = if vendor.is_empty() {
+            (UNIDENTIFIED.to_string(), UNIDENTIFIED.to_string())
+        } else if let Some(addr) = self_hosted_tunnel_addr(vendor, n.ipv4.iter().chain(&n.ipv6)) {
             (format!("{vendor}|{addr}"), format!("{vendor} {addr}"))
         } else {
             (vendor.to_string(), vendor.to_string())
@@ -321,12 +322,6 @@ pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
                         n.underlay_gateway_mac.as_str()
                     }
                 ),
-            )
-        } else if matches!(unnamed, Some((_, _, None))) {
-            // Nothing but the device name to go on: say so in the label.
-            (
-                format!("vpn|{}|{}", n.tunnel_iface, n.medium as u8),
-                format!("VPN ({})", n.tunnel_iface),
             )
         } else {
             (format!("vpn|{vkey}|{}", n.medium as u8), vshown)
@@ -364,12 +359,16 @@ pub fn fingerprint(n: &NetInfo) -> Option<(String, String)> {
     // differ in uplink and nearest exit PoP, and mixing their normals would
     // poison both. Hence the LAN identity computed above, suffixed.
     let (raw, label) = if let Some(vendor) = n.tunnel.as_deref().filter(|_| n.tunnel_is_split) {
-        // An unidentified vendor keys on the tunnel's own address (see
-        // `unidentified_tunnel`) — still its own place rather than VPN
-        // minutes folded into the bare network's normal.
+        // An unidentified vendor is still its own place (see `UNIDENTIFIED`)
+        // rather than VPN minutes folded into the bare network's normal. A
+        // WireGuard config is one exit among possibly several from this LAN,
+        // so it keys on its address exactly as a full tunnel does; the
+        // tunnel's own addresses live in `tunnel_addrs`, since `ipv4`/`ipv6`
+        // are the physical NIC's here.
         let (key, shown) = if vendor.is_empty() {
-            let (key, shown, _) = unidentified_tunnel(n);
-            (key, shown)
+            (UNIDENTIFIED.to_string(), UNIDENTIFIED.to_string())
+        } else if let Some(addr) = self_hosted_tunnel_addr(vendor, &n.tunnel_addrs) {
+            (format!("{vendor}|{addr}"), format!("{vendor} {addr}"))
         } else {
             (vendor.to_string(), vendor.to_string())
         };
@@ -688,21 +687,22 @@ mod tests {
         renumbered.ipv4 = vec!["100.96.0.7/32".into()];
         assert_eq!(key, fingerprint(&renumbered).unwrap().0);
 
-        // An unidentified tunnel still gets a location; with no address on
-        // the device to go on, it is named by the device.
+        // An unidentified tunnel still gets a location, apart from the named
+        // one, and the device name plays no part in it.
         let mut unknown = warp.clone();
         unknown.tunnel = Some(String::new());
         let (ukey, ulabel) = fingerprint(&unknown).unwrap();
         assert_ne!(key, ukey);
-        assert_eq!(ulabel, "VPN (CloudflareWARP)");
+        assert_eq!(ulabel, "VPN");
     }
 
-    /// A VPN no vendor can be named for keys on its tunnel's own address,
-    /// not the device: macOS renumbers utunN across connects, so the same
-    /// VPN must come back to the same location on utun6, and a utun4 reused
-    /// by a different VPN must not inherit the first one's normals and name.
+    /// A VPN no vendor can be named for keys on neither its device nor its
+    /// address: macOS renumbers utunN across connects, and a corporate VPN
+    /// hands out a pool address per connect, so either would mint a new
+    /// location each time, losing the normals and the name. One "VPN" per
+    /// network, whatever it is called or numbered today.
     #[test]
-    fn an_unidentified_tunnel_keys_on_its_address_not_its_device() {
+    fn an_unidentified_tunnel_keys_on_neither_its_device_nor_its_address() {
         let vpn = |iface: &str, addrs: &[&str], underlay: &str| NetInfo {
             iface: iface.into(),
             ipv4: addrs
@@ -720,29 +720,24 @@ mod tests {
             ..Default::default()
         };
         let (a, label) = fingerprint(&vpn("utun4", &["10.20.0.5"], "")).unwrap();
-        assert_eq!(label, "VPN 10.20.0.5");
+        assert_eq!(label, "VPN");
+        // Renumbered device, same VPN: same place.
         assert_eq!(a, fingerprint(&vpn("utun6", &["10.20.0.5"], "")).unwrap().0);
-        assert_ne!(a, fingerprint(&vpn("utun4", &["10.77.0.9"], "")).unwrap().0);
+        // Fresh pool address on reconnect: still the same place.
+        assert_eq!(a, fingerprint(&vpn("utun4", &["10.77.0.9"], "")).unwrap().0);
+        // No address at all: likewise.
+        assert_eq!(a, fingerprint(&vpn("utun4", &[], "")).unwrap().0);
 
-        // Over a visible underlay the address rides along after the place.
+        // Over a visible underlay it is that network's one unknown VPN.
         let (home, label) = fingerprint(&vpn("utun4", &["10.20.0.5"], "192.168.10.1")).unwrap();
-        assert_eq!(label, "192.168.10.1 via VPN 10.20.0.5");
+        assert_eq!(label, "192.168.10.1 via VPN");
         assert_eq!(
             home,
-            fingerprint(&vpn("utun9", &["10.20.0.5"], "192.168.10.1"))
+            fingerprint(&vpn("utun9", &["10.77.0.9"], "192.168.10.1"))
                 .unwrap()
                 .0
         );
-
-        // IPv6-only: the utun's own link-local is skipped.
-        let v6 = |iface: &str| vpn(iface, &["fe80::1234", "fd00:20::5"], "");
-        let (b, label) = fingerprint(&v6("utun4")).unwrap();
-        assert_eq!(label, "VPN fd00:20::5");
-        assert_eq!(b, fingerprint(&v6("utun7")).unwrap().0);
-
-        // Only a link-local: nothing better than the device name.
-        let bare = vpn("utun4", &["fe80::1234"], "");
-        assert_eq!(fingerprint(&bare).unwrap().1, "VPN (utun4)");
+        assert_ne!(home, a, "the underlay still tells places apart");
     }
 
     /// Two WireGuard configs from the same LAN are two exits, not one: the
@@ -790,6 +785,18 @@ mod tests {
         let (a, label) = fingerprint(&v6("fd00:9::10/128")).unwrap();
         assert_eq!(label, "192.168.10.1 via WireGuard fd00:9::10");
         assert_ne!(a, fingerprint(&v6("fd00:13::2/128")).unwrap().0);
+
+        // OpenVPN is handed its address from the server's pool per session,
+        // so it stays on the vendor key: 10.8.0.6 today and 10.8.0.14
+        // tomorrow are one location.
+        let ovpn = |addr: &str| {
+            let mut n = wg("utun10", addr);
+            n.tunnel = Some("OpenVPN".into());
+            n
+        };
+        let (today, label) = fingerprint(&ovpn("10.8.0.6/24")).unwrap();
+        assert_eq!(label, "192.168.10.1 via OpenVPN");
+        assert_eq!(today, fingerprint(&ovpn("10.8.0.14/24")).unwrap().0);
     }
 
     /// netdev reports an unresolved neighbour as 00:00:00:00:00:00. Keyed on
@@ -896,22 +903,36 @@ mod tests {
         renumbered.tunnel_iface = "utun7".into();
         assert_eq!(home_warp.0, fingerprint(&renumbered).unwrap().0);
 
-        // Deliberately unlike a full tunnel: two split WireGuard configs on
-        // one LAN are one location. Internet traffic doesn't go through a
-        // split tunnel, so the normal being learned is the LAN's.
-        let split_wg = |addr: &str| {
+        // A split tunnel carries the internet traffic too (the kernel's
+        // default route merely stays on the NIC), so two split WireGuard
+        // configs on one LAN are two exits with two normals, exactly as full
+        // tunnels are. The tunnel's own addresses are `tunnel_addrs`; `ipv4`
+        // is the NIC's.
+        let split_wg = |iface: &str, addr: &str| {
             let mut n = with_warp("HomeNet", "aa:bb:cc:dd:ee:ff");
             n.tunnel = Some("WireGuard".into());
-            n.tunnel_addrs = vec![addr.into()];
+            n.tunnel_iface = iface.into();
+            n.tunnel_addrs = vec!["fe80::1".into(), addr.into()];
             n
         };
-        let (a, b) = (split_wg("10.9.8.10"), split_wg("10.7.0.2"));
-        assert_eq!(fingerprint(&a).unwrap(), fingerprint(&b).unwrap());
-        assert_eq!(fingerprint(&a).unwrap().1, "HomeNet via WireGuard");
+        let (a, b) = (
+            split_wg("utun4", "10.9.8.10"),
+            split_wg("utun4", "10.7.0.2"),
+        );
+        assert_ne!(fingerprint(&a).unwrap().0, fingerprint(&b).unwrap().0);
+        assert_eq!(
+            fingerprint(&a).unwrap().1,
+            "HomeNet via WireGuard 10.9.8.10"
+        );
+        assert_eq!(
+            fingerprint(&a).unwrap().0,
+            fingerprint(&split_wg("utun7", "10.9.8.10")).unwrap().0,
+            "a renumbered utun is the same config"
+        );
 
-        // An unidentified split tunnel still separates from the bare LAN,
-        // and keys on the tunnel's own address — not the physical NIC's
-        // (`ipv4` here) and not the renumbering device name.
+        // An unidentified split tunnel still separates from the bare LAN and
+        // from a named one, and is the same place whatever device it is on
+        // and whatever address it was handed this time.
         let unknown = |iface: &str, addr: &str| {
             let mut n = with_warp("HomeNet", "aa:bb:cc:dd:ee:ff");
             n.tunnel = Some(String::new());
@@ -922,18 +943,12 @@ mod tests {
         let (ukey, ulabel) = fingerprint(&unknown("utun4", "10.20.0.5")).unwrap();
         assert_ne!(ukey, home.0);
         assert_ne!(ukey, home_warp.0);
-        assert_eq!(ulabel, "HomeNet via VPN 10.20.0.5");
+        assert_eq!(ulabel, "HomeNet via VPN");
         assert_eq!(ukey, fingerprint(&unknown("utun7", "10.20.0.5")).unwrap().0);
-        assert_ne!(
-            ukey,
-            fingerprint(&unknown("utun4", "10.77.0.9")).unwrap().0,
-            "a reused utun is a different VPN"
-        );
-
-        // No address on the tunnel: the device name is all there is.
+        assert_eq!(ukey, fingerprint(&unknown("utun4", "10.77.0.9")).unwrap().0);
         let mut unaddressed = unknown("utun4", "10.20.0.5");
         unaddressed.tunnel_addrs.clear();
-        assert_eq!(fingerprint(&unaddressed).unwrap().1, "HomeNet via VPN");
+        assert_eq!(ukey, fingerprint(&unaddressed).unwrap().0);
     }
 
     /// A v6-only carrier hotspot exposes no routable gateway; the SSID alone

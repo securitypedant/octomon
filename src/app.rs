@@ -1059,9 +1059,8 @@ pub struct NetInfo {
     pub tunnel_iface: String,
     /// The addresses on the tunnel device itself, bare (no prefix length).
     /// On a split tunnel `ipv4`/`ipv6` describe the physical NIC, so this is
-    /// the only place the tunnel's own address is kept — and for a VPN no
-    /// vendor can be named for, that address is a steadier identity than a
-    /// utunN that macOS renumbers on every connect.
+    /// the only place the tunnel's own address is kept — which a split
+    /// WireGuard config's location keys on, and `--demo` disguises.
     pub tunnel_addrs: Vec<String>,
     /// True when the tunnel is a split route: the kernel's default route still
     /// points at a physical NIC, but internet traffic egresses via the tunnel.
