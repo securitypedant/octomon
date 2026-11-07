@@ -604,17 +604,10 @@ impl FileLock {
                 None => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
-                        if cfg!(windows) {
-                            format!(
-                                "{} is still open elsewhere after {patience:?} (another octomon, or a scanner)",
-                                lock.display()
-                            )
-                        } else {
-                            format!(
-                                "another octomon process held {} past {patience:?}",
-                                lock.display()
-                            )
-                        },
+                        format!(
+                            "another octomon process held {} past {patience:?}",
+                            lock.display()
+                        ),
                     ));
                 }
             }
@@ -622,12 +615,16 @@ impl FileLock {
     }
 
     /// One non-blocking attempt: `Ok(None)` when another process holds it.
-    /// Non-blocking plus a deadline rather than a blocking `flock`, so a peer
-    /// that never lets go costs at most [`LOCK_PATIENCE`] and not the rest
-    /// of the session.
-    #[cfg(unix)]
+    /// Non-blocking plus a deadline rather than a blocking lock, so a peer
+    /// that never lets go costs at most [`LOCK_PATIENCE`] and not the rest of
+    /// the session. std's `try_lock` is `flock` on unix and `LockFileEx` on
+    /// Windows; both are released by the kernel when the file closes — on
+    /// drop, or when the process dies, so a crash never leaves it held — and
+    /// both are per open file, so two threads in one process contend exactly
+    /// as two processes do. On Windows this is a lock, not an exclusive
+    /// open: a scanner that merely opens the lock file no longer looks like
+    /// a peer holding it.
     fn try_acquire(lock: &std::path::Path) -> std::io::Result<Option<FileLock>> {
-        use std::os::fd::AsRawFd as _;
         let file = private_options()
             .read(true)
             .write(true)
@@ -635,51 +632,11 @@ impl FileLock {
             .truncate(false)
             .open(lock)
             .inspect(hand_back)?;
-        loop {
-            // SAFETY: the descriptor is open for the duration of the call (it
-            // is borrowed from `file`), and flock only reads its arguments.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                // Released by the kernel when `file` closes — on drop, or when
-                // the process dies, so a crash never leaves it held.
-                return Ok(Some(FileLock { _file: file }));
-            }
-            let e = std::io::Error::last_os_error();
-            match e.raw_os_error() {
-                Some(libc::EINTR) => continue,
-                Some(libc::EWOULDBLOCK) => return Ok(None),
-                _ => return Err(e),
-            }
+        match file.try_lock() {
+            Ok(()) => Ok(Some(FileLock { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
         }
-    }
-
-    /// Windows has no `flock`, but a handle opened with no sharing is the same
-    /// thing: while it is open,
-    /// every other open of the file fails with a sharing violation, and the
-    /// OS closes it if the process dies.
-    #[cfg(windows)]
-    fn try_acquire(lock: &std::path::Path) -> std::io::Result<Option<FileLock>> {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        /// `ERROR_SHARING_VIOLATION`: somebody else has it open.
-        const SHARING_VIOLATION: i32 = 32;
-        match private_options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .share_mode(0)
-            .open(lock)
-        {
-            Ok(file) => Ok(Some(FileLock { _file: file })),
-            Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Anything else has no lock: appends go ahead unlocked as before, but
-    /// rewrites and baselines saves fail rather than race.
-    #[cfg(not(any(unix, windows)))]
-    fn try_acquire(_: &std::path::Path) -> std::io::Result<Option<FileLock>> {
-        Err(std::io::Error::other("no file locking on this platform"))
     }
 }
 
