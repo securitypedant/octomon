@@ -351,13 +351,19 @@
   const colors = ["#3FCF5C", "#B249B9", "#E8B03A", "#E0524D", "#8A96A4"];
   let series = [];
   let stale = false;
+  let pending = false;
   try {
     const resp = await fetch("/edge/stats");
     const body = await resp.json();
     series = body.series ?? [];
     stale = body.stale === true;
+    pending = body.pending === true;
   } catch {
     note.textContent = "the stats endpoint isn't answering right now; try again later.";
+    return;
+  }
+  if (pending && !series.length) {
+    note.textContent = "the stats are loading; refresh in a moment.";
     return;
   }
   if (stale && !series.length) {

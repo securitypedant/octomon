@@ -117,14 +117,21 @@ async function edgeAnswer(request, url, env, ctx) {
 // can be left unsettled for good if its owner is cancelled. The refresh is
 // bounded by a timeout and kept alive with waitUntil, so a client that
 // disconnects mid-query can't wedge the memo either. A refresh that settles
-// after a newer one has landed is dropped. An answer that isn't a fresh
-// good series says so with `stale: true`, so the page can tell "failing"
-// from "no data yet". The memo holds only the aggregate every caller gets
-// anyway — nothing about who asked.
+// after a newer one has landed is dropped. An answer served while the
+// last completed refresh had failed says so with `stale: true`, so the page
+// can tell "failing" from "no data yet"; one served with nothing in the
+// memo yet, because a refresh is still running, says `pending: true`, so
+// the page can tell "loading" from either. Merely past the hour with a
+// refresh in flight is neither: the last good answer is served as is. The
+// memo holds only the aggregate every caller gets anyway — nothing about
+// who asked.
 const STATS_TTL_MS = 60 * 60 * 1000;
 const STATS_FAIL_TTL_MS = 60 * 1000;
 const STATS_QUERY_TIMEOUT_MS = 10 * 1000;
 let statsMemo = { series: [], ok: false, at: 0 };
+// Whether the last refresh to complete failed: that, not the memo's age, is
+// what makes an answer stale.
+let statsFailed = false;
 // When the running refresh started, 0 when none is. Stale after the timeout,
 // so a refresh that never reports back only delays the next one.
 let statsRefreshing = 0;
@@ -191,6 +198,7 @@ async function edgeStats(env, ctx) {
       if (started >= statsFrom) {
         statsMemo = m.ok ? m : { ...m, series: statsMemo.series };
         statsFrom = started;
+        statsFailed = !m.ok;
       }
       if (statsRefreshing === started) statsRefreshing = 0;
     });
@@ -198,12 +206,14 @@ async function edgeStats(env, ctx) {
     await refresh;
   }
   const fresh = statsMemo.ok && Date.now() - statsMemo.at < STATS_TTL_MS;
-  const body = fresh ? { series: statsMemo.series } : { series: statsMemo.series, stale: true };
+  const body = { series: statsMemo.series };
+  if (statsFailed) body.stale = true;
+  else if (statsFrom === 0) body.pending = true;
   return new Response(JSON.stringify(body) + "\n", {
     headers: {
       "content-type": "application/json; charset=utf-8",
-      // For browsers only (see above). A stale or failed series must not be
-      // held on to.
+      // For browsers only (see above). Anything but a fresh good series must
+      // not be held on to.
       "cache-control": fresh ? "public, max-age=3600" : "no-store",
     },
   });

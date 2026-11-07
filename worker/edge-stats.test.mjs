@@ -62,10 +62,24 @@ test("a miss during a running refresh serves the memo instead of awaiting it", a
   const a = h.stats(w);
   const b = await h.stats(w);
   assert.equal(fetch.mock.callCount(), 1);
-  assert.deepEqual((await b.json()).series, []);
+  const cold = await b.json();
+  assert.deepEqual(cold.series, []);
+  assert.equal(cold.pending, true, "nothing yet, but nothing has failed either");
+  assert.equal(cold.stale, undefined);
   assert.equal(b.headers.get("cache-control"), "no-store");
   release();
   assert.equal((await (await a).json()).series.length, 1);
+
+  // Past the hour, a visitor arriving during the refresh gets the last
+  // good answer, and it is neither stale nor pending: nothing has failed.
+  h.advance(61 * 60 * 1000);
+  const c = h.stats(w);
+  const d = await (await h.stats(w)).json();
+  assert.equal(d.series.length, 1);
+  assert.equal(d.stale, undefined);
+  assert.equal(d.pending, undefined);
+  release();
+  await c;
 });
 
 test("a refresh that never reports back only delays the next one", async (t) => {
