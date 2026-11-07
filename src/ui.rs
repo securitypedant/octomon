@@ -5436,6 +5436,19 @@ fn net_history_pane(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
     }
 }
 
+/// The AS organisation the edge saw this connection arrive from, when the
+/// tunnel carrying the traffic is unnamed: the only thing known about where
+/// an unidentified VPN leads.
+fn exit_operator(s: &AppState) -> Option<&str> {
+    if s.netinfo.tunnel.as_deref() != Some("") {
+        return None;
+    }
+    s.edge
+        .as_ref()
+        .map(|e| e.isp.trim())
+        .filter(|isp| !isp.is_empty())
+}
+
 fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
     let n = &s.netinfo;
     // The location name rides in the title, like the Bandwidth panel's iface:
@@ -5579,6 +5592,17 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         if !n.tunnel_iface.is_empty() {
             row.push(Span::styled(
                 format!("  ({})", n.tunnel_iface),
+                Style::new().fg(theme::text()),
+            ));
+        }
+        // A tunnel nothing could name still has one tell: whose network the
+        // traffic comes out of. The edge sees the exit's AS organisation,
+        // which for a VPN is its operator or its host ("Datacamp Limited"),
+        // so it is offered as a clue beside the unnamed tunnel — never as
+        // the vendor, and never in the location's identity.
+        if let Some(exit) = exit_operator(s) {
+            row.push(Span::styled(
+                format!("  · exit via {exit}"),
                 Style::new().fg(theme::text()),
             ));
         }
@@ -10146,6 +10170,27 @@ mod tests {
         assert!(out.contains("Cloudflare WARP"));
         assert!(out.contains("Tunnel (VPN)"));
         assert!(out.contains("encapsulated"));
+    }
+
+    /// An unnamed tunnel borrows the one clue there is, the operator of the
+    /// network the traffic comes out of, as seen by the edge; a named one
+    /// does not need it.
+    #[test]
+    fn an_unnamed_tunnel_says_whose_network_it_exits_from() {
+        let mut s = state_with_medium(LinkMedium::Tunnel);
+        s.netinfo.tunnel = Some(String::new());
+        s.netinfo.tunnel_iface = "utun4".to_string();
+        s.edge = Some(crate::app::EdgeInfo {
+            isp: "Datacamp Limited".into(),
+            ..Default::default()
+        });
+        let out = draw(&s, 200, 60);
+        assert!(out.contains("unidentified VPN / tunnel"), "{out}");
+        assert!(out.contains("· exit via Datacamp Limited"), "{out}");
+
+        s.netinfo.tunnel = Some("Cloudflare WARP".to_string());
+        let out = draw(&s, 200, 60);
+        assert!(!out.contains("exit via"), "{out}");
     }
 
     /// WARP's usual shape: `default` still points at Wi-Fi, but 0.0.0.0/1 sends
