@@ -853,6 +853,10 @@ struct Vpn {
     v6: &'static [(Ipv6Addr, u32)],
     /// Lowercase process-name fragments, used only as a last resort.
     procs: &'static [&'static str],
+    /// The client only ever drives a tun/utun device, never an in-kernel
+    /// WireGuard one, so on Linux it cannot own a `DEVTYPE=wireguard` device
+    /// and is a bystander when one is being named.
+    tun_only: bool,
 }
 
 /// Ordered most-specific first: WARP's 100.96.0.0/12 sits inside Tailscale's
@@ -863,72 +867,84 @@ const KNOWN_VPNS: &[Vpn] = &[
         v4: &[(Ipv4Addr::new(100, 96, 0, 0), 12)],
         v6: &[(Ipv6Addr::new(0x2606, 0x4700, 0, 0, 0, 0, 0, 0), 32)],
         procs: &["warp-svc", "cloudflarewarp"],
+        tun_only: true,
     },
     Vpn {
         display: "Tailscale",
         v4: &[(Ipv4Addr::new(100, 64, 0, 0), 10)],
         v6: &[(Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0), 48)],
         procs: &["tailscaled", "tailscale"],
+        tun_only: true,
     },
     Vpn {
         display: "Mullvad",
         v4: &[(Ipv4Addr::new(10, 64, 0, 0), 10)],
         v6: &[(Ipv6Addr::new(0xfc00, 0xbbbb, 0xbbbb, 0, 0, 0, 0, 0), 48)],
         procs: &["mullvad"],
+        tun_only: false,
     },
     Vpn {
         display: "NordVPN",
         v4: &[(Ipv4Addr::new(10, 5, 0, 0), 16)],
         v6: &[],
         procs: &["nordvpn", "nordlynx"],
+        tun_only: false,
     },
     Vpn {
         display: "Proton VPN",
         v4: &[(Ipv4Addr::new(10, 2, 0, 0), 16)],
         v6: &[],
         procs: &["protonvpn"],
+        tun_only: false,
     },
     Vpn {
         display: "Cloudflare Tunnel",
         v4: &[],
         v6: &[],
         procs: &["cloudflared"],
+        tun_only: true,
     },
     Vpn {
         display: "ExpressVPN",
         v4: &[],
         v6: &[],
         procs: &["expressvpn"],
+        tun_only: true,
     },
     Vpn {
         display: "Surfshark",
         v4: &[],
         v6: &[],
         procs: &["surfshark"],
+        tun_only: false,
     },
     Vpn {
         display: "Private Internet Access",
         v4: &[],
         v6: &[],
         procs: &["pia-daemon", "privateinternetaccess"],
+        tun_only: false,
     },
     Vpn {
         display: "Windscribe",
         v4: &[],
         v6: &[],
         procs: &["windscribe"],
+        tun_only: false,
     },
     Vpn {
         display: "Zscaler",
         v4: &[],
         v6: &[],
         procs: &["zsatunnel", "zstunnel", "zscaler"],
+        tun_only: true,
     },
     Vpn {
         display: "FortiClient",
         v4: &[],
         v6: &[],
         procs: &["forticlient", "fortitray"],
+        tun_only: true,
     },
     // The open-source client for the same FortiGate SSL VPNs, usually as a
     // split tunnel (issue #27).
@@ -937,36 +953,42 @@ const KNOWN_VPNS: &[Vpn] = &[
         v4: &[],
         v6: &[],
         procs: &["openfortivpn"],
+        tun_only: true,
     },
     Vpn {
         display: "OpenVPN",
         v4: &[],
         v6: &[],
         procs: &["openvpn", "tunnelblick"],
+        tun_only: true,
     },
     Vpn {
         display: "WireGuard",
         v4: &[],
         v6: &[],
         procs: &["wireguard", "wg-quick"],
+        tun_only: false,
     },
     Vpn {
         display: "GlobalProtect",
         v4: &[],
         v6: &[],
         procs: &["globalprotect"],
+        tun_only: true,
     },
     Vpn {
         display: "Cisco AnyConnect",
         v4: &[],
         v6: &[],
         procs: &["anyconnect"],
+        tun_only: true,
     },
     Vpn {
         display: "ZeroTier",
         v4: &[],
         v6: &[],
         procs: &["zerotier"],
+        tun_only: true,
     },
 ];
 
@@ -1067,11 +1089,12 @@ fn vendor_match(v4: &[Ipv4Addr], v6: &[Ipv6Addr]) -> Option<(&'static str, AddrM
 
 /// Name a tunnel from its address match and the running clients. A kernel
 /// WireGuard device (NetworkManager's, wg-quick's, NetBird's) has no process
-/// of its own, so neither a client resident for some other reason nor a
-/// shared-space address on its own names it: it takes a vendor's name only
-/// from that vendor's own block (Mullvad's v6), or from a shared or private
-/// match with that vendor's client running (wg0-mullvad on 10.64.x), and is
-/// otherwise plain WireGuard.
+/// of its own, so a client resident for some other reason must not lend it
+/// its name, and a shared-space address on its own does not either: it takes
+/// a vendor's name from that vendor's own block (Mullvad's v6), from a shared
+/// or private match with that vendor's client running (wg0-mullvad on
+/// 10.64.x), or from the one running client that drives such devices (PIA's
+/// wgpia0), and is otherwise plain WireGuard.
 fn name_tunnel(
     by_addr: Option<(&'static str, AddrMatch)>,
     running: &std::collections::BTreeSet<&'static str>,
@@ -1081,10 +1104,30 @@ fn name_tunnel(
         return Some(match by_addr {
             Some((vendor, AddrMatch::Own)) => vendor,
             Some((vendor, _)) if running.contains(vendor) => vendor,
-            _ => "WireGuard",
+            _ => {
+                // PIA, Surfshark and Windscribe drive kernel WireGuard devices
+                // on Linux with addresses in no table: the one such client
+                // running names the device. A client that only ever uses tun
+                // (Tailscale beside NetworkManager's "Trevor") is a bystander.
+                let mut drivers = running.iter().copied().filter(|v| !tun_only(v));
+                match (drivers.next(), drivers.next()) {
+                    (Some(one), None) => one,
+                    _ => "WireGuard",
+                }
+            }
         });
     }
     pick_vendor(by_addr, running)
+}
+
+/// Whether a known client, by display name, never drives a kernel WireGuard
+/// device. A name not in the table is treated as tun-only, so it cannot name
+/// one.
+fn tun_only(display: &str) -> bool {
+    KNOWN_VPNS
+        .iter()
+        .find(|v| v.display == display)
+        .is_none_or(|v| v.tun_only)
 }
 
 /// How far an address match on a tunnel can be trusted on its own.
@@ -1267,6 +1310,28 @@ mod tests {
 
         assert_eq!(name_tunnel(None, &tailscale, true), Some("WireGuard"));
         assert_eq!(name_tunnel(None, &none, true), Some("WireGuard"));
+        // PIA, Surfshark and Windscribe drive kernel WireGuard devices on
+        // Linux with addresses in no table: the one such client running
+        // names the device, and a tun-only client beside it stays a
+        // bystander. Two such clients, or a tun-only one alone, do not.
+        let surfshark = BTreeSet::from(["Surfshark"]);
+        assert_eq!(name_tunnel(None, &surfshark, true), Some("Surfshark"));
+        assert_eq!(
+            name_tunnel(None, &BTreeSet::from(["Surfshark", "Tailscale"]), true),
+            Some("Surfshark")
+        );
+        assert_eq!(
+            name_tunnel(None, &BTreeSet::from(["Surfshark", "Mullvad"]), true),
+            Some("WireGuard")
+        );
+        assert_eq!(
+            name_tunnel(None, &BTreeSet::from(["OpenVPN"]), true),
+            Some("WireGuard")
+        );
+        assert_eq!(
+            name_tunnel(None, &BTreeSet::from(["Private Internet Access"]), true),
+            Some("Private Internet Access")
+        );
         assert_eq!(name_tunnel(mullvad_addr, &mullvad, true), Some("Mullvad"));
         assert_eq!(name_tunnel(mullvad_addr, &none, true), Some("WireGuard"));
         assert_eq!(
