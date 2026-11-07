@@ -55,8 +55,15 @@ open descriptor, only for something root owns, never for a file with more
 than one hard link, and only after the descriptor itself (`F_GETPATH` on
 macOS, `/proc/self/fd` on Linux) places it under the invoking user's home as
 recorded in the password database — not `$HOME` — and inside octomon's own
-directories. A `config.toml` named with `--config` outside those stays
-root's.
+directories. When those directories are not in that home at all (Linux's
+default `sudo` resets `HOME` to `/root`), nothing is handed back and nothing
+is logged: the files are root's own. A `config.toml` named with `--config`
+outside those stays root's. One residual window remains: the link count is
+read once, so a root-owned file that the user can already unlink (one inside
+their own home) could be hard-linked into octomon's directory and its other
+name removed between octomon's open and its `fstat`, and would then be
+handed back; a file outside the home cannot be, since its name cannot be
+removed.
 
 **Network.** octomon listens on no port and runs no service. Everything it
 contacts is listed, with why and how often, in the README's
