@@ -122,6 +122,12 @@
   .legend .key { display: inline-flex; align-items: center; gap: 7px; }
   .legend .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
   .graph-note { font-size: 0.85rem; color: var(--octo-muted); margin-top: 8px; }
+  /* the platform split: one labelled bar per build, widest first */
+  .dist { display: grid; grid-template-columns: max-content 1fr max-content; gap: 8px 12px; align-items: center;
+    font-family: var(--octo-mono); font-size: 0.85rem; margin-top: 6px; }
+  .dist .k { color: var(--octo-muted); white-space: nowrap; }
+  .dist .bar { height: 12px; border-radius: 3px; background: #3FCF5C; min-width: 2px; }
+  .dist .n { color: var(--octo-muted); white-space: nowrap; text-align: right; }
 
   footer {
     border-top: 2px solid var(--octo-magenta);
@@ -266,8 +272,8 @@
         handles the HTTP requests the way it does for every site behind it;
         that is true of any request to this domain, not just /edge. The
         website (not the tool) uses Cloudflare Web Analytics, which is
-        cookieless. Our own code on /edge stores the version-family count
-        described above, and nothing more.</p>
+        cookieless. Our own code on /edge stores the version, platform and
+        reason counts described above, and nothing more.</p>
       </div>
     </div>
   </section>
@@ -275,10 +281,12 @@
   <section>
     <div class="wrap">
       <h2>Our whole dashboard, published</h2>
-      <p>This graph is everything we can see: <strong>/edge requests per day,
-      by octomon version</strong>, for the last 30 days. Day buckets keep it
-      coarse in time, and the version (like <code>0.8.1</code>) names a
-      public software build, not a person. The line over the bars is how much
+      <p>These two graphs are everything we can see: <strong>/edge requests
+      per day, by octomon version</strong>, and <strong>the same requests by
+      platform</strong>, for the last 30 days. Day buckets keep it coarse in
+      time, and the version (like <code>0.8.1</code>) and the platform (one of
+      six builds, like <code>macos-arm64</code>) name a public software build,
+      not a person. The line over the bars is how much
       octomon ran: every running copy refreshes /edge on a 15-minute tick, so
       each refresh call stands for a quarter of an hour of runtime, and refresh
       calls ÷ 4 ≈ the hours of octomon running that day. An estimate by design,
@@ -289,6 +297,11 @@
         <svg id="edge-graph" role="img" aria-label="Daily /edge request counts by octomon version family"></svg>
         <div class="legend" id="edge-legend"></div>
         <p class="graph-note" id="edge-note">loading the live numbers…</p>
+      </div>
+      <div class="card graph-card">
+        <h3>/edge requests by platform · last 30 days</h3>
+        <div class="dist" id="plat-dist" role="img" aria-label="Share of /edge requests by platform"></div>
+        <p class="graph-note" id="plat-note">loading the live numbers…</p>
       </div>
     </div>
   </section>
@@ -470,8 +483,37 @@
   legend.innerHTML = versions
     .map((v, vi) => `<span class="key"><span class="swatch" style="background:${colors[vi % colors.length]}"></span>octomon ${v}</span>`)
     .join("") + (estPeak > 0 ? '<span class="key"><span class="swatch" style="background:#F4F7FA"></span>octomon running (h/day)</span>' : "");
+
+  // The platform split over the same 30 days: a bar per build, widest
+  // first. Clients from before 0.12.0 sent no platform, so those calls are
+  // one honest "not reported" row rather than a guess.
+  const dist = document.getElementById("plat-dist");
+  const platNote = document.getElementById("plat-note");
+  const names = {
+    "macos-arm64": "macOS arm64", "macos-x64": "macOS x64",
+    "windows-x64": "Windows x64", "windows-arm64": "Windows arm64",
+    "linux-x64": "Linux x64", "linux-arm64": "Linux arm64",
+  };
+  const byPlat = new Map();
+  for (const r of series) {
+    const k = r.platform || "";
+    byPlat.set(k, (byPlat.get(k) ?? 0) + r.calls);
+  }
+  const all = [...byPlat.values()].reduce((s, n) => s + n, 0);
+  const rows = [...byPlat.entries()].sort((a, b) => b[1] - a[1]);
+  const widest = Math.max(...rows.map(([, n]) => n), 1);
+  const pct = (n) => (all ? Math.round((100 * n) / all) : 0);
+  dist.innerHTML = rows
+    .map(([k, n], i) =>
+      `<span class="k">${names[k] ?? (k ? k : "not reported")}</span>` +
+      `<div class="bar" style="width:${Math.max(1, (100 * n) / widest)}%;background:${k ? colors[i % colors.length] : "#8A96A4"}" title="${n}"></div>` +
+      `<span class="n">${pct(n)}% · ${n.toLocaleString()}</span>`)
+    .join("");
+  platNote.textContent = byPlat.has("") && rows.length === 1
+    ? "no platform reported yet: octomon sends it from 0.12.0 on."
+    : "the same 30 days of requests, by the build that made them; \"not reported\" is clients older than 0.12.0.";
   note.textContent = (stale ? "the latest stats query failed, so this is the last good answer · " : "") +
-    "updated hourly · day buckets · version, reason and count only, by design, so nobody can be traced through it."
+    "updated hourly · day buckets · version, platform, reason and count only, by design, so nobody can be traced through it."
     + (estPeak > 0 ? "" : " · the running-hours line appears once 0.8.2+ clients start reporting call reasons.");
 })();
 </script>

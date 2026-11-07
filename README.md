@@ -336,7 +336,7 @@ contacts, and why:
 | The IPv6 side of the same, only while the interface holds a global IPv6 address: the v6 router, the built-in anchors' IPv6 twins (`2606:4700:4700::1111`, `2001:4860:4860::8888`, `2620:fe::fe`), and the first hops of a `traceroute` toward the probe's v6 twin | continuously | is IPv6 configured here, does the router carry it, does the route beyond | ICMPv6 echo; TCP handshakes to the twins' port 443 |
 | Your ICMP targets, over HTTPS | every 5 s | is the web service up (HEAD, no body, no redirects, certificate errors tolerated — a timing probe) | a `HEAD /` |
 | Your anchor targets, TCP port 443 | every second | connect-time latency/loss that works where ICMP is blocked (a handshake, closed immediately; no data sent) | a TCP handshake |
-| `octomon.dev/edge` (`edge_check_url`), once over IPv4 and, on a dual-stack link, once over IPv6 | at startup, on network change, then every 15 min | how the Cloudflare edge sees this connection over each family: serving PoP, your ISP's AS, the edge's own TCP RTT to you — plus the latest released version, so octomon can mention an update (it never updates itself) | a GET with octomon's User-Agent; the endpoint stores nothing about you — see [octomon.dev/privacy](https://octomon.dev/privacy) |
+| `octomon.dev/edge` (`edge_check_url`), once over IPv4 and, on a dual-stack link, once over IPv6 | at startup, on network change, then every 15 min | how the Cloudflare edge sees this connection over each family: serving PoP, your ISP's AS, the edge's own TCP RTT to you — plus the latest released version, so octomon can mention an update (it never updates itself) | a GET with octomon's User-Agent, the call's reason and the build's platform (`plat=macos-arm64`, one of six); the endpoint stores nothing about you — see [octomon.dev/privacy](https://octomon.dev/privacy) |
 | Your system's DNS resolvers, and the reference resolvers (`dns_reference_resolvers`, default 1.1.1.1 and 8.8.8.8) | every 5 s; once a minute a random non-existent name | resolver latency; hijack check; proof the internet path is up when pings and the web are not | one A query for `dns_probe_name` (default `example.com`) |
 | `cloudflare.com:80`, `1.1.1.1:443` (QUIC), `github.com:22`, `time.cloudflare.com:123`, `1.1.1.1:53` (`egress_monitor_checks`) | only while TCP `:443` to every anchor is failing, every 5 s until it answers again; announced on the timeline | is this a filtered network or a dead one — which ports still get out | a TCP handshake or one datagram; nothing further (`egress_monitor = false` turns it off) |
 | Your OS's own connectivity-check URL (`captive.apple.com`, `msftconnecttest.com` or `connectivity-check.ubuntu.com`), and through the system proxy when one is set | every 12 s | HTTP reachability, captive-portal detection, clock skew fallback | a GET |
@@ -357,11 +357,12 @@ Notes:
 - The only octomon-operated endpoint is `octomon.dev/edge`, which exists
   purely to deepen the monitoring: it returns your connection's edge view *to
   you* and **stores nothing about you** — no logs, no identifiers. The single
-  thing it counts is requests per octomon version and call reason (start /
-  netchange / refresh, three constant labels identical across every client),
-  and that count is
-  published, in full, at [octomon.dev/privacy](https://octomon.dev/privacy) —
-  the only dashboard that exists. Set `edge_check_url = ""` to never call it.
+  thing it counts is requests per octomon version, platform (one of the six
+  builds it ships as, like `macos-arm64`) and call reason (start / netchange /
+  refresh, three constant labels identical across every client), and that
+  count is published, in full, at
+  [octomon.dev/privacy](https://octomon.dev/privacy) — the only dashboard
+  that exists. Set `edge_check_url = ""` to never call it.
   No other telemetry of any kind is collected.
 - Turn any of it off or point it elsewhere in `config.toml`: `public_ip_url`,
   `discovery_probe`, `dns_reference_resolvers`, `ntp_server` (`""` disables),
