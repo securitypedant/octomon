@@ -415,16 +415,19 @@ pub fn disguise(s: &AppState, d: &mut Disguise) -> AppState {
         }
     }
 
-    // Free text last, once every mapping exists.
+    // Free text last, once every mapping exists. Events and the network
+    // history quote location labels ("known location → HomeNet via
+    // WireGuard 2001:…"), some from sessions whose tunnel address was never
+    // on an interface here, so those get the label rule as well.
     for e in v.events.iter_mut() {
-        e.message = d.text(&e.message);
+        e.message = d.text_with_tunnels(&e.message);
     }
     for c in v.net_history.iter_mut() {
-        c.summary = d.text(&c.summary);
-        c.detail = c.detail.iter().map(|l| d.text(l)).collect();
+        c.summary = d.text_with_tunnels(&c.summary);
+        c.detail = c.detail.iter().map(|l| d.text_with_tunnels(l)).collect();
     }
     if let Some(n) = v.notice.as_mut() {
-        *n = d.text(n);
+        *n = d.text_with_tunnels(n);
     }
     if let Some(l) = v.log.as_mut() {
         l.path = std::path::PathBuf::from(d.text(&l.path.display().to_string()));
@@ -529,6 +532,47 @@ fn embeds_mac(cidr: &str, mac: &str) -> bool {
 }
 
 impl Disguise {
+    /// [`Disguise::text`], then the tunnel-address rule of [`Disguise::ssid_or_text`]
+    /// applied wherever a location label is quoted inside free text: after
+    /// each " via ", a public address among the next few words (the vendor
+    /// name may be two words: "via Cloudflare WARP 2001:…") is hidden. Only
+    /// there — a public address elsewhere in an event is a built-in target
+    /// or a hop, which the demo keeps by design.
+    fn text_with_tunnels(&mut self, s: &str) -> String {
+        let s = self.text(s);
+        let mut pieces = s.split(" via ");
+        let mut out = pieces.next().unwrap_or_default().to_string();
+        for piece in pieces {
+            out.push_str(" via ");
+            out.push_str(&self.hide_tunnel_addr(piece));
+        }
+        out
+    }
+
+    /// `piece` is what follows one " via ": hide a public address among its
+    /// first three words, keeping any punctuation glued to it.
+    fn hide_tunnel_addr(&mut self, piece: &str) -> String {
+        let mut done = false;
+        let mut words = 0;
+        piece
+            .split(' ')
+            .map(|w| {
+                words += 1;
+                if done || words > 3 {
+                    return w.to_string();
+                }
+                let core = w.trim_end_matches([',', '.', ';', ':', ')', '"']);
+                if public_addr(core) {
+                    done = true;
+                    format!("{}{}", self.cidr(core), &w[core.len()..])
+                } else {
+                    w.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// A baseline label is the SSID, or the gateway address for a wired
     /// network: whichever it is, it identifies the place.
     fn ssid_or_text(&mut self, label: &str) -> String {
@@ -874,6 +918,63 @@ mod tests {
         assert!(
             tested.starts_with("192.168.10.1 via WireGuard "),
             "{tested}"
+        );
+    }
+
+    /// A location label quoted in free text — an event, or a network-history
+    /// line from a session whose tunnel address was never on an interface
+    /// here — hides a public tunnel address the way the label itself does,
+    /// and nothing else: a public address that is a target stays.
+    #[test]
+    fn quoted_tunnel_labels_in_free_text_hide_a_public_address() {
+        let mut s = AppState::new(vec![]);
+        s.net_history.push_back(crate::app::NetChange {
+            at: 1,
+            kind: crate::app::NetChangeKind::IfaceUp,
+            iface: "utun4".into(),
+            summary: "known location → HomeNet via WireGuard 2001:db8:1::7 — judging against its learned normal"
+                .into(),
+            detail: vec![
+                "seen before · 12 healthy minutes learned · via Cloudflare WARP 203.0.113.9, split".into(),
+                "target 1.1.1.1 still answers".into(),
+            ],
+        });
+        s.push_event(
+            crate::verdict::Severity::Info,
+            crate::app::EventCategory::Network,
+            "network changed: Office via WireGuard 10.9.8.10 (private address stays)".into(),
+        );
+        let v = disguise(&s, &mut Disguise::new());
+        let h = &v.net_history[0];
+        assert!(!h.summary.contains("2001:db8:1::7"), "{}", h.summary);
+        assert!(
+            h.summary
+                .starts_with("known location → HomeNet via WireGuard 2001:db8:"),
+            "{}",
+            h.summary
+        );
+        assert!(
+            h.summary.ends_with("— judging against its learned normal"),
+            "{}",
+            h.summary
+        );
+        assert!(!h.detail[0].contains("203.0.113.9"), "{}", h.detail[0]);
+        assert!(
+            h.detail[0].contains("via Cloudflare WARP "),
+            "{}",
+            h.detail[0]
+        );
+        assert!(
+            h.detail[0].ends_with(", split"),
+            "punctuation kept: {}",
+            h.detail[0]
+        );
+        assert_eq!(h.detail[1], "target 1.1.1.1 still answers");
+        let e = v.events.back().unwrap();
+        assert!(
+            e.message.contains("via WireGuard 10.9.8.10"),
+            "{}",
+            e.message
         );
     }
 

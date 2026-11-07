@@ -1081,19 +1081,25 @@ fn locations_overlay(f: &mut Frame, s: &AppState, area: Rect) {
                         "  ● current",
                         Style::new().fg(theme::accent()).bold(),
                     ));
-                } else if let Some(local) = b
-                    .last_seen
-                    .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
-                    .map(|t| t.with_timezone(&chrono::Local))
-                {
+                } else if let Some(ts) = b.last_seen {
                     // The slot "● current" fills on the active network: for
-                    // every other entry, when this machine last sat on it.
+                    // every other entry, how long since this machine last
+                    // sat on it, and a stale mark once that is long enough
+                    // that the entry is probably a one-off or a re-keyed
+                    // network nobody will match again — a candidate for [d].
                     // (A baseline file from before the field existed simply
                     // has no date, and gets no slot.)
+                    let now = chrono::Utc::now().timestamp();
                     name_row.push(Span::styled(
-                        format!("  · seen {}", local.format("%Y-%m-%d")),
+                        format!("  · {}", crate::baseline::seen_ago(ts, now)),
                         Style::new().fg(theme::dim()),
                     ));
+                    if crate::baseline::is_stale(ts, now) {
+                        name_row.push(Span::styled(
+                            "  · stale",
+                            Style::new().fg(theme::warn()).bold(),
+                        ));
+                    }
                 }
                 // Nothing folded in yet — freshly seen, or just deleted and
                 // re-added blank. Said loudly: the dashes below look broken
@@ -1567,6 +1573,30 @@ fn events_overlay(f: &mut Frame, s: &AppState, area: Rect) {
 /// by any key; the same detail stays available in `[?]` help afterwards.
 fn startup_notice(f: &mut Frame, s: &AppState, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
+
+    if let Some(report) = &s.crash_report {
+        lines.push(Line::from(Span::styled(
+            " ⚠ octomon crashed internally in its last session",
+            Style::new().fg(theme::warn()).bold(),
+        )));
+        let log = crate::errlog::path()
+            .map_or_else(|| "errors.log".to_string(), |p| p.display().to_string());
+        for part in [
+            format!(" {}", report.summary()),
+            " These are bugs in octomon, not problems with your network.".to_string(),
+            " Please open an issue at https://github.com/securitypedant/octomon/issues".to_string(),
+            format!(" and attach {log}"),
+            " The log can name hosts and addresses on your network; look it over first."
+                .to_string(),
+            " This notice is shown once for these errors.".to_string(),
+        ] {
+            lines.push(Line::from(Span::styled(
+                part,
+                Style::new().fg(theme::text()),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
 
     if let Some(err) = &s.icmp_error {
         lines.push(Line::from(Span::styled(
@@ -7549,19 +7579,78 @@ mod tests {
         // A non-current entry shows when it was last seen, in the slot
         // "● current" occupies on the active one — which never shows a date,
         // however fresh its own timestamp is.
-        let ts = 1_756_000_000; // 2025-08-24 UTC
+        let now = chrono::Utc::now().timestamp();
         for (_, b) in s.locations.as_mut().unwrap() {
-            b.last_seen = Some(ts);
+            b.last_seen = Some(now - 3 * 86_400);
         }
-        let expect = chrono::DateTime::from_timestamp(ts, 0)
-            .unwrap()
-            .with_timezone(&chrono::Local)
-            .format("· seen %Y-%m-%d")
-            .to_string();
         let out = draw(&s, 120, 30);
-        assert!(out.contains(&expect), "{out}");
+        assert!(out.contains("· seen 3 days ago"), "{out}");
         assert_eq!(out.matches("· seen").count(), 1, "{out}");
+        assert!(!out.contains("stale"), "{out}");
         assert!(out.contains("● current"), "{out}");
+
+        // Long unvisited: said as such, and marked stale as a candidate for
+        // deletion — a re-keyed network is never matched again.
+        for (_, b) in s.locations.as_mut().unwrap() {
+            b.last_seen = Some(now - 200 * 86_400);
+        }
+        let out = draw(&s, 120, 30);
+        assert!(out.contains("· not seen for 6 months"), "{out}");
+        assert_eq!(
+            out.matches("· stale").count(),
+            1,
+            "never on the current entry: {out}"
+        );
+    }
+
+    /// The startup notice asks for last session's crash log in the approved
+    /// words, with the counts, the times and the file, and says the log may
+    /// name the user's own hosts.
+    #[test]
+    fn startup_notice_asks_for_last_sessions_crash_log() {
+        let mut s = AppState::new(vec![]);
+        s.overlay = Overlay::Startup;
+        s.crash_report = Some(crate::errlog::CrashReport {
+            crashes: 2,
+            panics: 1,
+            first: "08:20".into(),
+            last: "09:05".into(),
+            banner: "=== octomon ===".into(),
+        });
+        let out = draw(&s, 100, 30);
+        for line in [
+            "⚠ octomon crashed internally in its last session",
+            "2 collector crashes and 1 panic were logged between 08:20 and 09:05.",
+            "These are bugs in octomon, not problems with your network.",
+            "Please open an issue at https://github.com/securitypedant/octomon/issues",
+            "and attach ",
+            "errors.log",
+            "The log can name hosts and addresses on your network; look it over first.",
+            "This notice is shown once for these errors.",
+        ] {
+            assert!(out.contains(line), "missing {line:?} in:\n{out}");
+        }
+    }
+
+    /// The relative wording and the stale mark, at their boundaries.
+    #[test]
+    fn last_seen_reads_as_time_ago_and_goes_stale_at_ninety_days() {
+        use crate::baseline::{STALE_AFTER_DAYS, is_stale, seen_ago};
+        let day = 86_400;
+        let now = 1_800_000_000;
+        assert_eq!(seen_ago(now - 3_600, now), "seen today");
+        assert_eq!(seen_ago(now - day, now), "seen yesterday");
+        assert_eq!(seen_ago(now - 13 * day, now), "seen 13 days ago");
+        assert_eq!(seen_ago(now - 14 * day, now), "seen 2 weeks ago");
+        assert_eq!(seen_ago(now - 59 * day, now), "seen 8 weeks ago");
+        assert_eq!(seen_ago(now - 60 * day, now), "seen 2 months ago");
+        assert_eq!(seen_ago(now - 89 * day, now), "seen 2 months ago");
+        assert_eq!(seen_ago(now - 90 * day, now), "not seen for 3 months");
+        assert_eq!(seen_ago(now - 729 * day, now), "not seen for 24 months");
+        assert_eq!(seen_ago(now - 730 * day, now), "not seen for 2 years");
+        assert_eq!(seen_ago(now + day, now), "seen today", "a clock set back");
+        assert!(!is_stale(now - (STALE_AFTER_DAYS - 1) * day, now));
+        assert!(is_stale(now - STALE_AFTER_DAYS * day, now));
     }
 
     /// After an outage ends, the windowed loss figure is momentum, not the

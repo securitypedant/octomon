@@ -165,6 +165,128 @@ fn last_session(text: &str, max: usize) -> Vec<String> {
 /// [`last_session`] cannot drift apart.
 const BANNER_PREFIX: &str = "\n=== octomon ";
 
+/// What the previous session logged about octomon's own failures: panics and
+/// supervised-collector crashes. Shown once at the next start, so the person
+/// at the keyboard can send the log back; a `--watch` under a service manager
+/// has nobody watching its stderr, and a crash that was restarted and logged
+/// is otherwise never heard of again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CrashReport {
+    /// Collector crashes the supervisor restarted or stopped.
+    pub crashes: u32,
+    /// Panics, wherever they happened.
+    pub panics: u32,
+    /// Local wall-clock times (HH:MM) of the first and last such line.
+    pub first: String,
+    pub last: String,
+    /// The banner line of the session the report is about, which is also
+    /// the acknowledgement token: once shown, it is written beside the log,
+    /// and the same session is not reported again.
+    pub banner: String,
+}
+
+impl CrashReport {
+    /// "2 collector crashes and 1 panic were logged between 08:20 and 09:05."
+    pub fn summary(&self) -> String {
+        let count =
+            |n: u32, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let what = match (self.crashes, self.panics) {
+            (0, p) => count(p, "panic was", "panics were"),
+            (c, 0) => count(c, "collector crash was", "collector crashes were"),
+            (c, p) => format!(
+                "{} and {} were",
+                count(c, "collector crash", "collector crashes"),
+                count(p, "panic", "panics")
+            ),
+        };
+        let when = if self.first == self.last {
+            format!("at {}", self.first)
+        } else {
+            format!("between {} and {}", self.first, self.last)
+        };
+        format!("{what} logged {when}.")
+    }
+}
+
+/// The previous session's [`CrashReport`], unless it has none or it was
+/// already shown. Reads the log once; the session that just started has
+/// written its banner, so the previous one is the stretch before it.
+pub fn previous_session_crashes() -> Option<CrashReport> {
+    let path = path()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let report = crash_report(&text)?;
+    let seen = path.with_file_name("errors.seen");
+    if std::fs::read_to_string(&seen).is_ok_and(|s| s.trim() == report.banner) {
+        return None;
+    }
+    Some(report)
+}
+
+/// Record that `report` was shown, so it is not shown again.
+pub fn acknowledge(report: &CrashReport) {
+    if let Some(path) = path() {
+        let _ = crate::store::write_private(
+            &path.with_file_name("errors.seen"),
+            format!("{}\n", report.banner),
+        );
+    }
+}
+
+/// The crash report for the session before the last banner in `text`: its
+/// `panic` lines and its `supervisor … crashed` lines, each counted with the
+/// repeats errlog folded into it. Split out from the file read so the banner
+/// and fold arithmetic are testable.
+fn crash_report(text: &str) -> Option<CrashReport> {
+    let last = text.rfind(BANNER_PREFIX)?;
+    let before = &text[..last + 1];
+    let (banner, session) = match before.rfind(BANNER_PREFIX) {
+        Some(i) => {
+            let from = &before[i + 1..];
+            let nl = from.find('\n')?;
+            (from[..nl].to_string(), &from[nl + 1..])
+        }
+        // The file began mid-session (it has just rolled).
+        None => ("(before the log rolled)".to_string(), before),
+    };
+    let mut report = CrashReport {
+        crashes: 0,
+        panics: 0,
+        first: String::new(),
+        last: String::new(),
+        banner,
+    };
+    for line in session.lines() {
+        let mut fields = line.splitn(3, "  ");
+        let (Some(stamp), Some(component), Some(message)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let n = 1 + folded(message);
+        match component.trim() {
+            "panic" => report.panics += n,
+            "supervisor" if message.contains("crashed") => report.crashes += n,
+            _ => continue,
+        }
+        // "2026-11-06T22:57:29.430-08:00" → "22:57"
+        let hhmm = stamp.get(11..16).unwrap_or(stamp).to_string();
+        if report.first.is_empty() {
+            report.first = hhmm.clone();
+        }
+        report.last = hhmm;
+    }
+    (report.crashes + report.panics > 0).then_some(report)
+}
+
+/// The repeats a line's "(+N more in the last 5 min)" tail stands for.
+fn folded(message: &str) -> u32 {
+    message
+        .rsplit_once("(+")
+        .and_then(|(_, tail)| tail.split_once(" more"))
+        .and_then(|(n, _)| n.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 /// Append one already-formatted line, rolling the file first if it has grown
 /// past [`MAX_BYTES`]. Opened per write rather than held: the data directory
 /// can be erased underneath us (Ctrl+R), and an open handle would go on
@@ -206,6 +328,52 @@ fn append(line: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The report covers the session before the last banner only, counts
+    /// the repeats errlog folded into a line, and reads panics and
+    /// supervisor crashes from the component column; everything else in the
+    /// session (and everything in the current one) is not a crash.
+    #[test]
+    fn the_previous_sessions_crashes_are_counted_with_their_folds() {
+        let text = "\
+=== octomon 0.11.9 · build 1 started · macos · pid 1 · 2026-11-05T08:00:00.000-08:00 ===
+2026-11-05T08:00:05.000-08:00  panic       main panicked at src/x.rs:1: old session
+\n=== octomon 0.11.9 · build 2 started · macos · pid 2 · 2026-11-06T08:20:16.819-08:00 ===
+2026-11-06T08:20:22.608-08:00  edge        https://octomon.dev/edge: could not connect
+2026-11-06T08:20:29.430-08:00  panic       tokio-rt-worker panicked at src/main.rs:919: boom
+2026-11-06T08:20:29.431-08:00  supervisor  vitals collector crashed (boom) — restarting  (+2 more in the last 5 min)
+2026-11-06T09:05:34.437-08:00  supervisor  vitals collector crashed 4 times (boom) — stopped for this session, see errors.log
+2026-11-06T09:05:40.000-08:00  supervisor  clock collector stopped on its own
+\n=== octomon 0.12.0 · build 3 started · macos · pid 3 · 2026-11-06T10:00:00.000-08:00 ===
+2026-11-06T10:00:01.000-08:00  panic       this session: not reported yet
+";
+        let r = crash_report(text).expect("the previous session crashed");
+        assert_eq!((r.crashes, r.panics), (4, 1));
+        assert_eq!((r.first.as_str(), r.last.as_str()), ("08:20", "09:05"));
+        assert!(
+            r.banner.starts_with("=== octomon 0.11.9 · build 2 "),
+            "{}",
+            r.banner
+        );
+        assert_eq!(
+            r.summary(),
+            "4 collector crashes and 1 panic were logged between 08:20 and 09:05."
+        );
+
+        // Nothing but ordinary failures: no report.
+        let quiet = "\n=== octomon · a ===\n2026-11-06T08:00:00.000-08:00  edge        meh\n\n=== octomon · b ===\n";
+        assert_eq!(crash_report(quiet), None);
+        // One session only: nothing before it to report on.
+        assert_eq!(
+            crash_report("\n=== octomon · a ===\n2026-11-06T08:00:00.000-08:00  panic  x\n"),
+            None
+        );
+        // A log that rolled mid-session still reports what is left.
+        let rolled = "2026-11-06T08:00:00.000-08:00  panic       x\n\n=== octomon · b ===\n";
+        let r = crash_report(rolled).unwrap();
+        assert_eq!((r.crashes, r.panics), (0, 1));
+        assert_eq!(r.summary(), "1 panic was logged at 08:00.");
+    }
 
     #[test]
     fn the_log_sits_in_the_data_directory_with_the_other_files() {

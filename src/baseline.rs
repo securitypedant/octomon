@@ -662,6 +662,34 @@ pub fn name_network(key: &str, label: &str, name: &str) -> std::io::Result<()> {
     })
 }
 
+/// A location not visited for this long is marked stale in the locations
+/// list: a candidate for [d]elete, since a re-keyed or one-off network is
+/// never matched again and would otherwise sit there indefinitely.
+pub const STALE_AFTER_DAYS: i64 = 90;
+
+/// Whether a location last seen at `last_seen` has gone [`STALE_AFTER_DAYS`]
+/// without a visit, as of `now` (both unix seconds).
+pub fn is_stale(last_seen: i64, now: i64) -> bool {
+    (now - last_seen) / 86_400 >= STALE_AFTER_DAYS
+}
+
+/// When a location was last visited, for a human: "seen today", "seen 3
+/// days ago", "seen 2 weeks ago", and past the stale mark "not seen for 5
+/// months", so the entries that have gone quiet read as such at a glance
+/// instead of as a date to subtract from today's.
+pub fn seen_ago(last_seen: i64, now: i64) -> String {
+    let days = ((now - last_seen) / 86_400).max(0);
+    match days {
+        0 => "seen today".to_string(),
+        1 => "seen yesterday".to_string(),
+        2..=13 => format!("seen {days} days ago"),
+        14..=59 => format!("seen {} weeks ago", days / 7),
+        _ if days < STALE_AFTER_DAYS => format!("seen {} months ago", days / 30),
+        _ if days < 730 => format!("not seen for {} months", days / 30),
+        _ => format!("not seen for {} years", days / 365),
+    }
+}
+
 /// "current is way above normal": the abnormality test used for confidence
 /// bumps. Both a ratio and an absolute margin, so a 2 ms → 7 ms gateway
 /// (noise) doesn't count but 9 ms → 41 ms does.
