@@ -151,3 +151,44 @@ test("a slow refresh that settles after a newer one doesn't overwrite it", async
   assert.equal((await r.json()).series.length, 2);
   assert.equal(r.headers.get("cache-control"), "public, max-age=3600");
 });
+
+test("an /edge call is counted by version, reason and platform, nothing finer", async (t) => {
+  const h = harness(t);
+  t.mock.method(globalThis, "fetch", async () => new Response("", { status: 302, headers: { location: "/securitypedant/octomon/releases/tag/v0.12.0" } }));
+  const points = [];
+  const envWithStats = { ...env, EDGE_STATS: { writeDataPoint: (p) => points.push(p) } };
+  const w = await freshWorker();
+  const call = (qs, ua) =>
+    w.fetch(new Request(`https://octomon.dev/edge${qs}`, { headers: ua ? { "user-agent": ua } : {} }), envWithStats, h.ctx);
+  const r = await call("?why=start&plat=macos-arm64", "octomon/0.12.0 (+https://octomon.dev)");
+  assert.equal(r.status, 200);
+  assert.equal((await r.json()).latest, "0.12.0");
+  // A reason or platform outside the fixed sets is dropped, not stored.
+  await call("?why=probe&plat=freebsd-x64", "octomon/0.12.0");
+  await call("", "curl/8");
+  await Promise.all(h.waited);
+  assert.deepEqual(
+    points.map((p) => p.blobs),
+    [
+      ["0.12.0", "start", "macos-arm64"],
+      ["0.12.0", "", ""],
+      ["other", "", ""],
+    ],
+  );
+  assert.ok(points.every((p) => p.doubles.length === 1 && p.doubles[0] === 1 && !p.indexes));
+});
+
+test("/edge/stats carries the platform through from the query rows", async (t) => {
+  const h = harness(t);
+  const rows = [
+    { ...row, platform: "linux-x64", calls: 2 },
+    { ...row, platform: "", calls: 1 },
+  ];
+  t.mock.method(globalThis, "fetch", async () => answer({ data: rows }));
+  const w = await freshWorker();
+  const body = await (await h.stats(w)).json();
+  assert.deepEqual(
+    body.series.map((r) => [r.platform, r.calls]),
+    [["linux-x64", 2], ["", 1]],
+  );
+});

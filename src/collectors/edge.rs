@@ -109,11 +109,33 @@ pub async fn run(
     }
 }
 
-/// `url` with the call's reason as a query parameter, whatever the base URL
-/// already carries.
+/// `url` with the call's reason and the platform as query parameters,
+/// whatever the base URL already carries. The platform is one of a fixed
+/// handful of build targets (see [`platform_bucket`]), as coarse as the
+/// version: it names a public build, not a machine.
 fn with_reason(url: &str, why: &str) -> String {
     let sep = if url.contains('?') { '&' } else { '?' };
-    format!("{url}{sep}why={why}")
+    format!("{url}{sep}why={why}&plat={}", platform_bucket())
+}
+
+/// The build this octomon is, as the /edge counter buckets it: OS and
+/// architecture, one of six names, or "other". The set is fixed here and in
+/// the Worker, which drops anything else, so the count can never carry a
+/// finer detail than these.
+pub(crate) fn platform_bucket() -> &'static str {
+    platform_bucket_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn platform_bucket_for(os: &str, arch: &str) -> &'static str {
+    match (os, arch) {
+        ("macos", "aarch64") => "macos-arm64",
+        ("macos", "x86_64") => "macos-x64",
+        ("windows", "x86_64") => "windows-x64",
+        ("windows", "aarch64") => "windows-arm64",
+        ("linux", "x86_64") => "linux-x64",
+        ("linux", "aarch64") => "linux-arm64",
+        _ => "other",
+    }
 }
 
 async fn fetch(client: &reqwest::Client, url: &str) -> Option<(EdgeInfo, String)> {
@@ -173,17 +195,32 @@ mod tests {
     use super::parse;
 
     #[test]
-    fn reasons_ride_the_query_string_either_way() {
-        use super::with_reason;
+    fn reasons_and_the_platform_ride_the_query_string_either_way() {
+        use super::{platform_bucket, with_reason};
+        let plat = platform_bucket();
         assert_eq!(
             with_reason("https://octomon.dev/edge", "start"),
-            "https://octomon.dev/edge?why=start"
+            format!("https://octomon.dev/edge?why=start&plat={plat}")
         );
         // A custom edge_check_url that already carries a query keeps it.
         assert_eq!(
             with_reason("https://example.com/edge?token=x", "refresh"),
-            "https://example.com/edge?token=x&why=refresh"
+            format!("https://example.com/edge?token=x&why=refresh&plat={plat}")
         );
+    }
+
+    /// Six named builds and nothing finer; anything else is "other".
+    #[test]
+    fn the_platform_is_one_of_six_names_or_other() {
+        use super::platform_bucket_for;
+        assert_eq!(platform_bucket_for("macos", "aarch64"), "macos-arm64");
+        assert_eq!(platform_bucket_for("macos", "x86_64"), "macos-x64");
+        assert_eq!(platform_bucket_for("windows", "x86_64"), "windows-x64");
+        assert_eq!(platform_bucket_for("windows", "aarch64"), "windows-arm64");
+        assert_eq!(platform_bucket_for("linux", "x86_64"), "linux-x64");
+        assert_eq!(platform_bucket_for("linux", "aarch64"), "linux-arm64");
+        assert_eq!(platform_bucket_for("freebsd", "x86_64"), "other");
+        assert_eq!(platform_bucket_for("linux", "riscv64"), "other");
     }
 
     #[test]

@@ -27,6 +27,17 @@ function versionOf(ua) {
 // which lets the /privacy graph estimate how much octomon ran without any
 // identifier (refreshes per day ÷ 4 ≈ hours of octomon running that day).
 const WHYS = new Set(["start", "netchange", "refresh"]);
+// The builds octomon ships, as octomon names its own (`plat=` on the call).
+// A fixed set, like the reasons: anything else is counted as "", so the
+// record can never carry a finer detail than these six.
+const PLATS = new Set([
+  "macos-arm64",
+  "macos-x64",
+  "windows-x64",
+  "windows-arm64",
+  "linux-x64",
+  "linux-arm64",
+]);
 
 // The colo's own city ("MIA" → "Miami"): a snapshot of Cloudflare's PoP
 // list (cloudflarestatus.com components, 341 codes). Static on purpose —
@@ -74,15 +85,17 @@ async function edgeAnswer(request, url, env, ctx) {
     ts: Math.floor(Date.now() / 1000),
   };
   if (env.EDGE_STATS) {
-    // The whole record: version, reason, one count. This is the entire
-    // input to the graph on /privacy.
+    // The whole record: version, reason, platform, one count. This is the
+    // entire input to the graphs on /privacy.
     const whyParam = url.searchParams.get("why");
+    const platParam = url.searchParams.get("plat");
     ctx.waitUntil(
       Promise.resolve(
         env.EDGE_STATS.writeDataPoint({
           blobs: [
             versionOf(request.headers.get("user-agent")),
             WHYS.has(whyParam) ? whyParam : "",
+            PLATS.has(platParam) ? platParam : "",
           ],
           doubles: [1],
         }),
@@ -97,10 +110,10 @@ async function edgeAnswer(request, url, env, ctx) {
   });
 }
 
-// The public aggregate behind the /privacy graph: daily request counts per
-// octomon version for the last 30 days, queried from Analytics Engine. Day
-// buckets keep it coarse in time; the version names a public software build,
-// not a person.
+// The public aggregate behind the /privacy graphs: daily request counts per
+// octomon version, reason and platform for the last 30 days, queried from
+// Analytics Engine. Day buckets keep it coarse in time; the version and the
+// platform name a public software build, not a person.
 //
 // The query runs on AE_QUERY_TOKEN, and the endpoint is public, so the
 // answer is memoized in the isolate like latestVersion() (same reasoning
@@ -143,11 +156,12 @@ async function queryEdgeStats(env) {
     SELECT toStartOfInterval(timestamp, INTERVAL '1' DAY) AS day,
            blob1 AS version,
            blob2 AS why,
+           blob3 AS platform,
            sum(_sample_interval * double1) AS calls
     FROM octomon_edge
     WHERE timestamp > now() - INTERVAL '30' DAY
-    GROUP BY day, version, why
-    ORDER BY day, version, why`;
+    GROUP BY day, version, why, platform
+    ORDER BY day, version, why, platform`;
   try {
     const resp = await fetch(
       `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/analytics_engine/sql`,
@@ -174,6 +188,7 @@ async function queryEdgeStats(env) {
       day: r.day,
       version: r.version,
       why: r.why ?? "",
+      platform: r.platform ?? "",
       calls: Math.round(Number(r.calls) || 0),
     }));
     return { series, ok: true, at: Date.now() };
