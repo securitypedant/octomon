@@ -17,9 +17,7 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
     // Identifying the VPN behind a tunnel can fall back to scanning the process
     // table, so the answer is cached per tunnel rather than redone every tick
     // — for the tunnel carrying the traffic and for any sitting beside it.
-    // Keyed on the device *and* its addresses: macOS hands a freed utunN to
-    // whichever VPN connects next, and a name-only key kept the old vendor.
-    let mut vendor_cache: HashMap<String, (TunnelAddrs, Option<&'static str>)> = HashMap::new();
+    let mut vendor_cache = VendorCache::default();
     // The DHCP server behind the current lease barely ever changes, so it is
     // asked for once per attachment (a lease-file read or one-line shell-out)
     // and cached — keyed on interface + gateway, which is what a new
@@ -174,45 +172,37 @@ pub async fn run(state: Arc<Mutex<AppState>>, refresh: Arc<Notify>, changed: Arc
             if info.tunnel.is_some() {
                 devices.push(info.tunnel_iface.clone());
             }
-            for dev in &devices {
-                let addrs = tunnel_addrs(&ifaces, dev);
-                if *dev == info.tunnel_iface && info.tunnel.is_some() {
-                    info.tunnel_addrs = addrs
-                        .v4
-                        .iter()
-                        .map(|a| a.to_string())
-                        .chain(addrs.v6.iter().map(|a| a.to_string()))
-                        .collect();
-                }
-                if vendor_cache.get(dev).is_none_or(|(had, _)| *had != addrs) {
-                    let key = addrs.clone();
-                    // A lookup that panicked isn't cached as "unnamed": the
-                    // next pass asks again.
-                    match tokio::task::spawn_blocking(move || tunnel_vendor(&key)).await {
-                        Ok(v) => {
-                            vendor_cache.insert(dev.clone(), (addrs, v));
-                        }
-                        Err(_) => {
-                            vendor_cache.remove(dev);
-                        }
-                    }
-                }
+            let devices: Vec<(String, TunnelAddrs)> = devices
+                .into_iter()
+                .map(|dev| {
+                    let addrs = tunnel_addrs(&ifaces, &dev);
+                    (dev, addrs)
+                })
+                .collect();
+            if info.tunnel.is_some()
+                && let Some((_, addrs)) = devices.iter().find(|(d, _)| *d == info.tunnel_iface)
+            {
+                info.tunnel_addrs = addrs
+                    .v4
+                    .iter()
+                    .map(|a| a.to_string())
+                    .chain(addrs.v6.iter().map(|a| a.to_string()))
+                    .collect();
             }
-            vendor_cache.retain(|dev, _| devices.contains(dev));
-            let vendor_of = |dev: &str| {
-                vendor_cache
-                    .get(dev)
-                    .and_then(|(_, v)| *v)
-                    .unwrap_or_default()
-                    .to_string()
-            };
+            vendor_cache
+                .refresh(&devices, |addrs| async move {
+                    tokio::task::spawn_blocking(move || tunnel_vendor(&addrs))
+                        .await
+                        .map_err(|_| Panicked)
+                })
+                .await;
             if info.tunnel.is_some() {
-                info.tunnel = Some(vendor_of(&info.tunnel_iface));
+                info.tunnel = Some(vendor_cache.vendor_of(&info.tunnel_iface));
             }
             info.bypassed_tunnels = bypassed
                 .into_iter()
                 .map(|iface| BypassedTunnel {
-                    vendor: vendor_of(&iface),
+                    vendor: vendor_cache.vendor_of(&iface),
                     iface,
                 })
                 .collect();
@@ -1037,6 +1027,53 @@ fn tunnel_addrs(ifaces: &[netdev::Interface], iface_name: &str) -> TunnelAddrs {
         .unwrap_or_default()
 }
 
+/// The vendor of each tunnel device in play, cached on the device *and* its
+/// addresses: macOS hands a freed utunN to whichever VPN connects next, and a
+/// name-only key kept the old vendor. Cached on the addresses also means a
+/// client started after its tunnel came up doesn't rename it until the
+/// addresses change.
+#[derive(Default)]
+struct VendorCache(HashMap<String, (TunnelAddrs, Option<&'static str>)>);
+
+/// A vendor lookup that panicked: its answer is not cached as "unnamed", so
+/// the next pass asks again.
+struct Panicked;
+
+impl VendorCache {
+    /// Name every device in `devices`, asking `lookup` only about one never
+    /// seen, or last seen with other addresses. Devices no longer in play are
+    /// forgotten, so a utunN that comes back belongs to whoever has it now.
+    async fn refresh<F, Fut>(&mut self, devices: &[(String, TunnelAddrs)], lookup: F)
+    where
+        F: Fn(TunnelAddrs) -> Fut,
+        Fut: std::future::Future<Output = Result<Option<&'static str>, Panicked>>,
+    {
+        for (dev, addrs) in devices {
+            if self.0.get(dev).is_none_or(|(had, _)| had != addrs) {
+                match lookup(addrs.clone()).await {
+                    Ok(v) => {
+                        self.0.insert(dev.clone(), (addrs.clone(), v));
+                    }
+                    Err(Panicked) => {
+                        self.0.remove(dev);
+                    }
+                }
+            }
+        }
+        self.0
+            .retain(|dev, _| devices.iter().any(|(d, _)| d == dev));
+    }
+
+    /// The cached vendor, or an empty name for a tunnel nothing could name.
+    fn vendor_of(&self, dev: &str) -> String {
+        self.0
+            .get(dev)
+            .and_then(|(_, v)| *v)
+            .unwrap_or_default()
+            .to_string()
+    }
+}
+
 /// Identify the VPN carrying a tunnel. `None` when nothing can be pinned
 /// down — the tunnel is still reported, just unnamed, which beats naming the
 /// wrong one. Cached on the addresses, so a client started after its tunnel
@@ -1354,6 +1391,59 @@ mod tests {
         assert_eq!(name_tunnel(tailscale_addr, &none, false), Some("Tailscale"));
         assert_eq!(name_tunnel(None, &tailscale, false), Some("Tailscale"));
         assert_eq!(name_tunnel(None, &none, false), None);
+    }
+
+    /// The vendor cache asks once per device, again when the device's
+    /// addresses change (a freed utunN handed to the next VPN), not when a
+    /// lookup panicked, and forgets devices that are gone.
+    #[tokio::test]
+    async fn the_vendor_cache_asks_again_only_when_the_addresses_change() {
+        use super::{Panicked, TunnelAddrs, VendorCache};
+        use std::cell::RefCell;
+        let asked = RefCell::new(Vec::new());
+        let answers = RefCell::new(Vec::<Result<Option<&'static str>, Panicked>>::new());
+        let lookup = |a: TunnelAddrs| {
+            asked.borrow_mut().push(a.v4.clone());
+            let next = answers.borrow_mut().remove(0);
+            async move { next }
+        };
+        let addrs = |v4: &str| TunnelAddrs {
+            v4: vec![v4.parse().unwrap()],
+            ..Default::default()
+        };
+        let mut cache = VendorCache::default();
+
+        // First sight: asked, cached.
+        answers.borrow_mut().push(Ok(Some("Cloudflare WARP")));
+        let warp = vec![("utun4".to_string(), addrs("100.96.0.2"))];
+        cache.refresh(&warp, lookup).await;
+        assert_eq!(cache.vendor_of("utun4"), "Cloudflare WARP");
+        assert_eq!(asked.borrow().len(), 1);
+
+        // Same device, same addresses: not asked again.
+        cache.refresh(&warp, lookup).await;
+        assert_eq!(asked.borrow().len(), 1);
+
+        // Same device name, new addresses: a different VPN has it now.
+        answers.borrow_mut().push(Ok(Some("Tailscale")));
+        let reused = vec![("utun4".to_string(), addrs("100.101.2.3"))];
+        cache.refresh(&reused, lookup).await;
+        assert_eq!(cache.vendor_of("utun4"), "Tailscale");
+        assert_eq!(asked.borrow().len(), 2);
+
+        // A lookup that panicked is not remembered as "unnamed": the next
+        // pass asks again, and meanwhile the tunnel is simply unnamed.
+        answers.borrow_mut().push(Err(Panicked));
+        let other = vec![("utun5".to_string(), addrs("10.9.8.10"))];
+        cache.refresh(&other, lookup).await;
+        assert_eq!(cache.vendor_of("utun5"), "");
+        answers.borrow_mut().push(Ok(Some("WireGuard")));
+        cache.refresh(&other, lookup).await;
+        assert_eq!(cache.vendor_of("utun5"), "WireGuard");
+        assert_eq!(asked.borrow().len(), 4);
+
+        // utun4 left the device list above, so it was forgotten.
+        assert_eq!(cache.vendor_of("utun4"), "");
     }
 
     /// An up interface named `name` carrying `v4`, typed by its name alone.
