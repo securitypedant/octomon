@@ -820,10 +820,20 @@ fn tell_unsaved(state: &Arc<Mutex<AppState>>, message: String) {
     );
 }
 
-/// How long a collector that panicked waits before it is started again: long
-/// enough that one failing on every pass cannot spin, short enough that its
-/// panel is back before anyone wonders why it froze.
-const RESTART_DELAY: Duration = Duration::from_secs(5);
+/// How long a collector that panicked waits before it is started again, per
+/// consecutive crash: short enough that its panel is back before anyone
+/// wonders why it froze, and finite, so one failing on every pass is stopped
+/// after the last of these rather than flooding the timeline with a crash
+/// every few seconds for the rest of the session.
+const RESTART_DELAYS: &[Duration] = &[
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+    Duration::from_secs(45),
+];
+
+/// A collector that ran this long before crashing had been working: its
+/// crash count starts over, so one crash a day is tolerated forever.
+const STABLE_AFTER: Duration = Duration::from_secs(10 * 60);
 
 /// Run a long-lived collector, starting it again whenever it panics. Without
 /// this a panic ended the task silently: its panel froze on its last reading
@@ -835,7 +845,7 @@ where
     F: FnMut() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
-    supervise_with(name, state, RESTART_DELAY, Finish::Unexpected, start);
+    supervise_with(name, state, RESTART_DELAYS, Finish::Unexpected, start);
 }
 
 /// [`supervise`] for a task that is meant to finish, such as one startup pass.
@@ -844,7 +854,7 @@ where
     F: FnMut() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
-    supervise_with(name, state, RESTART_DELAY, Finish::Expected, start);
+    supervise_with(name, state, RESTART_DELAYS, Finish::Expected, start);
 }
 
 /// Whether a supervised task returning on its own is news.
@@ -881,10 +891,13 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "unknown panic".to_string())
 }
 
+/// `delays` is one wait per restart; a crash past the last of them stops the
+/// collector for the session, with one final timeline event and its name in
+/// `AppState::stopped_collectors` for its panel to show.
 fn supervise_with<F, Fut>(
     name: &'static str,
     state: &Arc<Mutex<AppState>>,
-    delay: Duration,
+    delays: &'static [Duration],
     finish: Finish,
     mut start: F,
 ) -> tokio::task::JoinHandle<()>
@@ -894,10 +907,31 @@ where
 {
     let state = state.clone();
     tokio::spawn(async move {
+        let mut crashes = 0;
         loop {
+            let started = std::time::Instant::now();
             match tokio::spawn(start()).await {
                 Err(e) if e.is_panic() => {
+                    if started.elapsed() >= STABLE_AFTER {
+                        crashes = 0;
+                    }
                     let why = panic_message(e.into_panic().as_ref());
+                    let Some(delay) = delays.get(crashes) else {
+                        let message = format!(
+                            "{name} collector crashed {} times ({why}) — stopped for this session, see errors.log",
+                            crashes + 1
+                        );
+                        errlog::log("supervisor", &message);
+                        let mut s = state.lock();
+                        s.notice_event(
+                            verdict::Severity::Degraded,
+                            app::EventCategory::Logging,
+                            message,
+                        );
+                        s.stopped_collectors.push(name);
+                        return;
+                    };
+                    crashes += 1;
                     let message = format!("{name} collector crashed ({why}) — restarting");
                     errlog::log("supervisor", &message);
                     state.lock().notice_event(
@@ -905,7 +939,7 @@ where
                         app::EventCategory::Logging,
                         message,
                     );
-                    tokio::time::sleep(delay).await;
+                    tokio::time::sleep(*delay).await;
                 }
                 Ok(()) if finish == Finish::Unexpected => {
                     errlog::log("supervisor", format!("{name} collector stopped on its own"));
@@ -3915,6 +3949,54 @@ fn prev_panel(p: Panel) -> Panel {
 
 #[cfg(test)]
 mod tests {
+    /// Three restarts with no wait, as `RESTART_DELAYS` but for a test.
+    const AT_ONCE: &[super::Duration] = &[super::Duration::ZERO; 3];
+
+    /// A collector that panics on every pass is restarted once per delay,
+    /// then stopped for the session: one last event, and its name where its
+    /// panel can find it.
+    #[tokio::test]
+    async fn a_collector_that_keeps_panicking_is_stopped() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let state = super::Arc::new(super::Mutex::new(super::AppState::new(vec![])));
+        let runs = super::Arc::new(AtomicU32::new(0));
+        let counter = runs.clone();
+        let supervisor = super::supervise_with(
+            "test",
+            &state,
+            AT_ONCE,
+            super::Finish::Unexpected,
+            move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    panic!("every time");
+                }
+            },
+        );
+        supervisor.await.expect("supervisor itself never panics");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            4,
+            "first run plus one per delay"
+        );
+        let s = state.lock();
+        let messages: Vec<&str> = s.events.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.starts_with("test collector crashed (every time) — restarting"))
+                .count(),
+            3
+        );
+        assert_eq!(
+            messages.last().copied(),
+            Some(
+                "test collector crashed 4 times (every time) — stopped for this session, see errors.log"
+            )
+        );
+        assert_eq!(s.stopped_collectors, ["test"]);
+    }
+
     /// A collector that panics is started again, the crash is put on the
     /// timeline, and one that then returns normally is left finished.
     #[tokio::test]
@@ -3926,7 +4008,7 @@ mod tests {
         let supervisor = super::supervise_with(
             "test",
             &state,
-            super::Duration::ZERO,
+            AT_ONCE,
             super::Finish::Expected,
             move || {
                 let n = counter.fetch_add(1, Ordering::SeqCst);

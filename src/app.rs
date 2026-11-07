@@ -3034,6 +3034,10 @@ pub struct AppState {
     /// The stored baselines couldn't be read when this network was loaded:
     /// `baseline` is learned in memory and never saved.
     pub baseline_unsaved: bool,
+    /// Collectors that crashed their way to a stop this session (see the
+    /// supervisor in `main`): their panels say so instead of silently
+    /// freezing.
+    pub stopped_collectors: Vec<&'static str>,
     /// Show the first-run explainer once the startup notice is dismissed.
     pub explainer_pending: bool,
     /// The startup version check found a newer release while another modal
@@ -3251,6 +3255,7 @@ impl AppState {
             baseline: None,
             baseline_key: None,
             baseline_unsaved: false,
+            stopped_collectors: Vec::new(),
             explainer_pending: false,
             update_pending: false,
             locations: None,

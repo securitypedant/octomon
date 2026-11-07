@@ -2680,6 +2680,23 @@ fn triage_overlay(f: &mut Frame, s: &AppState, area: Rect) {
     f.render_widget(Paragraph::new(shown), content);
 }
 
+/// " · stopped: netinfo" when a collector feeding this panel crashed its way
+/// to a stop (see the supervisor in `main`), so a panel that has frozen says
+/// why rather than quietly showing its last reading.
+fn stopped_mark(s: &AppState, feeders: &[&str]) -> String {
+    let stopped: Vec<&str> = s
+        .stopped_collectors
+        .iter()
+        .copied()
+        .filter(|c| feeders.contains(c))
+        .collect();
+    if stopped.is_empty() {
+        String::new()
+    } else {
+        format!(" · stopped: {}", stopped.join(", "))
+    }
+}
+
 fn block(title: &str, focused: bool) -> Block<'static> {
     let border = if focused {
         theme::accent()
@@ -3207,6 +3224,18 @@ fn quality_panel(f: &mut Frame, s: &AppState, area: Rect) {
         title.push_str(" · no ICMP here — web ok");
     }
     title.push(')');
+    title.push_str(&stopped_mark(
+        s,
+        &[
+            "analysis",
+            "tcp",
+            "http",
+            "dns",
+            "egress",
+            "resolve",
+            "discovery watch",
+        ],
+    ));
     f.render_widget(block(&title, s.focus == Panel::Quality), area);
     // The scroll cue runs beside the rows, under the header.
     let body = Rect {
@@ -4154,6 +4183,7 @@ fn bandwidth_panel(f: &mut Frame, s: &AppState, area: Rect) {
     if !s.bw_filter.trim().is_empty() {
         title.push_str(&format!(" · ⌕ {}", s.bw_filter.trim()));
     }
+    title.push_str(&stopped_mark(s, &["throughput", "procbw", "speedtest"]));
     let b = block(&title, s.focus == Panel::Bandwidth);
     let inner = b.inner(area);
     f.render_widget(b, area);
@@ -5393,6 +5423,13 @@ fn netinfo_details(f: &mut Frame, s: &AppState, area: Rect, focused: bool) {
         ),
         None => "Network".to_string(),
     };
+    let title = title
+        + &stopped_mark(
+            s,
+            &[
+                "netinfo", "wifi", "signal", "edge", "clock", "pmtu", "proxy", "web",
+            ],
+        );
     let b = block(&title, focused);
     let inner = b.inner(area);
     f.render_widget(b, area);
@@ -6280,7 +6317,8 @@ fn signal_graph(f: &mut Frame, s: &AppState, area: Rect) {
 
 fn vitals_panel(f: &mut Frame, s: &AppState, area: Rect) {
     let v = &s.vitals;
-    let b = block("Machine", s.focus == Panel::Vitals);
+    let title = format!("Machine{}", stopped_mark(s, &["vitals"]));
+    let b = block(&title, s.focus == Panel::Vitals);
     let inner = b.inner(area);
     f.render_widget(b, area);
 
