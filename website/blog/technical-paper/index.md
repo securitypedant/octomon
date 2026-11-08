@@ -284,7 +284,7 @@ Code: [`speedtest.rs`](https://github.com/securitypedant/octomon/blob/main/src/c
 
 The Network panel is everything that describes the connection, with a few measurements.
 
-- **Identity**, from the OS's interface tables, re-read every 5 seconds and on `r`. That poll is also how network changes are detected. The link is the interface a route lookup toward the internet selects, so a tunnel holding only private routes is never mistaken for it. It collects: interface, medium (Ethernet, Wi-Fi, cellular, tunnel),
+- **Identity**, from the OS's interface tables, re-read every 5 seconds and on `r`. That poll is also how network changes are detected. The link is the interface a route lookup toward the internet selects, so a tunnel holding only private routes is never mistaken for it. On Linux the kernel is asked what a device is (`DEVTYPE=wireguard`, tun flags, a PPP, GRE or SIT type), so a NetworkManager tunnel named `home` is still a tunnel. A tunnel is named from its vendor's address blocks first, then from the client running for it, by elimination; when nothing matches, the operator the edge sees the connection arrive from is shown beside it as a clue, never as its name. It collects: interface, medium (Ethernet, Wi-Fi, cellular, tunnel),
   negotiated link speed, IPv4 and IPv6 addresses, the machine's MAC, the
   gateway's address and MAC, the DHCP server, the configured resolvers.
 - **Wi-Fi details**, every 60 seconds and on `r`: SSID, PHY mode, channel
@@ -308,7 +308,9 @@ The Network panel is everything that describes the connection, with a few measur
   presence serves you, which ISP's network your traffic arrives from, and
   the TCP round trip from Cloudflare to you. It is the one measurement taken
   from the far end looking back, and it works on networks that block every
-  ping. It is also the only endpoint I run.
+  ping. It is also the only endpoint I run. The request carries octomon's
+  version, the build's platform (one of six names) and the reason for the
+  call, nothing else.
 - **DNS**, every 5 seconds: an `A` query for `example.com` to each
   configured resolver and to two reference resolvers, 1.1.1.1 and 8.8.8.8,
   giving latency and failure per resolver. Once a minute each resolver is
@@ -354,7 +356,7 @@ Code: [`ui.rs`](https://github.com/securitypedant/octomon/blob/main/src/ui.rs) (
 
 Read every second from the OS: CPU as a whole and per core, memory
 pressure (the share that is unavailable, because "used" sits near 100% on
-any healthy machine thanks to caches), load average, swap, and the
+any healthy machine thanks to caches), load average (not on Windows, which has none), swap, and the
 interface's error counters. Thermal and power state are read every 30
 seconds, because that probe runs a subprocess. Every other second the
 process table is walked for the ten busiest by CPU and by memory, with CPU
@@ -392,18 +394,24 @@ on the link:
   is used only when the MAC is unknown. The medium is part of the key, so
   the same router reached over cable and over Wi-Fi is two locations.
 - With a full-tunnel VPN: the underlay gateway's MAC (or IP), the underlay
-  medium, and the VPN vendor. When no underlay is visible, the vendor
-  alone.
+  medium, and the VPN vendor. For WireGuard, also the config's own tunnel
+  address, which is fixed per config, so two configs used from one network
+  are two locations; no other protocol gets this, because OpenVPN and the
+  corporate clients hand out an address from a pool per session. A VPN
+  octomon cannot name is one "VPN" per network, whatever device or address
+  it has. When no underlay is visible, the vendor alone.
 - With a split-tunnel VPN that carries internet traffic but leaves the LAN
   outside it (WARP's exclude mode): the LAN's own fingerprint plus the
-  vendor.
+  vendor, with the same WireGuard address clause.
 - With a tunnel that carries only its own routes, internet traffic still
   leaving by the LAN (a corporate VPN to one address range): the LAN's
   fingerprint alone. The tunnel is listed on the Network panel, and its
   coming and going is an event, but it does not move the location.
 - With no gateway at all: the SSID alone.
 
-The key is hashed before it is stored. DHCP renumbering does not change it.
+An all-zero gateway MAC, which is what an unresolved neighbour reads as, is
+treated as unknown and the gateway IP keys the location. The key is hashed
+before it is stored. DHCP renumbering does not change it.
 A different router with the same generic SSID does. `N` names a location,
 and `L` lists the ones octomon has seen, with what it learned about each.
 
@@ -1079,7 +1087,7 @@ Code: [`verdict.rs`](https://github.com/securitypedant/octomon/blob/main/src/ver
 
 Every rule above is a stated, falsifiable condition on measured quantities,
 and every threshold is a constant with a comment explaining the choice.
-There are 358 automated tests, most of them scenarios: a lossy hop followed
+There are 406 automated tests, most of them scenarios: a lossy hop followed
 by clean ones must not blame the ISP; three silent game servers must not
 out-vote the built-in targets; a plane's 30% loss must read as weather once
 learned and as an incident on a connection that is normally clean. That is a specification, and it is
@@ -1148,6 +1156,7 @@ but it's a damn sight better than the hacky mess of scripts I used to run.
 This is a living document. Every change to it after first publication gets
 a line here, newest first, so you can see what moved and when.
 
+- **2026-11-07** · Reviewed against octomon 0.12.0: WireGuard address keys, one "VPN" per network and the all-zero MAC (§3), kernel-typed Linux tunnels, how a tunnel is named, and the platform sent with the edge call (§2.3), load average on Windows (§2.4), test count (§6).
 - **2026-11-01** · Reviewed against octomon 0.11.9: the summed-adapters fallback no longer counts tunnels (§2.2), Wi-Fi details collection and the no-scan rule, and the link chosen by route lookup (§2.3), the two kinds of split tunnel (§3), test count (§6).
 - **2026-10-18** · Reviewed against octomon 0.11.6: path-change events and public IP re-fetch (§2.1), the stacked filtered bandwidth graph (§2.2), the version notice (§4.9).
 - **2026-10-16** · First publication, written against octomon 0.11.4.

@@ -319,7 +319,7 @@
     }
   },
   "image": "https://octomon.dev/blog/technical-paper/card.png",
-  "wordCount": 13460,
+  "wordCount": 13689,
   "inLanguage": "en-GB",
   "isPartOf": {
     "@type": "Blog",
@@ -374,7 +374,7 @@
   <div class="pagehead">
     <div class="wrap">
       <h1>octomon technical paper</h1>
-      <p class="postmeta"><time datetime="2026-10-16">16 October 2026</time> · 61 min read</p>
+      <p class="postmeta"><time datetime="2026-10-16">16 October 2026</time> · 62 min read</p>
       <p class="lede">Documenting the ins and outs of how octomon works, and why</p>
     </div>
   </div>
@@ -661,7 +661,7 @@
 
         <p>The Network panel is everything that describes the connection, with a few measurements.</p>
         <ul>
-        <li><strong>Identity</strong>, from the OS&#39;s interface tables, re-read every 5 seconds and on <code>r</code>. That poll is also how network changes are detected. The link is the interface a route lookup toward the internet selects, so a tunnel holding only private routes is never mistaken for it. It collects: interface, medium (Ethernet, Wi-Fi, cellular, tunnel),
+        <li><strong>Identity</strong>, from the OS&#39;s interface tables, re-read every 5 seconds and on <code>r</code>. That poll is also how network changes are detected. The link is the interface a route lookup toward the internet selects, so a tunnel holding only private routes is never mistaken for it. On Linux the kernel is asked what a device is (<code>DEVTYPE=wireguard</code>, tun flags, a PPP, GRE or SIT type), so a NetworkManager tunnel named <code>home</code> is still a tunnel. A tunnel is named from its vendor&#39;s address blocks first, then from the client running for it, by elimination; when nothing matches, the operator the edge sees the connection arrive from is shown beside it as a clue, never as its name. It collects: interface, medium (Ethernet, Wi-Fi, cellular, tunnel),
         negotiated link speed, IPv4 and IPv6 addresses, the machine&#39;s MAC, the
         gateway&#39;s address and MAC, the DHCP server, the configured resolvers.</li>
         <li><strong>Wi-Fi details</strong>, every 60 seconds and on <code>r</code>: SSID, PHY mode, channel
@@ -685,7 +685,9 @@
         presence serves you, which ISP&#39;s network your traffic arrives from, and
         the TCP round trip from Cloudflare to you. It is the one measurement taken
         from the far end looking back, and it works on networks that block every
-        ping. It is also the only endpoint I run.</li>
+        ping. It is also the only endpoint I run. The request carries octomon&#39;s
+        version, the build&#39;s platform (one of six names) and the reason for the
+        call, nothing else.</li>
         <li><strong>DNS</strong>, every 5 seconds: an <code>A</code> query for <code>example.com</code> to each
         configured resolver and to two reference resolvers, 1.1.1.1 and 8.8.8.8,
         giving latency and failure per resolver. Once a minute each resolver is
@@ -728,7 +730,7 @@
 
         <p>Read every second from the OS: CPU as a whole and per core, memory
         pressure (the share that is unavailable, because &quot;used&quot; sits near 100% on
-        any healthy machine thanks to caches), load average, swap, and the
+        any healthy machine thanks to caches), load average (not on Windows, which has none), swap, and the
         interface&#39;s error counters. Thermal and power state are read every 30
         seconds, because that probe runs a subprocess. Every other second the
         process table is walked for the ten busiest by CPU and by memory, with CPU
@@ -785,18 +787,24 @@
         is used only when the MAC is unknown. The medium is part of the key, so
         the same router reached over cable and over Wi-Fi is two locations.</li>
         <li>With a full-tunnel VPN: the underlay gateway&#39;s MAC (or IP), the underlay
-        medium, and the VPN vendor. When no underlay is visible, the vendor
-        alone.</li>
+        medium, and the VPN vendor. For WireGuard, also the config&#39;s own tunnel
+        address, which is fixed per config, so two configs used from one network
+        are two locations; no other protocol gets this, because OpenVPN and the
+        corporate clients hand out an address from a pool per session. A VPN
+        octomon cannot name is one &quot;VPN&quot; per network, whatever device or address
+        it has. When no underlay is visible, the vendor alone.</li>
         <li>With a split-tunnel VPN that carries internet traffic but leaves the LAN
         outside it (WARP&#39;s exclude mode): the LAN&#39;s own fingerprint plus the
-        vendor.</li>
+        vendor, with the same WireGuard address clause.</li>
         <li>With a tunnel that carries only its own routes, internet traffic still
         leaving by the LAN (a corporate VPN to one address range): the LAN&#39;s
         fingerprint alone. The tunnel is listed on the Network panel, and its
         coming and going is an event, but it does not move the location.</li>
         <li>With no gateway at all: the SSID alone.</li>
         </ul>
-        <p>The key is hashed before it is stored. DHCP renumbering does not change it.
+        <p>An all-zero gateway MAC, which is what an unresolved neighbour reads as, is
+        treated as unknown and the gateway IP keys the location. The key is hashed
+        before it is stored. DHCP renumbering does not change it.
         A different router with the same generic SSID does. <code>N</code> names a location,
         and <code>L</code> lists the ones octomon has seen, with what it learned about each.</p>
         <figure>
@@ -1494,7 +1502,7 @@
         <h2 id="6-what-this-establishes-and-what-it-does-not">6. What this establishes, and what it does not <a class="anchor" href="#6-what-this-establishes-and-what-it-does-not" aria-label="Link to this section">#</a></h2>
         <p>Every rule above is a stated, falsifiable condition on measured quantities,
         and every threshold is a constant with a comment explaining the choice.
-        There are 358 automated tests, most of them scenarios: a lossy hop followed
+        There are 406 automated tests, most of them scenarios: a lossy hop followed
         by clean ones must not blame the ISP; three silent game servers must not
         out-vote the built-in targets; a plane&#39;s 30% loss must read as weather once
         learned and as an incident on a connection that is normally clean. That is a specification, and it is
@@ -1556,6 +1564,7 @@
         <p>This is a living document. Every change to it after first publication gets
         a line here, newest first, so you can see what moved and when.</p>
         <ul>
+        <li><strong>2026-11-07</strong> · Reviewed against octomon 0.12.0: WireGuard address keys, one &quot;VPN&quot; per network and the all-zero MAC (§3), kernel-typed Linux tunnels, how a tunnel is named, and the platform sent with the edge call (§2.3), load average on Windows (§2.4), test count (§6).</li>
         <li><strong>2026-11-01</strong> · Reviewed against octomon 0.11.9: the summed-adapters fallback no longer counts tunnels (§2.2), Wi-Fi details collection and the no-scan rule, and the link chosen by route lookup (§2.3), the two kinds of split tunnel (§3), test count (§6).</li>
         <li><strong>2026-10-18</strong> · Reviewed against octomon 0.11.6: path-change events and public IP re-fetch (§2.1), the stacked filtered bandwidth graph (§2.2), the version notice (§4.9).</li>
         <li><strong>2026-10-16</strong> · First publication, written against octomon 0.11.4.</li>
