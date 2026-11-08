@@ -390,10 +390,7 @@
     <div class="wrap">
       <h1>Tested against real VPN clients</h1>
       <p class="lede">Before each release, octomon is run inside Linux containers next to
-      real VPN clients, and what it says about each tunnel is checked: that it names the
-      client, that the location label has the right shape, and that the location it files
-      the network under stays the same when the tunnel reconnects, lands on another server
-      or gets a new address. These are the results.</p>
+      real VPN clients to check what it says about each tunnel.</p>
     </div>
   </div>
 
@@ -401,16 +398,13 @@
     <div class="wrap">
       <div class="post">
         <p>The rig is in the repository under
-        <a href="https://github.com/securitypedant/octomon/tree/main/testing/vpn-rig"><code>testing/vpn-rig/</code></a>: one
-        container per client, the rig's own WireGuard and OpenVPN servers for the
-        self-contained cases, a real account for the rest. It is run by hand; it is not
-        part of the automated test suite, which is why the result is published here
-        rather than in a badge. What is published is the outcome only: the client, the
+        <a href="https://github.com/securitypedant/octomon/tree/main/testing/vpn-rig"><code>testing/vpn-rig/</code></a> and has one
+        container per client with the rig's own WireGuard, OpenVPN and GRE servers for the
+        self-contained cases and real accounts for the others. One client has no VPN at
+        all and breaks its own network on purpose, to check what the analysis says. It is run by hand and not
+        part of the automated test suite. What is published is the outcome only: the client, the
         device shape octomon saw, the name it gave the tunnel, and whether each check
-        held. Addresses, keys and logs from the runs stay on the machine that ran them.</p>
-        <p>What it cannot tell you: anything about macOS or Windows (the rig is Linux by
-        construction), Wi-Fi, a real home or office network underneath the tunnel, or
-        corporate clients such as Zscaler and GlobalProtect.</p>
+        held.</p>
       </div>
     </div>
   </section>
@@ -429,14 +423,14 @@
             <td><code>nordlynx</code></td>
             <td>NordVPN</td>
             <td>first connection</td>
-            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
           </tr>
 <tr>
             <td>reconnect to another country</td>
             <td><code>nordlynx</code></td>
             <td>NordVPN</td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
           </tr>
           </tbody>
         </table>
@@ -451,14 +445,14 @@
             <td><code>tun0</code></td>
             <td>OpenVPN</td>
             <td>first connection</td>
-            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
           </tr>
 <tr>
             <td>reconnect 1195 (pool 10.9, another server)</td>
             <td><code>tun0</code></td>
             <td>OpenVPN</td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
           </tr>
           </tbody>
         </table>
@@ -473,21 +467,21 @@
             <td><code>CloudflareWARP</code></td>
             <td>Cloudflare WARP</td>
             <td>first connection</td>
-            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
           </tr>
 <tr>
             <td>reconnect</td>
             <td><code>CloudflareWARP</code></td>
             <td>Cloudflare WARP</td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
           </tr>
 <tr>
             <td>re-register (new device identity and addresses)</td>
             <td><code>CloudflareWARP</code></td>
             <td>Cloudflare WARP</td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
           </tr>
           </tbody>
         </table>
@@ -502,21 +496,21 @@
             <td><code>wg0</code></td>
             <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
             <td>first connection</td>
-            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
           </tr>
 <tr>
             <td>reconnect wg0</td>
             <td><code>wg0</code></td>
             <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
           </tr>
 <tr>
             <td>connect wg1 (second address)</td>
             <td><code>wg1</code></td>
             <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
             <td>a new location, as designed</td>
-            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
           </tr>
           </tbody>
         </table>

@@ -677,7 +677,7 @@ enum Health {
 /// `normal_loss` is the learned loss for this kind of path on this network,
 /// when there is one — a plane's 30% is its weather, an office's 30% is an
 /// incident, and this is where the two stop being judged by the same number.
-fn probe_health(t: &TargetStat, normal_loss: Option<f64>) -> Health {
+fn probe_health(t: &TargetStat, normal_loss: Option<f64>, normal_ms: Option<f64>) -> Health {
     if t.window.len() < th::MIN_SAMPLES {
         return Health::NoData;
     }
@@ -694,10 +694,32 @@ fn probe_health(t: &TargetStat, normal_loss: Option<f64>) -> Health {
         RttGrade::Bad | RttGrade::Warn => return Health::Warn,
         RttGrade::Good => {}
     }
-    if inflated(t) {
+    if inflated_vs(t, normal_ms) {
         return Health::Warn;
     }
     Health::Good
+}
+
+/// [`inflated`], with the location's learned normal as a second floor. A
+/// session that began while the path was already slow has a session floor
+/// that *is* the slow state, so against it nothing is ever inflated; the
+/// normal is the one thing that still knows ("~0 ms normal here" beside a
+/// 272 ms gateway). The caller passes a normal only from an established
+/// baseline, so first visits are judged on the session alone as before.
+fn inflated_vs(t: &TargetStat, normal_ms: Option<f64>) -> bool {
+    inflated(t)
+        || normal_ms
+            .zip(t.stats(th::RECENT).mean)
+            .is_some_and(|(normal, mean)| crate::baseline::well_above(mean, normal))
+}
+
+/// What an inflation summary compares against: the session floor when that
+/// is what showed it, else the learned normal that did.
+fn inflation_reference(t: &TargetStat, normal_ms: Option<f64>) -> String {
+    match normal_ms {
+        Some(normal) if !inflated(t) => format!("~{normal:.0}ms normal here"),
+        _ => format!("{} floor", fmt_ms(t.floor_ms())),
+    }
 }
 
 /// How one round-trip reading compares with what this path normally shows.
@@ -1111,8 +1133,13 @@ pub fn evaluate(s: &AppState) -> Triage {
     // than usual here* is a fault.
     let gw_norm = baseline.and_then(|b| b.gateway_loss_pct);
     let anchor_norm = baseline.and_then(|b| b.anchor_loss_pct);
+    // Learned latency normals are a second floor for the inflation
+    // judgement (see inflated_vs): without them a session started during
+    // the slow spell would never call it slow.
+    let gw_norm_ms = baseline.and_then(|b| b.gateway_ms);
+    let anchor_norm_ms = baseline.and_then(|b| b.anchor_ms);
     let gw_health = gw
-        .map(|g| probe_health(g, gw_norm))
+        .map(|g| probe_health(g, gw_norm, gw_norm_ms))
         .unwrap_or(Health::NoData);
     // Anchors: the built-in resolvers (Cloudflare/Google/Quad9), the jury
     // that decides whether *the internet* is reachable. They are chosen
@@ -1148,23 +1175,23 @@ pub fn evaluate(s: &AppState) -> Triage {
     let with_data: Vec<&TargetStat> = anchors
         .iter()
         .copied()
-        .filter(|t| probe_health(t, anchor_norm) != Health::NoData)
+        .filter(|t| probe_health(t, anchor_norm, anchor_norm_ms) != Health::NoData)
         .collect();
     let bad: Vec<&TargetStat> = with_data
         .iter()
         .copied()
-        .filter(|t| probe_health(t, anchor_norm) == Health::Bad)
+        .filter(|t| probe_health(t, anchor_norm, anchor_norm_ms) == Health::Bad)
         .collect();
     let fine = with_data.len() - bad.len();
     // The user's own targets, with data: never jurors, always destinations.
     let own: Vec<&TargetStat> = own
         .into_iter()
-        .filter(|t| probe_health(t, anchor_norm) != Health::NoData)
+        .filter(|t| probe_health(t, anchor_norm, anchor_norm_ms) != Health::NoData)
         .collect();
     let own_bad: Vec<&TargetStat> = own
         .iter()
         .copied()
-        .filter(|t| probe_health(t, anchor_norm) == Health::Bad)
+        .filter(|t| probe_health(t, anchor_norm, anchor_norm_ms) == Health::Bad)
         .collect();
     let gw_fine = matches!(gw_health, Health::Good | Health::Warn);
     // Every anchor packet transits the gateway, so ≥2 clean anchors with none
@@ -1248,7 +1275,7 @@ pub fn evaluate(s: &AppState) -> Triage {
             .zip(g.stats(th::RECENT).mean)
             .is_some_and(|(normal, cur)| !crate::baseline::well_above(cur, normal));
         let raise = gw_health == Health::Bad
-            || (gw_health != Health::NoData && inflated(g) && !baseline_says_normal);
+            || (gw_health != Health::NoData && inflated_vs(g, gw_norm_ms) && !baseline_says_normal);
         if raise {
             // An ICMP-dropping-but-forwarding gateway flips the claim from an
             // alarm to a note: the clean anchors stop being a contradiction of
@@ -1276,9 +1303,13 @@ pub fn evaluate(s: &AppState) -> Triage {
             // (the radio's airtime, the uplink's queue) — not the gateway box
             // failing, and not the wide internet. Only the gateway inflated is
             // the gateway's own claim.
-            let inflated_anchors = with_data.iter().filter(|t| inflated(t)).count();
-            let uniform =
-                inflated(g) && with_data.len() >= 2 && inflated_anchors * 2 >= with_data.len();
+            let inflated_anchors = with_data
+                .iter()
+                .filter(|t| inflated_vs(t, anchor_norm_ms))
+                .count();
+            let uniform = inflated_vs(g, gw_norm_ms)
+                && with_data.len() >= 2
+                && inflated_anchors * 2 >= with_data.len();
             let summary = if gw_drops_icmp {
                 "gateway drops ICMP (forwarding fine)".to_string()
             } else if loss >= th::LOSS_DOWN_PCT {
@@ -1287,15 +1318,15 @@ pub fn evaluate(s: &AppState) -> Triage {
                 format!("gateway losing packets ({loss:.0}% loss)")
             } else if uniform {
                 format!(
-                    "access link congested — latency inflated on every path ({} vs {} floor)",
+                    "access link congested — latency inflated on every path ({} vs {})",
                     fmt_ms(g.stats(th::RECENT).mean),
-                    fmt_ms(g.floor_ms())
+                    inflation_reference(g, gw_norm_ms)
                 )
             } else {
                 format!(
-                    "gateway latency inflated ({} vs {} floor)",
+                    "gateway latency inflated ({} vs {})",
                     fmt_ms(g.stats(th::RECENT).mean),
-                    fmt_ms(g.floor_ms())
+                    inflation_reference(g, gw_norm_ms)
                 )
             };
             let mut evidence = vec![format!(
@@ -1939,7 +1970,7 @@ pub fn evaluate(s: &AppState) -> Triage {
 
     // --- devices on the LAN: never an internet question ---
     for t in &lan_targets {
-        if probe_health(t, None) != Health::Bad {
+        if probe_health(t, None, None) != Health::Bad {
             continue;
         }
         let loss = t.recent_loss_pct(th::RECENT);
@@ -2239,7 +2270,10 @@ pub fn evaluate(s: &AppState) -> Triage {
         for t in s.targets.iter().filter(|t| !t.discovered) {
             if t.web.status == crate::app::WebStatus::Web
                 && t.web.fails >= 2
-                && matches!(probe_health(t, anchor_norm), Health::Good | Health::Warn)
+                && matches!(
+                    probe_health(t, anchor_norm, anchor_norm_ms),
+                    Health::Good | Health::Warn
+                )
             {
                 findings.push(Finding {
                     cause: Cause::WebTarget,
@@ -2587,12 +2621,33 @@ pub fn evaluate(s: &AppState) -> Triage {
     let mut usable = false;
     if let Some(ms) = web_ok_ms
         && !no_link
-        && !normally_clean
         && findings.iter().any(&demotable)
     {
         if blackholed {
+            // Every ping unanswered while the web check and the TCP series
+            // succeed is never an outage, at home as much as on a plane: the
+            // ping-driven claims are void here too. The difference a clean
+            // normal makes is that the silence is *new*, so it gets a note
+            // instead of nothing — a firewall or a router setting changed,
+            // and the user may want to know why their pings stopped.
             findings.retain(|f| !demotable(f));
-        } else {
+            if normally_clean {
+                findings.push(Finding {
+                    cause: Cause::GatewayLan,
+                    severity: Severity::Info,
+                    confidence: judge(true, true, false),
+                    summary: "pings stopped being answered on this network — web and TCP traffic unaffected".to_string(),
+                    evidence: vec![
+                        format!("web check ok ({ms:.0}ms) — names resolve and pages load over this link"),
+                        "every ICMP probe unanswered, the gateway's included; tcp :443 to the anchors fine".to_string(),
+                        "this network normally answers pings — something on the path or this machine now drops them".to_string(),
+                    ],
+                    subject: String::new(),
+                    symptom: false,
+                    since: None,
+                });
+            }
+        } else if !normally_clean {
             usable = true;
             let mut evidence = vec![format!(
                 "web check ok ({ms:.0}ms) — names resolve and pages load over this link"
@@ -2949,6 +3004,11 @@ fn build_rungs(
     https_down: bool,
 ) -> Vec<Rung> {
     let mut rungs = Vec::with_capacity(7);
+    let anchor_norm_ms = s
+        .baseline
+        .as_ref()
+        .filter(|b| b.established())
+        .and_then(|b| b.anchor_ms);
     let health_status = |h: Health| match h {
         Health::NoData => RungStatus::Unknown,
         Health::Good => RungStatus::Ok,
@@ -3340,7 +3400,12 @@ fn build_rungs(
         // Latency counts too: a green check beside "worst p95 504ms" was the
         // rung grading only loss while the table graded the same anchors red.
         let inflated_majority = with_data.len() >= 2
-            && with_data.iter().filter(|t| inflated(t)).count() * 2 >= with_data.len();
+            && with_data
+                .iter()
+                .filter(|t| inflated_vs(t, anchor_norm_ms))
+                .count()
+                * 2
+                >= with_data.len();
         let status = if bad.len() >= 2 {
             if usable {
                 RungStatus::Warn
@@ -3584,7 +3649,7 @@ fn build_rungs(
             let warn: Vec<&str> = with_data
                 .iter()
                 .chain(own.iter())
-                .filter(|t| probe_health(t, anchor_norm) != Health::Good)
+                .filter(|t| probe_health(t, anchor_norm, anchor_norm_ms) != Health::Good)
                 .map(|t| t.label.as_str())
                 .collect();
             if warn.is_empty() {
@@ -4767,9 +4832,15 @@ fn baseline_step(
     // Own load inflating the gateway/anchors skews the same latency fields,
     // finding or not. Judged on the paths whose numbers fold — not LAN
     // devices or mid-path hops.
+    let anchor_norm_ms = s
+        .baseline
+        .as_ref()
+        .filter(|b| b.established())
+        .and_then(|b| b.anchor_ms);
     let load_biased = !matches!(own_load(s), OwnLoad::Quiet)
         && s.targets.iter().any(|t| {
-            (t.hop_ttl() == Some(1) || (!t.discovered && !s.is_lan_addr(t.addr))) && inflated(t)
+            (t.hop_ttl() == Some(1) || (!t.discovered && !s.is_lan_addr(t.addr)))
+                && inflated_vs(t, anchor_norm_ms)
         });
     latency_suspect |= load_biased;
 
@@ -6918,6 +6989,106 @@ mod tests {
             }
         }
         s
+    }
+
+    #[test]
+    fn an_icmp_blackhole_at_a_normally_clean_location_is_a_note_not_an_outage() {
+        // Found by the VPN rig's fault client: with a learned normal saying
+        // pings are always answered here, the same blackhole (every ping
+        // lost, web and tcp :443 fine) came out as "gateway unresponsive",
+        // Down, exit 1 — while the ladder itself said ICMP was blocked and
+        // web traffic crossed the gateway. Nothing that lets the web through
+        // is an outage; what the clean normal adds is that the silence is
+        // new, so it is worth one note.
+        let mut s = healthy_state();
+        for t in &mut s.targets {
+            for _ in 0..th::RECENT {
+                t.record_loss();
+            }
+        }
+        s.http.v4 = crate::app::FamilyProbe::Ok(2.0);
+        s.baseline = Some(crate::baseline::Baseline {
+            samples: crate::baseline::MIN_SAMPLES,
+            anchor_loss_pct: Some(0.0),
+            gateway_loss_pct: Some(0.0),
+            ..Default::default()
+        });
+        assert!(icmp_blackholed(&s));
+        let t = evaluate(&s);
+        assert!(
+            t.findings.iter().all(|f| f.severity == Severity::Info),
+            "got: {:?}",
+            t.findings
+                .iter()
+                .map(|f| (f.cause, f.severity, f.summary.clone()))
+                .collect::<Vec<_>>()
+        );
+        let note = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::GatewayLan)
+            .expect("a note that pings stopped being answered");
+        assert!(note.summary.contains("pings stopped"), "{}", note.summary);
+        assert_eq!(exit_code(&t, false), 0);
+    }
+
+    #[test]
+    fn latency_far_above_the_learned_normal_is_inflated_even_when_the_session_floor_is_not() {
+        // Found by the VPN rig's fault client: +250 ms on every path, in a
+        // session that *started* that way. The session floor is the slow
+        // state, so nothing was ever "inflated" against it, and a gateway at
+        // 272 ms sat green beside "~0 ms normal here". The learned normal
+        // is the second floor; against it this is the access link, and the
+        // summary says what it compared with.
+        let slow = |label: &str, addr: [u8; 4]| {
+            let mut t = TargetStat::new(label.into(), IpAddr::V4(Ipv4Addr::from(addr)));
+            for _ in 0..30 {
+                t.record_reply(270.0);
+            }
+            t
+        };
+        let mut s = AppState::new(vec![
+            slow("Cloudflare", [1, 1, 1, 1]),
+            slow("Google", [8, 8, 8, 8]),
+            slow("Quad9", [9, 9, 9, 9]),
+        ]);
+        let mut gw = slow("gateway", [192, 168, 1, 1]);
+        gw.discovered = true;
+        s.targets.push(gw);
+        s.netinfo.gateway_ip = "192.168.1.1".into();
+        s.vitals.cores = vec![10.0; 8];
+        s.vitals.cpu_pct = 12.0;
+
+        // First visit: 270 ms everywhere could be a satellite link. Nothing
+        // to compare with, nothing claimed.
+        let t = evaluate(&s);
+        assert!(
+            !causes(&t).contains(&Cause::GatewayLan),
+            "got: {:?}",
+            causes(&t)
+        );
+
+        // The location's normal: a wired LAN at a fraction of a millisecond,
+        // the internet at 17 ms.
+        s.baseline = Some(crate::baseline::Baseline {
+            samples: crate::baseline::MIN_SAMPLES,
+            gateway_ms: Some(0.03),
+            anchor_ms: Some(17.0),
+            anchor_loss_pct: Some(0.0),
+            gateway_loss_pct: Some(0.0),
+            ..Default::default()
+        });
+        let t = evaluate(&s);
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::GatewayLan)
+            .unwrap_or_else(|| panic!("expected an access-link finding, got {:?}", causes(&t)));
+        assert_eq!(f.severity, Severity::Degraded);
+        assert!(f.summary.contains("access link congested"), "{}", f.summary);
+        assert!(f.summary.contains("normal here"), "{}", f.summary);
+        let gw_rung = t.rungs.iter().find(|r| r.area == Area::Gateway).unwrap();
+        assert_eq!(gw_rung.status, RungStatus::Warn, "{}", gw_rung.detail);
     }
 
     #[test]

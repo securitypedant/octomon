@@ -22,7 +22,7 @@ clean=$(jq '{octomon, date, host, commit, dirty,
     clients: [.clients[] | {name, status}
         + (if .reason then {reason} else {} end)
         + (if .phases then {phases: [.phases[] | {name, pass}
-            + (if .device then {device, recognised_as, medium, label_has_address, key, checks} else {} end)
+            + (if .device then {device, recognised_as, medium, label_has_address, key, status, exit_code, causes, checks} else {} end)
             + (if .reason then {reason} else {} end)]} else {} end)]}' "$report")
 
 mkdir -p "$(dirname "$SITE")"

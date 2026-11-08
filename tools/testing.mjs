@@ -27,37 +27,75 @@ if (!runs?.length) {
 const CLIENTS = {
   wireguard: "WireGuard (wg-quick, kernel device)",
   openvpn: "OpenVPN (tun)",
-  l2tp: "L2TP/IPsec (ppp)",
+  unnamed: "Unnamed tunnel (plain GRE, no client)",
   nordvpn: "NordVPN app (NordLynx)",
-  tailscale: "Tailscale",
+  tailscale: "Tailscale (mesh client beside a WireGuard tunnel)",
   warp: "Cloudflare WARP",
-  proton: "Proton VPN",
+  faults: "Fault injection (no VPN)",
 };
 const KEY = {
   first: "first connection",
   same: "same location after reconnecting",
   different: "a new location, as designed",
 };
+// octomon's finding slugs, in words.
+const CAUSES = {
+  "no-link": "no link",
+  "captive-portal": "captive portal",
+  "degraded-usable": "degraded but usable",
+  gateway: "gateway / LAN",
+  link: "Wi-Fi link",
+  "wired-link": "wired link",
+  dns: "DNS",
+  "local-dns": "local DNS",
+  "dns-hijack": "DNS hijacked",
+  isp: "ISP path",
+  internet: "internet",
+  ipv6: "IPv6 broken",
+  "path-mtu": "path MTU",
+  "web-filtered": "web filtered",
+  "http-blocked": "web blocked, ping works",
+  "web-target": "one web target",
+  destination: "one destination",
+  bufferbloat: "bufferbloat",
+  clock: "clock skew",
+  machine: "this machine",
+  "vpn-caveat": "VPN caveat",
+};
+const STATUS = { healthy: "healthy", problems: "problems", down: "down", insufficient: "not enough data" };
 const mark = (ok) => (ok ? `<span class="ok">✓</span>` : `<span class="bad">✗</span>`);
-
-function phaseRow(p) {
-  if (!p.device) {
-    return `<tr><td>${esc(p.name)}</td><td colspan="4">${mark(false)} ${esc(p.reason ?? "did not complete")}</td></tr>`;
-  }
-  const checks = [
-    ["named", p.checks.name],
-    ["label", p.checks.label],
-    ["key", p.checks.key],
-    ["clean log", p.checks.clean_log],
-  ]
-    .map(([k, ok]) => `${mark(ok)} ${k}`)
+const checkList = (checks) =>
+  Object.entries(checks ?? {})
+    .map(([k, ok]) => `${mark(ok)} ${esc(k.replace(/_/g, " "))}`)
     .join(" · ");
+
+function phaseRow(p, cols) {
+  if (!p.device) {
+    return `<tr><td>${esc(p.name)}</td><td colspan="${cols - 1}">${mark(false)} ${esc(p.reason ?? "did not complete")}</td></tr>`;
+  }
   return `<tr>
             <td>${esc(p.name)}</td>
             <td><code>${esc(p.device)}</code></td>
             <td>${esc(p.recognised_as)}${p.label_has_address ? " <span class=\"muted\">(label carries the tunnel address)</span>" : ""}</td>
             <td>${esc(KEY[p.key] ?? p.key)}</td>
-            <td class="checks">${checks}</td>
+            <td class="checks">${checkList(p.checks)}</td>
+          </tr>`;
+}
+
+// The fault client has no tunnel to describe; what matters is what the
+// analysis concluded: octomon's status and the causes it named.
+function faultRow(p) {
+  if (!p.device) {
+    return `<tr><td>${esc(p.name)}</td><td colspan="2">${mark(false)} ${esc(p.reason ?? "did not complete")}</td></tr>`;
+  }
+  const causes = (p.causes ?? []).map((c) => CAUSES[c] ?? c);
+  const said = `${esc(STATUS[p.status] ?? p.status)}${
+    causes.length ? `: ${esc(causes.join(", "))}` : ""
+  }${p.exit_code != null ? ` <span class="muted">(exit ${esc(String(p.exit_code))})</span>` : ""}`;
+  return `<tr>
+            <td>${esc(p.name)}</td>
+            <td>${said}</td>
+            <td class="checks">${checkList(p.checks)}</td>
           </tr>`;
 }
 
@@ -69,13 +107,17 @@ function clientCard(c) {
         <p>${esc(c.reason ?? "skipped")}.</p>
       </div>`;
   }
-  const rows = (c.phases ?? []).map(phaseRow).join("\n");
+  const faults = c.name === "faults";
+  const rows = (c.phases ?? []).map((p) => (faults ? faultRow(p) : phaseRow(p, 5))).join("\n");
+  const head = faults
+    ? "<th>what was broken</th><th>what octomon said</th><th>checks</th>"
+    : "<th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th>";
   return `      <div class="card">
         <h3>${esc(title)} <span class="tag ${c.status === "pass" ? "pass" : "fail"}">${c.status === "pass" ? "passed" : "failed"}</span></h3>${
           c.reason ? `\n        <p>${esc(c.reason)}.</p>` : ""
         }
         <table>
-          <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
+          <thead><tr>${head}</tr></thead>
           <tbody>
 ${rows}
           </tbody>
@@ -121,10 +163,7 @@ const body = `<main id="top">
     <div class="wrap">
       <h1>Tested against real VPN clients</h1>
       <p class="lede">Before each release, octomon is run inside Linux containers next to
-      real VPN clients, and what it says about each tunnel is checked: that it names the
-      client, that the location label has the right shape, and that the location it files
-      the network under stays the same when the tunnel reconnects, lands on another server
-      or gets a new address. These are the results.</p>
+      real VPN clients to check what it says about each tunnel.</p>
     </div>
   </div>
 
@@ -132,16 +171,13 @@ const body = `<main id="top">
     <div class="wrap">
       <div class="post">
         <p>The rig is in the repository under
-        <a href="${REPO}/tree/main/testing/vpn-rig"><code>testing/vpn-rig/</code></a>: one
-        container per client, the rig's own WireGuard and OpenVPN servers for the
-        self-contained cases, a real account for the rest. It is run by hand; it is not
-        part of the automated test suite, which is why the result is published here
-        rather than in a badge. What is published is the outcome only: the client, the
+        <a href="${REPO}/tree/main/testing/vpn-rig"><code>testing/vpn-rig/</code></a> and has one
+        container per client with the rig's own WireGuard, OpenVPN and GRE servers for the
+        self-contained cases and real accounts for the others. One client has no VPN at
+        all and breaks its own network on purpose, to check what the analysis says. It is run by hand and not
+        part of the automated test suite. What is published is the outcome only: the client, the
         device shape octomon saw, the name it gave the tunnel, and whether each check
-        held. Addresses, keys and logs from the runs stay on the machine that ran them.</p>
-        <p>What it cannot tell you: anything about macOS or Windows (the rig is Linux by
-        construction), Wi-Fi, a real home or office network underneath the tunnel, or
-        corporate clients such as Zscaler and GlobalProtect.</p>
+        held.</p>
       </div>
     </div>
   </section>

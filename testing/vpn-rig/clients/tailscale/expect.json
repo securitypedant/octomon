@@ -1,0 +1,14 @@
+{
+  "secret": "tailscale.authkey",
+  "servers": ["wg-server"],
+  "phases": [
+    {"name": "tailscale up (mesh only)", "cmd": "up", "iface": "tailscale0",
+     "tunnel": "^$", "label": "^[0-9.]+$", "bypassed": "^Tailscale$"},
+    {"name": "WireGuard tunnel beside the resident Tailscale", "cmd": "wg-connect", "iface": "wg0", "key": "different",
+     "tunnel": "^WireGuard$", "label": "via WireGuard 10\\.13\\.13\\.2$", "bypassed": "^Tailscale$"},
+    {"name": "reconnect the WireGuard tunnel", "cmd": "wg-reconnect", "iface": "wg0", "key": "same",
+     "tunnel": "^WireGuard$", "label": "via WireGuard 10\\.13\\.13\\.2$", "bypassed": "^Tailscale$"},
+    {"name": "WireGuard down, Tailscale stays", "cmd": "wg-disconnect", "iface": "tailscale0", "key": "different",
+     "tunnel": "^$", "label": "^[0-9.]+$", "bypassed": "^Tailscale$"}
+  ]
+}

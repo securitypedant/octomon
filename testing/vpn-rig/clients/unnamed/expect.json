@@ -1,0 +1,10 @@
+{
+  "servers": ["gre-server"],
+  "ip": "172.30.0.200",
+  "tunnel": "^unidentified",
+  "label": "via VPN$",
+  "phases": [
+    {"name": "GRE tunnel up (10.77.0.2)", "cmd": "connect 10.77.0.2/24", "iface": "gre1"},
+    {"name": "re-created with another address (10.77.0.6)", "cmd": "reconnect 10.77.0.6/24", "iface": "gre1", "key": "same"}
+  ]
+}

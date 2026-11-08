@@ -7,6 +7,10 @@ name: octomon-rig
 networks:
   lan:
     name: octomon-rig
+    # Fixed so the GRE peers can name each other; run.sh creates the network
+    # with the same subnet when a client runs without servers.
+    ipam:
+      config: [{subnet: 172.30.0.0/24}]
 
 services:
   wg-server:
@@ -23,3 +27,12 @@ services:
     sysctls:
       net.ipv4.ip_forward: 1
     networks: [lan]
+
+  gre-server:
+    build: servers/gre
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.ip_forward: 1
+    networks:
+      lan:
+        ipv4_address: 172.30.0.250

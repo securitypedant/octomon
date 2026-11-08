@@ -45,7 +45,7 @@ say "octomon $OCTOMON_VERSION"
 
 # The LAN every client and server shares. compose would make it for the
 # servers; a client with no servers of its own (a real account) needs it too.
-docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
+docker network inspect "$NET" >/dev/null 2>&1 || docker network create --subnet 172.30.0.0/24 "$NET" >/dev/null
 
 failures=0
 summary=""
@@ -95,8 +95,11 @@ run_client() {
 
     local cname=rig-$name
     docker rm -f "$cname" >/dev/null 2>&1
-    local mounts=()
+    local mounts=() ip
     [ -n "$secret" ] && mounts=(-v "$RIG/secrets/$secret:/run/secrets/$secret:ro")
+    # A client its server must be able to name (GRE) asks for a fixed address.
+    ip=$(jq -r '.ip // empty' "$expect")
+    [ -n "$ip" ] && mounts+=(--ip "$ip")
     if ! docker run -d --name "$cname" --network "$NET" \
         --cap-add NET_ADMIN --device /dev/net/tun \
         --sysctl net.ipv4.conf.all.src_valid_mark=1 \
@@ -106,20 +109,25 @@ run_client() {
         client_result "$name" fail "client container did not start"; return 1
     fi
 
-    local tunnel_re label_re medium_re
-    tunnel_re=$(jq -r '.tunnel' "$expect")
-    label_re=$(jq -r '.label' "$expect")
-    medium_re=$(jq -r '.medium // empty' "$expect")
-
+    # What every phase must satisfy, unless a phase says otherwise. A client
+    # without a tunnel expectation (the fault-injection one) skips the name
+    # and label checks and relies on its phases' asserts.
     local nphases i phase cmd iface before keyrule file prev_key key ok=1 pok
     nphases=$(jq '.phases | length' "$expect")
     prev_key=""
     for ((i = 0; i < nphases; i++)); do
         phase=$(jq -r ".phases[$i].name" "$expect")
         cmd=$(jq -r ".phases[$i].cmd" "$expect")
-        iface=$(jq -r ".phases[$i].iface" "$expect")
+        iface=$(jq -r ".phases[$i].iface // \"eth0\"" "$expect")
         before=$(jq -r ".phases[$i].before // empty" "$expect")
         keyrule=$(jq -r ".phases[$i].key // empty" "$expect")
+        local observe
+        observe=$(jq -r ".phases[$i].observe // $OBSERVE" "$expect")
+        local tunnel_re label_re medium_re bypassed_re
+        tunnel_re=$(jq -r ".phases[$i].tunnel // .tunnel // empty" "$expect")
+        label_re=$(jq -r ".phases[$i].label // .label // empty" "$expect")
+        medium_re=$(jq -r ".phases[$i].medium // .medium // empty" "$expect")
+        bypassed_re=$(jq -r ".phases[$i].bypassed // .bypassed // empty" "$expect")
         file=$OUT/$name-$i.json
         pok=1
         say "  phase $((i + 1))/$nphases: $phase"
@@ -132,50 +140,86 @@ run_client() {
             jq -n --arg name "$phase" '{name: $name, pass: false, reason: "the client did not connect"}' >"$OUT/$name-$i.phase.json"
             break
         fi
-        docker exec "$cname" rig-probe "$iface" "$OBSERVE" >"$file" 2>"$OUT/$name-$i.probe.log"
+        docker exec "$cname" rig-probe "$iface" "$observe" >"$file" 2>"$OUT/$name-$i.probe.log"
         if ! jq -e '.doctor.network' "$file" >/dev/null 2>&1; then
             say "    FAIL: no doctor report (out/$name-$i.json, out/$name-$i.probe.log)"; ok=0
             jq -n --arg name "$phase" '{name: $name, pass: false, reason: "octomon produced no report"}' >"$OUT/$name-$i.phase.json"
             break
         fi
 
-        local tunnel label medium
+        local tunnel label medium bypassed status exit_code causes
         tunnel=$(jq -r '.doctor.network.tunnel // ""' "$file")
         label=$(jq -r '.doctor.location.label // ""' "$file")
         medium=$(jq -r '.doctor.network.medium // ""' "$file")
+        bypassed=$(jq -r '[.doctor.network.bypassed_tunnels[]? | .vendor // .name // tostring] | join(",")' "$file")
         key=$(jq -r '.doctor.location.key // ""' "$file")
-        say "    tunnel=$tunnel"
+        status=$(jq -r '.doctor.status // ""' "$file")
+        exit_code=$(jq -r '.doctor.exit_code // ""' "$file")
+        # The causes octomon named, as its fixed slugs ("dns", "isp", …):
+        # enumerations, so they can be published.
+        causes=$(jq -c '[.doctor.analysis.findings[]? | .cause] | unique' "$file")
+        say "    tunnel=$tunnel  bypassed=[$bypassed]"
         say "    label=$label"
         say "    medium=$medium  iface=$iface  addr=$(jq -r .addr "$file")"
         say "    key=$key"
-        say "    --check exit $(jq -r .check.exit "$file")"
+        say "    status=$status exit=$exit_code causes=$causes  --check exit $(jq -r .check.exit "$file")"
 
-        local name_ok=true label_ok=true key_ok=true log_ok=true
-        if ! [[ $tunnel =~ $tunnel_re ]]; then say "    FAIL: tunnel !~ /$tunnel_re/"; pok=0; name_ok=false; fi
-        if ! [[ $label =~ $label_re ]]; then say "    FAIL: label !~ /$label_re/"; pok=0; label_ok=false; fi
-        if [ -n "$medium_re" ] && ! [[ $medium =~ $medium_re ]]; then say "    FAIL: medium !~ /$medium_re/"; pok=0; fi
-        if [ -z "$key" ]; then say "    FAIL: no location key"; pok=0; key_ok=false; fi
-        case "$keyrule" in
-            same) [ "$key" = "$prev_key" ] || { say "    FAIL: key changed across reconnect (was $prev_key)"; pok=0; key_ok=false; } ;;
-            different) [ "$key" != "$prev_key" ] || { say "    FAIL: key did not change (expected a new location)"; pok=0; key_ok=false; } ;;
-        esac
-        if jq -r .errors_log "$file" | grep -Eq 'panic|supervisor'; then
-            say "    FAIL: errors.log has a panic or a supervisor line"; pok=0; log_ok=false
+        # checks: one named boolean per expectation this phase carries.
+        local checks='{}'
+        check() { # name ok
+            checks=$(jq -c --arg k "$1" --argjson v "$2" '. + {($k): $v}' <<<"$checks")
+            [ "$2" = true ] || pok=0
+        }
+        if [ -n "$tunnel_re" ]; then
+            if [[ $tunnel =~ $tunnel_re ]]; then check name true; else say "    FAIL: tunnel !~ /$tunnel_re/"; check name false; fi
         fi
+        if [ -n "$label_re" ]; then
+            if [[ $label =~ $label_re ]]; then check label true; else say "    FAIL: label !~ /$label_re/"; check label false; fi
+        fi
+        if [ -n "$medium_re" ]; then
+            if [[ $medium =~ $medium_re ]]; then check medium true; else say "    FAIL: medium !~ /$medium_re/"; check medium false; fi
+        fi
+        if [ -n "$bypassed_re" ]; then
+            if [[ $bypassed =~ $bypassed_re ]]; then check bypassed true; else say "    FAIL: bypassed tunnels !~ /$bypassed_re/"; check bypassed false; fi
+        fi
+        local key_ok=true
+        if [ -z "$key" ]; then say "    FAIL: no location key"; key_ok=false; fi
+        case "$keyrule" in
+            same) [ "$key" = "$prev_key" ] || { say "    FAIL: key changed (was $prev_key)"; key_ok=false; } ;;
+            different) [ "$key" != "$prev_key" ] || { say "    FAIL: key did not change (expected a new location)"; key_ok=false; } ;;
+        esac
+        check key "$key_ok"
+        # Free-form asserts: a jq path on the probe's JSON and a regex its
+        # (raw) value must match. The fault client lives on these.
+        local nasserts j apath amatch aname avalue
+        nasserts=$(jq ".phases[$i].asserts // [] | length" "$expect")
+        for ((j = 0; j < nasserts; j++)); do
+            aname=$(jq -r ".phases[$i].asserts[$j].name" "$expect")
+            apath=$(jq -r ".phases[$i].asserts[$j].path" "$expect")
+            amatch=$(jq -r ".phases[$i].asserts[$j].match" "$expect")
+            avalue=$(jq -r "$apath" "$file" 2>/dev/null)
+            if [[ $avalue =~ $amatch ]]; then check "$aname" true
+            else say "    FAIL: $aname: $apath = $(head -c 200 <<<"$avalue") !~ /$amatch/"; check "$aname" false; fi
+        done
+        if jq -r .errors_log "$file" | grep -Eq 'panic|supervisor'; then
+            say "    FAIL: errors.log has a panic or a supervisor line"; check clean_log false
+        else check clean_log true; fi
         [ "$pok" = 1 ] || ok=0
         prev_key=$key
 
         # The phase's allow-listed record. "label_has_address" is the one
         # fact about the label that matters (WireGuard keys on its address,
         # OpenVPN and unnamed tunnels must not); the label itself stays local.
+        # status, exit_code and causes are octomon's own enumerations.
         jq -n --arg name "$phase" --arg device "$iface" --arg tunnel "$tunnel" --arg medium "$medium" \
-            --arg keyrule "${keyrule:-first}" \
+            --arg keyrule "${keyrule:-first}" --arg status "$status" --argjson exit_code "${exit_code:-null}" \
+            --argjson causes "$causes" --argjson checks "$checks" \
             --argjson label_has_address "$([[ $label =~ ([0-9]+\.){3}[0-9]+$ || $label =~ :[0-9a-f]*$ ]] && echo true || echo false)" \
-            --argjson name_ok "$name_ok" --argjson label_ok "$label_ok" --argjson key_ok "$key_ok" --argjson log_ok "$log_ok" \
             --argjson pass "$([ "$pok" = 1 ] && echo true || echo false)" \
             '{name: $name, device: $device, recognised_as: $tunnel, medium: $medium,
               label_has_address: $label_has_address, key: $keyrule,
-              checks: {name: $name_ok, label: $label_ok, key: $key_ok, clean_log: $log_ok}, pass: $pass}' \
+              status: $status, exit_code: $exit_code, causes: $causes,
+              checks: $checks, pass: $pass}' \
             >"$OUT/$name-$i.phase.json"
     done
 
