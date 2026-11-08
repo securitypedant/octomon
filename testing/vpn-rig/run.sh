@@ -205,12 +205,15 @@ docker network rm "$NET" >/dev/null 2>&1
 
 # ---- the report ------------------------------------------------------------
 # Everything publish.sh will put on the website, and nothing else: version,
-# date, where it ran, and the per-client records built above.
+# date, where it ran, the commit octomon was built from (and whether the
+# tree had uncommitted changes to it, since the base image is built from the
+# working tree), and the per-client records built above.
 jq -n --arg version "$OCTOMON_VERSION" --arg date "$(date -u +%Y-%m-%d)" \
     --arg host "Linux containers on Docker Desktop (macOS host)" \
     --arg commit "$(git -C "$REPO" rev-parse --short HEAD)" \
+    --argjson dirty "$(git -C "$REPO" status --porcelain -- . ':!website' ':!media' | grep -q . && echo true || echo false)" \
     --slurpfile clients <(jq -s . "$OUT"/*.client.json) \
-    '{octomon: $version, date: $date, host: $host, commit: $commit, clients: $clients[0]}' \
+    '{octomon: $version, date: $date, host: $host, commit: $commit, dirty: $dirty, clients: $clients[0]}' \
     >"$OUT/report.json"
 
 hr

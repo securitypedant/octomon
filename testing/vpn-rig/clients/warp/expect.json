@@ -1,0 +1,9 @@
+{
+  "tunnel": "^Cloudflare WARP",
+  "label": "via Cloudflare WARP$",
+  "phases": [
+    {"name": "connect", "cmd": "connect", "iface": "CloudflareWARP"},
+    {"name": "reconnect", "cmd": "reconnect", "iface": "CloudflareWARP", "key": "same"},
+    {"name": "re-register (new device identity and addresses)", "cmd": "reregister", "iface": "CloudflareWARP", "key": "same"}
+  ]
+}

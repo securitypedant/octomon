@@ -90,6 +90,8 @@ function runSection(r, latest) {
     <div class="wrap">
       <h2>octomon ${esc(r.octomon)} <span class="muted">· ${esc(humanDate(r.date))} · ${passed}/${n} clients passed</span></h2>
       <p class="runmeta">${esc(r.host)} · built from <a href="${REPO}/commit/${esc(r.commit)}"><code>${esc(r.commit)}</code></a>${
+        r.dirty ? " with uncommitted changes" : ""
+      }${
         latest ? "" : ` · <a href="#top">latest run</a>`
       }</p>
 ${r.clients.map(clientCard).join("\n")}

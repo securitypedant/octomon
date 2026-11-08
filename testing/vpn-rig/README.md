@@ -51,11 +51,12 @@ exposes it.
 | `wireguard` | nothing | kernel device via `wg-quick`, named WireGuard, label carries the tunnel address; same key after a reconnect, a different key with the second profile (WireGuard keys on its address by design) |
 | `openvpn` | nothing | tun device, named OpenVPN, label without an address; same key after reconnecting to the rig's second server, which hands out a different pool |
 | `nordvpn` | `secrets/nordvpn.token` | NordVPN's own Linux client (6.x) over NordLynx: kernel WireGuard device `nordlynx`, named NordVPN by its address block and running daemon, label without an address; same key after reconnecting to another country |
+| `warp` | nothing (consumer WARP, `--accept-tos`) | Cloudflare's Linux client: tun device `CloudflareWARP` at 172.16.0.2/32 plus a 2606:4700::/32 address, named by that v6 block; the label carries the underlay gateway ("… via Cloudflare WARP"); same key after a reconnect and after deleting and re-creating the device registration, which hands out a new v6 address |
 
 Planned, same harness: an L2TP/IPsec client (the unnamed-tunnel shape, "via
 VPN"), the UDM profiles for the same three shapes against a real router, and
-Tailscale / WARP / Proton on free tiers, including the mixed case of a
-resident mesh client beside a WireGuard tunnel.
+Tailscale / Proton on free tiers, including the mixed case of a resident mesh
+client beside a WireGuard tunnel.
 
 ### Secrets
 
@@ -98,7 +99,9 @@ leaves the machine.
 - Wi-Fi, RSSI and a real LAN underlay. Every location here is "the Docker
   bridge via <tunnel>", so the underlay half of a key never varies.
 - Zscaler, GlobalProtect, AnyConnect and other corporate clients.
-- `wg-quick` on Linux uses fwmark policy routing: the main table's default
-  route stays on `eth0`. Whether octomon reads that as a split or a full
-  tunnel is recorded in `out/wireguard-0.json` (`network.medium`), not
-  asserted.
+- `wg-quick` and WARP on Linux both use fwmark policy routing: the main
+  table's default route stays on `eth0`. Whether octomon reads that as a split
+  or a full tunnel is recorded per phase (`network.medium` in `out/*.json`),
+  not asserted. As of 0.12.0 wg-quick reads as a full tunnel ("Tunnel (VPN)")
+  and WARP as a split tunnel over the wired link, so the WARP label carries
+  the underlay gateway, as it does on a Mac.

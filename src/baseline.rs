@@ -201,7 +201,7 @@ impl Baseline {
 }
 
 /// netdev reports an unresolved neighbour as 00:00:00:00:00:00, which must not key a location.
-fn mac_is_known(mac: &str) -> bool {
+pub fn mac_is_known(mac: &str) -> bool {
     mac.chars().any(|c| c.is_ascii_hexdigit() && c != '0')
 }
 

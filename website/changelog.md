@@ -9,6 +9,11 @@ binaries for macOS, Linux and Windows. From 0.12.0 on, each release is also
 run against real VPN clients before it ships; the results are on the
 [testing page](/testing).
 
+## 0.12.1 · unreleased
+
+- A full-tunnel VPN no longer comes back as a second location with the same label. The network underneath a full tunnel is identified by its gateway's MAC address, read from the neighbour cache, and under a full tunnel nothing keeps that entry alive: octomon's own gateway pings have no gateway to go to, and a WireGuard peer on the LAN never touches the router at all. Once the entry had aged out the location keyed on the gateway's IP instead, so "172.19.0.1 via WireGuard 10.13.13.2" existed twice, one copy per state of the cache. octomon now resolves the gateway itself (one UDP datagram to the discard port, no privilege needed) before it reads the MAC. Found by the [VPN test rig](/testing), which now also runs Cloudflare WARP.
+- `--doctor --json --full` reports the location's key beside its label, the identity the learned normal is filed under. It names the gateway, which is why it is a `--full` field.
+
 ## 0.12.0 · 2026-11-07
 
 The largest outside contribution so far. jrelax ran octomon across several WireGuard tunnels on Linux and macOS, audited how it handles files, panics and `sudo`, and sent the fixes as one pull request (#37). This release is that work plus what came out of reviewing it in detail. Thank you, jrelax. One consequence to know about up front: some locations get new identities and are learned again, see the first point.

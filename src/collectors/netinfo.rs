@@ -474,8 +474,43 @@ fn build(iface: &netdev::Interface) -> NetInfo {
 /// physical interface has a gateway (some VMs put the tunnel alone).
 /// The physical network under a tunnel that holds the default route: its
 /// gateway (IP and MAC), medium, and the adapter's counter name.
+///
+/// The MAC comes from the neighbour cache, and under a full tunnel nothing
+/// keeps that entry warm: octomon's own gateway pings go nowhere (the tunnel
+/// has no gateway) and a WireGuard peer on the LAN never touches the router
+/// at all. When the entry has aged out the location would key on the IP
+/// instead and the same place would come back as a second location with the
+/// same label, so an unknown MAC is resolved once, here, before it is used.
 fn underlay_identity() -> Option<(String, String, LinkMedium, String)> {
-    let ifaces = netdev::get_interfaces();
+    let found = underlay_from(&netdev::get_interfaces())?;
+    if crate::baseline::mac_is_known(&found.1) {
+        return Some(found);
+    }
+    nudge_neighbour(&found.0);
+    underlay_from(&netdev::get_interfaces()).or(Some(found))
+}
+
+/// Make the kernel resolve a gateway's link-layer address: one UDP datagram
+/// to the discard port, which needs no privilege and no reply. The gateway
+/// is on-link, so even under a full tunnel the packet leaves on the physical
+/// interface and the neighbour entry is filled in before the read that
+/// follows. Best effort; a failure leaves the cache as it was.
+fn nudge_neighbour(gateway: &str) {
+    let Ok(ip) = gateway.parse::<IpAddr>() else {
+        return;
+    };
+    let bind: std::net::SocketAddr = match ip {
+        IpAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
+        IpAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
+    };
+    if let Ok(sock) = std::net::UdpSocket::bind(bind) {
+        let _ = sock.send_to(&[0], (ip, 9));
+        // Resolution is asynchronous; give the reply a moment to land.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+fn underlay_from(ifaces: &[netdev::Interface]) -> Option<(String, String, LinkMedium, String)> {
     let mut candidates: Vec<_> = ifaces
         .iter()
         .filter(|i| !i.ipv4.is_empty() || !i.ipv6.is_empty())

@@ -18,7 +18,7 @@ if ! jq -e '[.clients[] | select(.status != "skipped")] | length > 0' "$report" 
     echo "every client was skipped; nothing to publish" >&2; exit 1
 fi
 # The allow-list, enforced here as well as in run.sh: only these keys leave.
-clean=$(jq '{octomon, date, host, commit,
+clean=$(jq '{octomon, date, host, commit, dirty,
     clients: [.clients[] | {name, status}
         + (if .reason then {reason} else {} end)
         + (if .phases then {phases: [.phases[] | {name, pass}
