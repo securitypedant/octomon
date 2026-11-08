@@ -5,7 +5,9 @@ description: Every octomon release, newest first, with what changed and why.
 
 Every release since the first one, newest first. Each version is also a
 [GitHub release](https://github.com/securitypedant/octomon/releases) with
-binaries for macOS, Linux and Windows.
+binaries for macOS, Linux and Windows. From 0.12.0 on, each release is also
+run against real VPN clients before it ships; the results are on the
+[testing page](/testing).
 
 ## 0.12.0 · 2026-11-07
 
