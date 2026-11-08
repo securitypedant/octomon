@@ -189,12 +189,9 @@ fn append_log(entry: &str) {
     }
     let path = dir.join("whois.log");
     trim_log(&path);
-    if let Ok(mut f) = crate::store::private_options()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .inspect(crate::store::hand_back)
-    {
+    let mut opts = crate::store::private_options();
+    opts.append(true);
+    if let Ok(mut f) = crate::store::create_or_open(opts, &path) {
         let _ = f.write_all(entry.as_bytes());
     }
 }

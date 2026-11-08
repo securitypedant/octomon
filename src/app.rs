@@ -3041,6 +3041,9 @@ pub struct AppState {
     /// What the previous session logged about octomon's own crashes, when it
     /// has not been shown yet: the startup notice asks for it to be reported.
     pub crash_report: Option<crate::errlog::CrashReport>,
+    /// Files an older version's `sudo` run left root-owned in octomon's
+    /// directories: the startup notice gives the command that gets them back.
+    pub root_owned: Option<crate::store::RootOwned>,
     /// Show the first-run explainer once the startup notice is dismissed.
     pub explainer_pending: bool,
     /// The startup version check found a newer release while another modal
@@ -3260,6 +3263,7 @@ impl AppState {
             baseline_unsaved: false,
             stopped_collectors: Vec::new(),
             crash_report: None,
+            root_owned: None,
             explainer_pending: false,
             update_pending: false,
             locations: None,

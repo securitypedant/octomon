@@ -315,12 +315,9 @@ fn append(line: &str) {
         // roll"; more would be an archive nobody reads.
         let _ = std::fs::rename(&path, path.with_extension("log.1"));
     }
-    if let Ok(mut f) = crate::store::private_options()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .inspect(crate::store::hand_back)
-    {
+    let mut opts = crate::store::private_options();
+    opts.append(true);
+    if let Ok(mut f) = crate::store::create_or_open(opts, &path) {
         let _ = f.write_all(line.as_bytes());
     }
 }

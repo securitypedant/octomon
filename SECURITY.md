@@ -47,10 +47,15 @@ does not own (`--alert-cmd` on root's own command line still runs). Otherwise
 a link or a line planted in the user's home would have root act on it. And
 under `sudo` (`SUDO_UID` set, running as root) it gives what it creates or
 rewrites in its own data and config directories back to the invoking user,
-along with any `~/.local/share`-style parent it had to create on the way, and
-at startup repairs anything an earlier `sudo` run left root-owned there, so a
-later unprivileged run can still read and append them. A file it has to
-leave root-owned is recorded in `errors.log`. That is an `fchown` of the
+along with any `~/.local/share`-style parent it had to create on the way, so a
+later unprivileged run can still read and append them. Only what the process
+itself created is given away: every such file is created exclusively, and a
+directory counts only when octomon's own `mkdir` made it. A file that was
+already there is left whoever's it is. That rule is what keeps octomon's
+directory from being a place where a root-owned file the user cannot read
+becomes theirs by renaming it in (a rename needs only the two parent
+directories, which in their own home they own); octomon's own fresh file
+never held anything but octomon's output. The hand-back is an `fchown` of the
 open descriptor, only for something root owns, never for a file with more
 than one hard link, and only after the descriptor itself (`F_GETPATH` on
 macOS, `/proc/self/fd` on Linux) places it under the invoking user's home as
@@ -58,12 +63,10 @@ recorded in the password database — not `$HOME` — and inside octomon's own
 directories. When those directories are not in that home at all (Linux's
 default `sudo` resets `HOME` to `/root`), nothing is handed back and nothing
 is logged: the files are root's own. A `config.toml` named with `--config`
-outside those stays root's. One residual window remains: the link count is
-read once, so a root-owned file that the user can already unlink (one inside
-their own home) could be hard-linked into octomon's directory and its other
-name removed between octomon's open and its `fstat`, and would then be
-handed back; a file outside the home cannot be, since its name cannot be
-removed.
+outside those stays root's. Files an older version's `sudo` run left
+root-owned are not repaired by root on sight, for the reason above; an
+unprivileged run that finds them says so once at startup and gives the
+`chown` to run.
 
 **Network.** octomon listens on no port and runs no service. Everything it
 contacts is listed, with why and how often, in the README's

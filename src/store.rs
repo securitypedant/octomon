@@ -381,19 +381,63 @@ fn hand_back_failed(message: String) {
     LOGGING.set(false);
 }
 
-/// [`hand_back_fd`] for a file just opened in one of octomon's own
-/// directories. Call it on every file octomon creates there — it costs one
-/// `fstat` once the file is already the user's, and nothing at all
-/// unprivileged. Shaped to slot into `open(..).inspect(store::hand_back)`.
+/// [`hand_back_fd`] for a file this process has just created in one of
+/// octomon's own directories — and only such a file. One that was already
+/// there is left whoever's it is: the user's, which needs nothing, or root's,
+/// which [`root_owned_leftovers`] reports instead. Handing back whatever is
+/// found would make octomon's directory a place where a root-owned file the
+/// user cannot read becomes theirs by renaming it in; a file octomon created
+/// itself never held anything but octomon's own output. Costs one `fstat`
+/// once the file is already the user's, and nothing at all unprivileged.
 #[cfg(unix)]
-pub fn hand_back<F: std::os::fd::AsFd>(file: &F) {
+fn hand_back<F: std::os::fd::AsFd>(file: &F) {
     if hand_back_active() {
         hand_back_fd(file.as_fd(), Scope::Own);
     }
 }
 
 #[cfg(not(unix))]
-pub fn hand_back<F>(_file: &F) {}
+fn hand_back<F>(_file: &F) {}
+
+/// Create `path` with `opts` if it does not exist, else open the existing
+/// file with the same options. Exactly the file this call created is handed
+/// back (see [`hand_back`]): creating exclusively is how the two cases are
+/// told apart. `opts` should carry the access mode (`append`, or
+/// `read`+`write`); `create` and `truncate` are decided here.
+pub fn create_or_open(
+    mut opts: std::fs::OpenOptions,
+    path: &std::path::Path,
+) -> std::io::Result<std::fs::File> {
+    match opts.create_new(true).open(path) {
+        Ok(f) => {
+            hand_back(&f);
+            Ok(f)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            opts.create_new(false).truncate(false).open(path)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Create `path` afresh, for writing: whatever was there under that name is
+/// removed first and the new file created exclusively, so a hard link planted
+/// under the name can neither be truncated through nor end up as the file,
+/// and the file is this process's own, which is what lets it be handed back.
+/// For files whose old contents are not wanted — a temporary file about to be
+/// renamed into place, a recording about to be started.
+pub fn create_fresh(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let fresh = || private_options().write(true).create_new(true).open(path);
+    let f = match fresh() {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(path)?;
+            fresh()?
+        }
+        opened => opened?,
+    };
+    hand_back(&f);
+    Ok(f)
+}
 
 /// Open `path` without following a symlink and without blocking (a planted
 /// FIFO would otherwise hang the open), for [`hand_back_fd`]. Read-only is
@@ -416,22 +460,15 @@ fn open_nofollow(path: &std::path::Path, dir: bool) -> Option<std::fs::File> {
 /// directory somebody else owns (their `$XDG_DATA_HOME`, or the user's own
 /// tree seen from a `sudo` run) is not ours to re-permission.
 ///
-/// Under `sudo`, the leaf (whether or not this call created it) and any
-/// parents this call created are then given to the invoking user (see
-/// [`hand_back`]) — the leaf after it has been made
-/// owner-only, since once it is theirs [`owned_by_me`] no longer lets root
-/// touch its mode.
+/// Under `sudo`, the directories this call created — the leaf and any parent
+/// it had to make on the way — are then given to the invoking user (see
+/// [`hand_back`]), the leaf after it has been made owner-only, since once it
+/// is theirs [`owned_by_me`] no longer lets root touch its mode. A leaf that
+/// was already there is not this call's to give away, for the reason in
+/// [`hand_back`]: a root-owned directory the user renamed into place would
+/// otherwise become theirs.
 pub fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    let created: Vec<PathBuf> = if hand_back_active() {
-        dir.ancestors()
-            .take_while(|a| std::fs::symlink_metadata(a).is_err())
-            .map(std::path::Path::to_path_buf)
-            .collect()
-    } else {
-        Vec::new()
-    };
-    std::fs::create_dir_all(dir)?;
+    let created = create_dir_all_noting(dir)?;
     #[cfg(unix)]
     {
         use std::os::fd::AsFd as _;
@@ -441,20 +478,55 @@ pub fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
             let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(DIR_MODE));
         }
         if hand_back_active() {
-            // The leaf is octomon's own whether or not this call made it, so
-            // one a past `sudo` run left root-owned is repaired here too. Its
-            // parents are handed back only if this call created them.
-            if let Some(f) = open_nofollow(dir, true) {
-                hand_back_fd(f.as_fd(), Scope::Own);
-            }
-            for parent in created.iter().filter(|p| p.as_path() != dir) {
-                if let Some(f) = open_nofollow(parent, true) {
-                    hand_back_fd(f.as_fd(), Scope::CreatedParent);
+            for made in &created {
+                let scope = if made.as_path() == dir {
+                    Scope::Own
+                } else {
+                    Scope::CreatedParent
+                };
+                if let Some(f) = open_nofollow(made, true) {
+                    hand_back_fd(f.as_fd(), scope);
                 }
             }
         }
     }
+    #[cfg(not(unix))]
+    drop(created);
     Ok(())
+}
+
+/// `create_dir_all`, returning the directories this call itself made, deepest
+/// last. Each missing ancestor is created one `mkdir` at a time and counted
+/// only when that `mkdir` succeeded, so one that appeared in between — made
+/// by another octomon, or renamed into place — is not in the list. Which is
+/// what [`create_dir_private`] needs: the list of what is this process's to
+/// give away, not a guess from before and after.
+fn create_dir_all_noting(dir: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut missing: Vec<&std::path::Path> = dir
+        .ancestors()
+        .take_while(|a| std::fs::symlink_metadata(a).is_err())
+        // A relative path's last ancestor is "", which is the working
+        // directory and exists.
+        .filter(|a| !a.as_os_str().is_empty())
+        .collect();
+    missing.reverse();
+    let mut created = Vec::new();
+    for a in missing {
+        match std::fs::create_dir(a) {
+            Ok(()) => created.push(a.to_path_buf()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    // Everything that was already there must be a directory, as
+    // `create_dir_all` would have insisted.
+    if !dir.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            format!("{} exists and is not a directory", dir.display()),
+        ));
+    }
+    Ok(created)
 }
 
 /// `OpenOptions` that creates owner-only files. The mode applies only when the
@@ -490,10 +562,9 @@ pub fn private_options() -> std::fs::OpenOptions {
 ///
 /// The rename means the target takes the temporary file's owner, so under
 /// `sudo` a file the user owned would come back root's at every save. The
-/// temporary file is handed back (see [`hand_back`]) before the rename for
-/// that reason. It is also always a fresh one: a leftover from a crash is
-/// removed and the new one created exclusively, so a hard link planted under
-/// that name can neither be truncated through nor end up in place.
+/// temporary file is handed back before the rename for that reason, which
+/// [`create_fresh`] does, and which is also what makes a target an earlier
+/// `sudo` run left root-owned the user's again at the next save.
 pub fn write_private(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
     use std::io::Write as _;
     // A symlinked target (a config.toml kept in a dotfiles repo) is written
@@ -519,15 +590,7 @@ pub fn write_private(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std:
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "octomon".to_string())
     ));
-    let fresh = || private_options().write(true).create_new(true).open(&tmp);
-    let mut f = match fresh() {
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            std::fs::remove_file(&tmp)?;
-            fresh()?
-        }
-        opened => opened?,
-    };
-    hand_back(&f);
+    let mut f = create_fresh(&tmp)?;
     let written = f
         .write_all(contents.as_ref())
         .and_then(|()| f.sync_all())
@@ -625,13 +688,9 @@ impl FileLock {
     /// open: a scanner that merely opens the lock file no longer looks like
     /// a peer holding it.
     fn try_acquire(lock: &std::path::Path) -> std::io::Result<Option<FileLock>> {
-        let file = private_options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(lock)
-            .inspect(hand_back)?;
+        let mut opts = private_options();
+        opts.read(true).write(true);
+        let file = create_or_open(opts, lock)?;
         match file.try_lock() {
             Ok(()) => Ok(Some(FileLock { _file: file })),
             Err(std::fs::TryLockError::WouldBlock) => Ok(None),
@@ -663,12 +722,9 @@ pub fn append_locked(path: &std::path::Path, text: &str) -> std::io::Result<()> 
             }
         })
         .ok();
-    private_options()
-        .create(true)
-        .append(true)
-        .open(path)
-        .inspect(hand_back)?
-        .write_all(text.as_bytes())
+    let mut opts = private_options();
+    opts.append(true);
+    create_or_open(opts, path)?.write_all(text.as_bytes())
 }
 
 /// Rewrite `path` from its current contents, under its [`FileLock`]. The file
@@ -743,10 +799,10 @@ impl PruneClock {
 /// at startup, best-effort, and never recurses — the data and config
 /// directories are flat.
 ///
-/// Under `sudo` it also gives back to the invoking user whatever an earlier
-/// `sudo` run left root-owned there (see [`hand_back`]) — without that, an
-/// install hit before files were handed back would stay unwritable to its
-/// own user.
+/// It gives nothing back under `sudo`: what a `sudo` run creates is handed
+/// back as it is created (see [`hand_back`]), and what an older version left
+/// root-owned is reported by [`root_owned_leftovers`] for the user to chown,
+/// rather than chowned by root on sight.
 #[cfg(unix)]
 pub fn tighten_permissions() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -754,9 +810,6 @@ pub fn tighten_permissions() {
         .into_iter()
         .flatten()
     {
-        if hand_back_active() {
-            hand_back_tree(&dir);
-        }
         // Only a directory this user owns, and never through a symlink: an
         // elevated run over the invoking user's home must not chmod whatever
         // a planted link points at (see `owned_by_me`).
@@ -779,31 +832,103 @@ pub fn tighten_permissions() {
     }
 }
 
-/// The `sudo` half of [`tighten_permissions`]: one of octomon's directories
-/// and the regular files directly in it, each opened without following links
-/// and handed back through its descriptor. Flat, like the directories.
-#[cfg(unix)]
-fn hand_back_tree(dir: &std::path::Path) {
-    use std::os::fd::AsFd as _;
-    let Some(d) = open_nofollow(dir, true) else {
-        return;
-    };
-    hand_back_fd(d.as_fd(), Scope::Own);
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if !entry.file_type().is_ok_and(|t| t.is_file()) {
-            continue;
-        }
-        if let Some(f) = open_nofollow(&entry.path(), false) {
-            hand_back_fd(f.as_fd(), Scope::Own);
-        }
+#[cfg(not(unix))]
+pub fn tighten_permissions() {}
+
+/// Files in octomon's directories that belong to someone else — root, after a
+/// `sudo octomon` of a version that did not hand files back — which this
+/// unprivileged run can neither read nor replace.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RootOwned {
+    /// The directories concerned, each with how many entries in it (the
+    /// directory itself counts as one) belong to someone else.
+    pub dirs: Vec<(PathBuf, usize)>,
+}
+
+impl RootOwned {
+    /// One line saying what was found: "3 files in ~/.local/share/octomon
+    /// belong to root, left by an earlier sudo octomon".
+    pub fn summary(&self) -> String {
+        let total: usize = self.dirs.iter().map(|(_, n)| n).sum();
+        let places = self
+            .dirs
+            .iter()
+            .map(|(d, _)| d.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" and ");
+        format!(
+            "{total} {} in {places} belong to another user, left by an earlier sudo octomon",
+            if total == 1 { "file" } else { "files" }
+        )
+    }
+
+    /// The command that gives them back, for the person to run themselves.
+    pub fn fix(&self) -> String {
+        let places = self
+            .dirs
+            .iter()
+            .map(|(d, _)| format!("\"{}\"", d.display()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("sudo chown -R \"$USER\" {places}")
     }
 }
 
+/// Look, unprivileged, for files an older version's `sudo` run left root-owned
+/// in octomon's directories, so the person can be told once and given the
+/// command, instead of every append failing quietly for the rest of the run.
+/// Elevated runs see nothing: root can use the files, and must not take them
+/// as a cue to chown them (see [`hand_back`]). Flat, like the directories.
+#[cfg(unix)]
+pub fn root_owned_leftovers() -> Option<RootOwned> {
+    if crate::platform::tools::is_privileged() {
+        return None;
+    }
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let me = unsafe { libc::geteuid() };
+    let dirs: Vec<(PathBuf, usize)> = [data_dir(), crate::config::Config::dir()]
+        .into_iter()
+        .flatten()
+        .filter_map(|dir| {
+            let n = foreign_entries(&dir, me);
+            (n > 0).then_some((dir, n))
+        })
+        .collect();
+    (!dirs.is_empty()).then_some(RootOwned { dirs })
+}
+
+/// How many of `dir` and the regular files directly in it belong to a user
+/// other than `me`. A directory `me` cannot list counts as one, which is what
+/// a root-owned 0700 directory looks like from outside.
+#[cfg(unix)]
+fn foreign_entries(dir: &std::path::Path, me: libc::uid_t) -> usize {
+    use std::os::unix::fs::MetadataExt as _;
+    let Ok(meta) = std::fs::symlink_metadata(dir) else {
+        return 0;
+    };
+    if !meta.is_dir() {
+        return 0;
+    }
+    let mut n = usize::from(meta.uid() != me);
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            // `file_type()` from the entry does not follow links, so a
+            // symlink to a root file elsewhere is not counted as a leftover.
+            if !entry.file_type().is_ok_and(|t| t.is_file()) {
+                continue;
+            }
+            if std::fs::symlink_metadata(entry.path()).is_ok_and(|m| m.uid() != me) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 #[cfg(not(unix))]
-pub fn tighten_permissions() {}
+pub fn root_owned_leftovers() -> Option<RootOwned> {
+    None
+}
 
 /// Where a support bundle ([D]) lands: somewhere the person at the keyboard
 /// can actually find to attach to a message — the Desktop when the platform
@@ -1439,6 +1564,83 @@ mod tests {
         // `Own` does not stretch to the parents, nor `CreatedParent` to files.
         assert!(!own("/Users/alice/.local/share"));
         assert!(!parent("/Users/alice/.local/share/octomon/errors.log"));
+    }
+
+    /// What a `sudo` run may give away is exactly what it made: the
+    /// directories whose `mkdir` was its own, the files it created
+    /// exclusively. Nothing that was already in place.
+    #[test]
+    fn only_what_this_process_made_is_its_own() {
+        use std::io::Write as _;
+        let base = std::env::temp_dir().join(format!("octomon-made-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("had")).unwrap();
+
+        // Two levels missing under one that existed: those two, deepest last.
+        let leaf = base.join("had/new/deeper");
+        let made = create_dir_all_noting(&leaf).unwrap();
+        assert_eq!(made, vec![base.join("had/new"), leaf.clone()]);
+        // Already there: nothing to claim.
+        assert!(create_dir_all_noting(&leaf).unwrap().is_empty());
+        // A file in the way is the same error `create_dir_all` gives.
+        std::fs::write(base.join("file"), b"").unwrap();
+        assert!(create_dir_all_noting(&base.join("file")).is_err());
+
+        // `create_or_open` appends to what exists rather than replacing it,
+        // and creates what does not.
+        let log = leaf.join("a.log");
+        std::fs::write(&log, b"before\n").unwrap();
+        let mut opts = std::fs::OpenOptions::new();
+        opts.append(true);
+        create_or_open(opts.clone(), &log)
+            .unwrap()
+            .write_all(b"after\n")
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "before\nafter\n");
+        create_or_open(opts, &leaf.join("b.log"))
+            .unwrap()
+            .write_all(b"first\n")
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(leaf.join("b.log")).unwrap(),
+            "first\n"
+        );
+        // `create_fresh` starts over.
+        create_fresh(&log).unwrap().write_all(b"fresh\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "fresh\n");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// An unprivileged run counts what in octomon's directories is not its
+    /// user's; a directory of the user's own files counts for nothing, and
+    /// the report names the directory and the command.
+    #[cfg(unix)]
+    #[test]
+    fn leftovers_are_counted_and_named_not_taken() {
+        let dir = std::env::temp_dir().join(format!("octomon-left-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("history.jsonl"), b"{}\n").unwrap();
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let me = unsafe { libc::geteuid() };
+        assert_eq!(foreign_entries(&dir, me), 0);
+        // Seen as someone else, the directory and its file are both foreign.
+        assert_eq!(foreign_entries(&dir, me.wrapping_add(1)), 2);
+        assert_eq!(foreign_entries(&dir.join("missing"), me), 0);
+
+        let left = RootOwned {
+            dirs: vec![(PathBuf::from("/Users/alice/.local/share/octomon"), 3)],
+        };
+        assert_eq!(
+            left.summary(),
+            "3 files in /Users/alice/.local/share/octomon belong to another user, left by an earlier sudo octomon"
+        );
+        assert_eq!(
+            left.fix(),
+            "sudo chown -R \"$USER\" \"/Users/alice/.local/share/octomon\""
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A home or a root that would make the containment checks vacuous

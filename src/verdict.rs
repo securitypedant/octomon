@@ -4557,11 +4557,13 @@ pub async fn run(state: std::sync::Arc<parking_lot::Mutex<AppState>>, cfg: crate
                         Ok(b) => b,
                         Err(e) => {
                             // Name the file, and the likeliest cause: a file an
-                            // earlier `sudo octomon` left root-owned, which a
-                            // `sudo octomon` run now repairs (store::hand_back).
+                            // earlier `sudo octomon` left root-owned. The
+                            // startup notice names the fix when that is so
+                            // (store::root_owned_leftovers); this line points
+                            // at it.
                             let file = crate::baseline::file_name();
                             let message = format!(
-                                "couldn't read {file} ({e}) — learning this network for this session only; if an earlier run was under sudo, one `sudo octomon --check` gives the file back"
+                                "couldn't read {file} ({e}) — learning this network for this session only; if an earlier run was under sudo, the startup notice has the command that gives the file back"
                             );
                             crate::errlog::log("baseline", &message);
                             s.notice_event(

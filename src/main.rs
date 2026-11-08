@@ -283,10 +283,22 @@ async fn main() -> Result<()> {
     // older version wrote under the umask. Before the first write, so the
     // session banner below lands in an already-tightened directory.
     store::tighten_permissions();
+    // Files an older version's `sudo` run left root-owned: this run cannot use
+    // them, and will not chown them (store::hand_back says why), so the person
+    // is told once, with the command, wherever the run's notices go.
+    let root_owned = store::root_owned_leftovers();
     // Opens the run's stretch of errors.log. Everything that follows can fail
     // quietly by design, so the file is the only place a later "why did I have
     // to restart it?" can be answered from.
     errlog::start_session();
+    if let Some(left) = &root_owned {
+        errlog::log("store", format!("{} — {}", left.summary(), left.fix()));
+        // The dashboard shows it in the startup notice; every other mode has
+        // only the terminal.
+        if cli.watch || cli.check || cli.doctor || cli.paths || cli.bundle.is_some() {
+            eprintln!("⚠ {} — to get them back: {}", left.summary(), left.fix());
+        }
+    }
     // What the previous session logged about octomon's own crashes, to ask
     // for once (the startup notice, or a line under --watch) and then mark
     // seen. Read before anything else can log, so this run's lines never mix
@@ -517,9 +529,13 @@ async fn main() -> Result<()> {
         let headless = cli.check || cli.doctor;
         if !headless && !cli.watch {
             s.crash_report = crash_report.clone();
+            s.root_owned = root_owned.clone();
         }
         if !headless
-            && (s.icmp_error.is_some() || !s.missing_tools.is_empty() || s.crash_report.is_some())
+            && (s.icmp_error.is_some()
+                || !s.missing_tools.is_empty()
+                || s.crash_report.is_some()
+                || s.root_owned.is_some())
         {
             s.overlay = Overlay::Startup;
             if let Some(report) = &s.crash_report {

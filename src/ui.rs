@@ -1598,6 +1598,28 @@ fn startup_notice(f: &mut Frame, s: &AppState, area: Rect) {
         lines.push(Line::from(""));
     }
 
+    if let Some(left) = &s.root_owned {
+        lines.push(Line::from(Span::styled(
+            " ⚠ Some of octomon's files belong to another user",
+            Style::new().fg(theme::warn()).bold(),
+        )));
+        for part in [
+            format!(" {}.", left.summary()),
+            " This run cannot read or update them, so what it learns here is not kept.".to_string(),
+            " To get them back, run:".to_string(),
+        ] {
+            lines.push(Line::from(Span::styled(
+                part,
+                Style::new().fg(theme::text()),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            format!("   {}", left.fix()),
+            Style::new().fg(theme::accent()),
+        )));
+        lines.push(Line::from(""));
+    }
+
     if let Some(err) = &s.icmp_error {
         lines.push(Line::from(Span::styled(
             " ⚠ Latency features are disabled",
@@ -7651,6 +7673,32 @@ mod tests {
             "errors.log",
             "The log can name hosts and addresses on your network; look it over first.",
             "This notice is shown once for these errors.",
+        ] {
+            assert!(out.contains(line), "missing {line:?} in:\n{out}");
+        }
+    }
+
+    /// Files an older sudo run left root-owned: the startup notice says what
+    /// was found, that this run cannot keep what it learns, and the command.
+    #[test]
+    fn startup_notice_gives_the_chown_for_root_owned_leftovers() {
+        let mut s = AppState::new(vec![]);
+        s.overlay = Overlay::Startup;
+        s.root_owned = Some(crate::store::RootOwned {
+            dirs: vec![(
+                std::path::PathBuf::from("/Users/alice/.local/share/octomon"),
+                3,
+            )],
+        });
+        let out = draw(&s, 110, 30);
+        for line in [
+            "⚠ Some of octomon's files belong to another user",
+            // The summary wraps inside the dialog; both halves must be there.
+            "3 files in /Users/alice/.local/share/octomon belong to another user",
+            "by an earlier sudo octomon.",
+            "This run cannot read or update them, so what it learns here is not kept.",
+            "To get them back, run:",
+            "sudo chown -R \"$USER\" \"/Users/alice/.local/share/octomon\"",
         ] {
             assert!(out.contains(line), "missing {line:?} in:\n{out}");
         }
