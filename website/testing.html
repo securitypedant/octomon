@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>octomon: tested against real VPN clients</title>
-<meta name="description" content="What octomon says about real VPN clients, checked before each release: NordVPN app, OpenVPN, WireGuard against octomon 0.12.0.">
+<meta name="description" content="What octomon says about real VPN clients, checked before each release: NordVPN app, OpenVPN, Cloudflare WARP, WireGuard against octomon 0.12.0.">
 <meta name="author" content="Simon Thorpe">
 <link rel="canonical" href="https://octomon.dev/testing">
 <link rel="alternate" type="application/rss+xml" title="octomon blog" href="/blog/feed.xml">
@@ -403,8 +403,8 @@
 
   <section id="v0.12.0">
     <div class="wrap">
-      <h2>octomon 0.12.0 <span class="muted">· 8 November 2026 · 3/3 clients passed</span></h2>
-      <p class="runmeta">Linux containers on Docker Desktop (macOS host) · built from <a href="https://github.com/securitypedant/octomon/commit/0fb6643"><code>0fb6643</code></a></p>
+      <h2>octomon 0.12.0 <span class="muted">· 8 November 2026 · 4/4 clients passed</span></h2>
+      <p class="runmeta">Linux containers on Docker Desktop (macOS host) · built from <a href="https://github.com/securitypedant/octomon/commit/fd27701"><code>fd27701</code></a></p>
       <div class="card">
         <h2>NordVPN app (NordLynx) <span class="tag pass">passed</span></h2>
         <table>
@@ -443,6 +443,35 @@
             <td>reconnect 1195 (pool 10.9, another server)</td>
             <td><code>tun0</code></td>
             <td>OpenVPN</td>
+            <td>same location after reconnecting</td>
+            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h2>Cloudflare WARP <span class="tag pass">passed</span></h2>
+        <table>
+          <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
+          <tbody>
+<tr>
+            <td>connect</td>
+            <td><code>CloudflareWARP</code></td>
+            <td>Cloudflare WARP</td>
+            <td>first connection</td>
+            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>reconnect</td>
+            <td><code>CloudflareWARP</code></td>
+            <td>Cloudflare WARP</td>
+            <td>same location after reconnecting</td>
+            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>re-register (new device identity and addresses)</td>
+            <td><code>CloudflareWARP</code></td>
+            <td>Cloudflare WARP</td>
             <td>same location after reconnecting</td>
             <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
           </tr>
