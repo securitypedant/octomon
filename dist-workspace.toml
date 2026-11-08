@@ -48,3 +48,6 @@ github-action-commits = { "actions/checkout" = "d23441a48e516b6c34aea4fa41551a30
 
 [dist.github-custom-runners]
 aarch64-pc-windows-msvc = "windows-11-arm"
+# GitHub retired the macos-14 image in November 2026 (dist 0.32's default for
+# this target); the v0.12.0 release's macOS job was cancelled at scheduling.
+aarch64-apple-darwin = "macos-15"
