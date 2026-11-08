@@ -65,13 +65,13 @@ function clientCard(c) {
   const title = CLIENTS[c.name] ?? c.name;
   if (c.status === "skipped") {
     return `      <div class="card">
-        <h2>${esc(title)} <span class="tag skip">not run</span></h2>
+        <h3>${esc(title)} <span class="tag skip">not run</span></h3>
         <p>${esc(c.reason ?? "skipped")}.</p>
       </div>`;
   }
   const rows = (c.phases ?? []).map(phaseRow).join("\n");
   return `      <div class="card">
-        <h2>${esc(title)} <span class="tag ${c.status === "pass" ? "pass" : "fail"}">${c.status === "pass" ? "passed" : "failed"}</span></h2>${
+        <h3>${esc(title)} <span class="tag ${c.status === "pass" ? "pass" : "fail"}">${c.status === "pass" ? "passed" : "failed"}</span></h3>${
           c.reason ? `\n        <p>${esc(c.reason)}.</p>` : ""
         }
         <table>
@@ -83,20 +83,36 @@ ${rows}
       </div>`;
 }
 
-function runSection(r, latest) {
+function runTitle(r) {
   const n = r.clients.filter((c) => c.status !== "skipped").length;
   const passed = r.clients.filter((c) => c.status === "pass").length;
+  return `octomon ${esc(r.octomon)} <span class="muted">· ${esc(humanDate(r.date))} · ${passed}/${n} clients passed</span>`;
+}
+
+function runMeta(r) {
+  return `<p class="runmeta">${esc(r.host)} · built from <a href="${REPO}/commit/${esc(r.commit)}"><code>${esc(r.commit)}</code></a>${
+    r.dirty ? " with uncommitted changes" : ""
+  }</p>`;
+}
+
+function runSection(r) {
   return `  <section id="v${esc(r.octomon)}">
     <div class="wrap">
-      <h2>octomon ${esc(r.octomon)} <span class="muted">· ${esc(humanDate(r.date))} · ${passed}/${n} clients passed</span></h2>
-      <p class="runmeta">${esc(r.host)} · built from <a href="${REPO}/commit/${esc(r.commit)}"><code>${esc(r.commit)}</code></a>${
-        r.dirty ? " with uncommitted changes" : ""
-      }${
-        latest ? "" : ` · <a href="#top">latest run</a>`
-      }</p>
+      <h2>${runTitle(r)}</h2>
+      ${runMeta(r)}
 ${r.clients.map(clientCard).join("\n")}
     </div>
   </section>`;
+}
+
+// An earlier run shows only its title until opened; a link to its anchor
+// opens it (the script at the end of the page).
+function runFolded(r) {
+  return `      <details class="run" id="v${esc(r.octomon)}">
+        <summary>${runTitle(r)}</summary>
+        ${runMeta(r)}
+${r.clients.map(clientCard).join("\n")}
+      </details>`;
 }
 
 const [latest, ...earlier] = runs;
@@ -130,37 +146,56 @@ const body = `<main id="top">
     </div>
   </section>
 
-${runSection(latest, true)}
+${runSection(latest)}
 ${earlier.length ? `
   <section>
     <div class="wrap">
       <h2>Earlier runs</h2>
+${earlier.map(runFolded).join("\n")}
     </div>
   </section>
-${earlier.map((r) => runSection(r, false)).join("\n")}` : ""}
+<script>
+  // A link to an earlier run (#v0.12.0) opens it.
+  const open = () => { const d = location.hash && document.querySelector(\`details[id="\${CSS.escape(location.hash.slice(1))}"]\`); if (d) { d.open = true; d.scrollIntoView(); } };
+  addEventListener("hashchange", open); open();
+</script>` : ""}
 </main>`;
 
 const extraCss = `
-  .runmeta { font-family: var(--octo-mono); font-size: 0.85rem; color: var(--octo-muted); margin: -4px 0 0; }
+  .runmeta { font-family: var(--octo-mono); font-size: 0.8rem; color: var(--octo-muted); margin: -6px 0 10px; }
   .muted { color: var(--octo-muted); font-weight: 400; font-size: 0.85em; }
-  .tag { font-family: var(--octo-mono); font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.04em; padding: 2px 8px; border-radius: var(--octo-radius-chip); vertical-align: middle; margin-left: 8px; }
+  .card { padding: 12px 16px; margin: 0 0 10px; }
+  .card h3 { margin: 0 0 4px; font-size: 1rem; }
+  .card p { margin: 4px 0; font-size: 0.9rem; }
+  .tag { font-family: var(--octo-mono); font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.04em; padding: 1px 7px; border-radius: var(--octo-radius-chip); vertical-align: middle; margin-left: 8px; }
   .tag.pass { background: rgba(63, 207, 92, 0.15); color: var(--octo-green); }
   .tag.fail { background: rgba(224, 82, 77, 0.15); color: var(--octo-red); }
   .tag.skip { background: rgba(138, 150, 164, 0.15); color: var(--octo-muted); }
-  .card table { width: 100%; border-collapse: collapse; margin: 6px 0 0; font-size: 0.9rem; }
-  .card th, .card td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--octo-line); vertical-align: top; }
-  .card th { font-family: var(--octo-mono); font-weight: 700; color: var(--octo-green); font-size: 0.8rem; }
+  .card table { width: 100%; border-collapse: collapse; margin: 2px 0 0; font-size: 0.84rem; }
+  .card th, .card td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--octo-line); vertical-align: top; }
+  .card th { font-family: var(--octo-mono); font-weight: 700; color: var(--octo-green); font-size: 0.74rem; }
   .card tr:last-child td { border-bottom: 0; }
-  .card td.checks { font-family: var(--octo-mono); font-size: 0.82rem; white-space: nowrap; }
+  .card td:nth-child(3) { white-space: nowrap; }
+  .card td.checks { font-family: var(--octo-mono); font-size: 0.78rem; white-space: nowrap; }
   .ok { color: var(--octo-green); } .bad { color: var(--octo-red); }
+  details.run { border-top: 1px solid var(--octo-line); padding: 10px 0 4px; }
+  details.run:last-of-type { border-bottom: 1px solid var(--octo-line); }
+  details.run summary { cursor: pointer; font-weight: 700; font-size: 1.05rem; list-style: none; padding: 2px 0; }
+  details.run summary::-webkit-details-marker { display: none; }
+  details.run summary::before { content: "▸"; display: inline-block; width: 1.1em; color: var(--octo-muted); }
+  details.run[open] summary::before { content: "▾"; }
+  details.run[open] summary { margin-bottom: 10px; }
+  details.run .runmeta { margin: 0 0 10px 1.1em; }
+  details.run .card { margin-left: 1.1em; }
   @media (max-width: 700px) {
     .card table, .card thead, .card tbody, .card tr, .card td { display: block; }
     .card thead { display: none; }
-    .card td { border-bottom: 0; padding: 3px 0; }
-    .card tr { border-bottom: 1px solid var(--octo-line); padding: 8px 0; }
+    .card td { border-bottom: 0; padding: 2px 0; }
+    .card tr { border-bottom: 1px solid var(--octo-line); padding: 6px 0; }
     .card tr:last-child { border-bottom: 0; }
-    .card td.checks { white-space: normal; }
+    .card td.checks, .card td:nth-child(3) { white-space: normal; }
+    details.run .runmeta, details.run .card { margin-left: 0; }
   }`;
 
 const html = page({

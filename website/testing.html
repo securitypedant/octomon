@@ -288,26 +288,40 @@
     .wordmark { font-size: 1.15rem; }
   }
 
-  .runmeta { font-family: var(--octo-mono); font-size: 0.85rem; color: var(--octo-muted); margin: -4px 0 0; }
+  .runmeta { font-family: var(--octo-mono); font-size: 0.8rem; color: var(--octo-muted); margin: -6px 0 10px; }
   .muted { color: var(--octo-muted); font-weight: 400; font-size: 0.85em; }
-  .tag { font-family: var(--octo-mono); font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.04em; padding: 2px 8px; border-radius: var(--octo-radius-chip); vertical-align: middle; margin-left: 8px; }
+  .card { padding: 12px 16px; margin: 0 0 10px; }
+  .card h3 { margin: 0 0 4px; font-size: 1rem; }
+  .card p { margin: 4px 0; font-size: 0.9rem; }
+  .tag { font-family: var(--octo-mono); font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.04em; padding: 1px 7px; border-radius: var(--octo-radius-chip); vertical-align: middle; margin-left: 8px; }
   .tag.pass { background: rgba(63, 207, 92, 0.15); color: var(--octo-green); }
   .tag.fail { background: rgba(224, 82, 77, 0.15); color: var(--octo-red); }
   .tag.skip { background: rgba(138, 150, 164, 0.15); color: var(--octo-muted); }
-  .card table { width: 100%; border-collapse: collapse; margin: 6px 0 0; font-size: 0.9rem; }
-  .card th, .card td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--octo-line); vertical-align: top; }
-  .card th { font-family: var(--octo-mono); font-weight: 700; color: var(--octo-green); font-size: 0.8rem; }
+  .card table { width: 100%; border-collapse: collapse; margin: 2px 0 0; font-size: 0.84rem; }
+  .card th, .card td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--octo-line); vertical-align: top; }
+  .card th { font-family: var(--octo-mono); font-weight: 700; color: var(--octo-green); font-size: 0.74rem; }
   .card tr:last-child td { border-bottom: 0; }
-  .card td.checks { font-family: var(--octo-mono); font-size: 0.82rem; white-space: nowrap; }
+  .card td:nth-child(3) { white-space: nowrap; }
+  .card td.checks { font-family: var(--octo-mono); font-size: 0.78rem; white-space: nowrap; }
   .ok { color: var(--octo-green); } .bad { color: var(--octo-red); }
+  details.run { border-top: 1px solid var(--octo-line); padding: 10px 0 4px; }
+  details.run:last-of-type { border-bottom: 1px solid var(--octo-line); }
+  details.run summary { cursor: pointer; font-weight: 700; font-size: 1.05rem; list-style: none; padding: 2px 0; }
+  details.run summary::-webkit-details-marker { display: none; }
+  details.run summary::before { content: "▸"; display: inline-block; width: 1.1em; color: var(--octo-muted); }
+  details.run[open] summary::before { content: "▾"; }
+  details.run[open] summary { margin-bottom: 10px; }
+  details.run .runmeta { margin: 0 0 10px 1.1em; }
+  details.run .card { margin-left: 1.1em; }
   @media (max-width: 700px) {
     .card table, .card thead, .card tbody, .card tr, .card td { display: block; }
     .card thead { display: none; }
-    .card td { border-bottom: 0; padding: 3px 0; }
-    .card tr { border-bottom: 1px solid var(--octo-line); padding: 8px 0; }
+    .card td { border-bottom: 0; padding: 2px 0; }
+    .card tr { border-bottom: 1px solid var(--octo-line); padding: 6px 0; }
     .card tr:last-child { border-bottom: 0; }
-    .card td.checks { white-space: normal; }
+    .card td.checks, .card td:nth-child(3) { white-space: normal; }
+    details.run .runmeta, details.run .card { margin-left: 0; }
   }
 </style>
 <script type="application/ld+json">
@@ -406,7 +420,7 @@
       <h2>octomon 0.12.0 <span class="muted">· 8 November 2026 · 4/4 clients passed</span></h2>
       <p class="runmeta">Linux containers on Docker Desktop (macOS host) · built from <a href="https://github.com/securitypedant/octomon/commit/fd27701"><code>fd27701</code></a></p>
       <div class="card">
-        <h2>NordVPN app (NordLynx) <span class="tag pass">passed</span></h2>
+        <h3>NordVPN app (NordLynx) <span class="tag pass">passed</span></h3>
         <table>
           <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
           <tbody>
@@ -428,7 +442,7 @@
         </table>
       </div>
       <div class="card">
-        <h2>OpenVPN (tun) <span class="tag pass">passed</span></h2>
+        <h3>OpenVPN (tun) <span class="tag pass">passed</span></h3>
         <table>
           <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
           <tbody>
@@ -450,7 +464,7 @@
         </table>
       </div>
       <div class="card">
-        <h2>Cloudflare WARP <span class="tag pass">passed</span></h2>
+        <h3>Cloudflare WARP <span class="tag pass">passed</span></h3>
         <table>
           <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
           <tbody>
@@ -479,7 +493,7 @@
         </table>
       </div>
       <div class="card">
-        <h2>WireGuard (wg-quick, kernel device) <span class="tag pass">passed</span></h2>
+        <h3>WireGuard (wg-quick, kernel device) <span class="tag pass">passed</span></h3>
         <table>
           <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
           <tbody>
