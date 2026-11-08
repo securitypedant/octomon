@@ -112,9 +112,9 @@ run_client() {
     # What every phase must satisfy, unless a phase says otherwise. A client
     # without a tunnel expectation (the fault-injection one) skips the name
     # and label checks and relies on its phases' asserts.
-    local nphases i phase cmd iface before keyrule file prev_key key ok=1 pok
+    local nphases i phase cmd iface before keyrule file prev_key first_key key ok=1 pok
     nphases=$(jq '.phases | length' "$expect")
-    prev_key=""
+    prev_key=""; first_key=""
     for ((i = 0; i < nphases; i++)); do
         phase=$(jq -r ".phases[$i].name" "$expect")
         cmd=$(jq -r ".phases[$i].cmd" "$expect")
@@ -184,9 +184,12 @@ run_client() {
         fi
         local key_ok=true
         if [ -z "$key" ]; then say "    FAIL: no location key"; key_ok=false; fi
+        # Key rules: same / different compare with the previous phase;
+        # restored with the first one (a tunnel came down, the LAN is back).
         case "$keyrule" in
             same) [ "$key" = "$prev_key" ] || { say "    FAIL: key changed (was $prev_key)"; key_ok=false; } ;;
             different) [ "$key" != "$prev_key" ] || { say "    FAIL: key did not change (expected a new location)"; key_ok=false; } ;;
+            restored) [ "$key" = "$first_key" ] || { say "    FAIL: key is not the first phase's (was $first_key)"; key_ok=false; } ;;
         esac
         check key "$key_ok"
         # Free-form asserts: a jq path on the probe's JSON and a regex its
@@ -206,6 +209,7 @@ run_client() {
         else check clean_log true; fi
         [ "$pok" = 1 ] || ok=0
         prev_key=$key
+        [ -n "$first_key" ] || first_key=$key
 
         # The phase's allow-listed record. "label_has_address" is the one
         # fact about the label that matters (WireGuard keys on its address,

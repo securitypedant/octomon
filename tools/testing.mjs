@@ -37,6 +37,7 @@ const KEY = {
   first: "first connection",
   same: "same location after reconnecting",
   different: "a new location, as designed",
+  restored: "back to the first location",
 };
 // octomon's finding slugs, in words.
 const CAUSES = {
@@ -76,7 +77,11 @@ function phaseRow(p, cols) {
   return `<tr>
             <td>${esc(p.name)}</td>
             <td><code>${esc(p.device)}</code></td>
-            <td>${esc(p.recognised_as)}${p.label_has_address ? " <span class=\"muted\">(label carries the tunnel address)</span>" : ""}</td>
+            <td>${
+              p.recognised_as
+                ? `${esc(p.recognised_as)}${p.label_has_address ? " <span class=\"muted\">(label carries the tunnel address)</span>" : ""}`
+                : `<span class="muted">no tunnel: the LAN itself</span>`
+            }</td>
             <td>${esc(KEY[p.key] ?? p.key)}</td>
             <td class="checks">${checkList(p.checks)}</td>
           </tr>`;

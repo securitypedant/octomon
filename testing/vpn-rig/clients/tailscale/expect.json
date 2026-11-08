@@ -8,7 +8,7 @@
      "tunnel": "^WireGuard$", "label": "via WireGuard 10\\.13\\.13\\.2$", "bypassed": "^Tailscale$"},
     {"name": "reconnect the WireGuard tunnel", "cmd": "wg-reconnect", "iface": "wg0", "key": "same",
      "tunnel": "^WireGuard$", "label": "via WireGuard 10\\.13\\.13\\.2$", "bypassed": "^Tailscale$"},
-    {"name": "WireGuard down, Tailscale stays", "cmd": "wg-disconnect", "iface": "tailscale0", "key": "different",
+    {"name": "WireGuard down, Tailscale stays", "cmd": "wg-disconnect", "iface": "tailscale0", "key": "restored",
      "tunnel": "^$", "label": "^[0-9.]+$", "bypassed": "^Tailscale$"}
   ]
 }
