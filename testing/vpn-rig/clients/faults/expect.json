@@ -9,7 +9,7 @@
     {"name": "250 ms added to everything", "cmd": "latency", "key": "same", "observe": 30,
      "asserts": [{"name": "noticed", "path": "[.doctor.analysis.findings[]?|.cause]|join(\",\")", "match": "gateway|link|internet|degraded"},
                  {"name": "gateway flagged", "path": "[.doctor.analysis.ladder[]|select(.area==\"gateway\")|.status][0]", "match": "warn|bad"}]},
-    {"name": "DNS dropped, everything else fine", "cmd": "dns", "key": "same",
+    {"name": "DNS dropped, everything else fine", "cmd": "dns", "key": "same", "observe": 30,
      "asserts": [{"name": "noticed", "path": ".doctor.status", "match": "^(problems|degraded|down)"},
                  {"name": "cause", "path": "[.doctor.analysis.findings[]?|select(.severity!=\"info\")|.cause]|join(\",\")", "match": "dns"}]},
     {"name": "web (80/443) rejected, ping and DNS fine", "cmd": "web", "key": "same",
