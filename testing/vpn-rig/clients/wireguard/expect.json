@@ -1,0 +1,10 @@
+{
+  "servers": ["wg-server"],
+  "tunnel": "^WireGuard",
+  "label": "via WireGuard 10\\.13\\.13\\.[23]$",
+  "phases": [
+    {"name": "connect wg0",   "cmd": "connect wg0",   "iface": "wg0"},
+    {"name": "reconnect wg0", "cmd": "reconnect wg0", "iface": "wg0", "key": "same"},
+    {"name": "connect wg1 (second address)", "before": "disconnect", "cmd": "connect wg1", "iface": "wg1", "key": "different"}
+  ]
+}

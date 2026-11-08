@@ -1,0 +1,25 @@
+# The rig's servers. run.sh starts the ones a client needs; clients are
+# plain `docker run`s on the same network (see there). The network is "the
+# LAN" every client shares, so every location the rig produces is
+# "<this bridge> via <tunnel>".
+name: octomon-rig
+
+networks:
+  lan:
+    name: octomon-rig
+
+services:
+  wg-server:
+    build: servers/wireguard
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.ip_forward: 1
+    networks: [lan]
+
+  ovpn-server:
+    build: servers/openvpn
+    cap_add: [NET_ADMIN]
+    devices: [/dev/net/tun]
+    sysctls:
+      net.ipv4.ip_forward: 1
+    networks: [lan]

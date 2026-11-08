@@ -3852,6 +3852,9 @@ fn doctor_json(s: &AppState, full: bool) -> (String, i32) {
             "name": b.name,
             "label": b.label,
             "medium": b.medium,
+            // The identity the learned normal is filed under. It names the
+            // gateway, so it is a --full field, like the MACs it is built from.
+            "key": full.then(|| crate::baseline::fingerprint(&s.netinfo).map(|f| f.0)).flatten(),
             "healthy_minutes": b.samples,
             "established": b.established(),
             "normal": {
@@ -4396,6 +4399,40 @@ mod tests {
         let (full, _code) = doctor_report(&s, true);
         assert!(full.contains("MySecretWifi"));
         assert!(full.contains("192.168.1.1"));
+    }
+
+    /// The location key is the identity the learned normal is filed under;
+    /// the VPN test rig reads it to prove two connections land in one place.
+    /// It names the gateway, so only the unredacted JSON carries it.
+    #[test]
+    fn doctor_json_carries_the_location_key_only_when_full() {
+        let mut s = AppState::new(vec![]);
+        s.netinfo.iface = "en0".into();
+        s.netinfo.medium = crate::app::LinkMedium::WiFi;
+        s.netinfo.gateway_ip = "192.168.1.1".into();
+        s.netinfo.gateway_mac = "de:ad:be:ef:00:01".into();
+        s.netinfo.wifi = Some(crate::app::WifiInfo {
+            ssid: "HomeNet".into(),
+            ..Default::default()
+        });
+        let (key, label) = crate::baseline::fingerprint(&s.netinfo).expect("fingerprintable");
+        s.baseline = Some(crate::baseline::Baseline {
+            name: None,
+            label,
+            medium: "Wi-Fi".into(),
+            ..Default::default()
+        });
+
+        let (out, _) = doctor_json(&s, false);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            v["location"]["key"].is_null(),
+            "redacted report carried the key"
+        );
+
+        let (out, _) = doctor_json(&s, true);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["location"]["key"].as_str(), Some(key.as_str()));
     }
 
     /// An SSID is 32 arbitrary bytes chosen by whoever runs the access point.

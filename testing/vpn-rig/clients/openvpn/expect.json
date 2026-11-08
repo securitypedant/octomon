@@ -1,0 +1,9 @@
+{
+  "servers": ["ovpn-server"],
+  "tunnel": "^OpenVPN",
+  "label": "via OpenVPN$",
+  "phases": [
+    {"name": "connect 1194 (pool 10.8)", "cmd": "connect 1194", "iface": "tun0"},
+    {"name": "reconnect 1195 (pool 10.9, another server)", "cmd": "reconnect 1195", "iface": "tun0", "key": "same"}
+  ]
+}

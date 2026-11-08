@@ -6,7 +6,7 @@
   "description": "Build tooling for octomon.dev. The site itself is static; this only renders website/blog/*/index.md and website/changelog.md to HTML.",
   "scripts": {
     "dev": "node tools/serve.mjs",
-    "site": "node tools/blog.mjs && node tools/changelog.mjs",
+    "site": "node tools/blog.mjs && node tools/changelog.mjs && node tools/testing.mjs",
     "blog": "node tools/blog.mjs",
     "blog:watch": "node tools/blog.mjs --watch",
     "changelog": "node tools/changelog.mjs",

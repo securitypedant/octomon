@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1
+# The rig's base: octomon built from this checkout, on the Ubuntu the clients
+# are installed into. run.sh builds it with the repository's tracked files
+# as the context (see there), so an uncommitted edit to the sources is
+# included but target/ and node_modules/ are not.
+FROM rust:1-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked \
+    && cp target/release/octomon /octomon
+
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        iproute2 iputils-ping curl jq ca-certificates procps \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /octomon /usr/local/bin/octomon
+COPY testing/vpn-rig/lib/probe.sh /usr/local/bin/rig-probe
+RUN chmod 755 /usr/local/bin/rig-probe
+CMD ["sleep", "infinity"]

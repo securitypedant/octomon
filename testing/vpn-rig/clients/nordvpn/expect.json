@@ -1,0 +1,9 @@
+{
+  "secret": "nordvpn.token",
+  "tunnel": "^NordVPN",
+  "label": "via NordVPN$",
+  "phases": [
+    {"name": "connect (nearest)", "cmd": "connect", "iface": "nordlynx"},
+    {"name": "reconnect to another country", "cmd": "reconnect Canada", "iface": "nordlynx", "key": "same"}
+  ]
+}
