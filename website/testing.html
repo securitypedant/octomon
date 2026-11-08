@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>octomon: tested against real VPN clients</title>
+<meta name="description" content="What octomon says about real VPN clients, checked before each release: NordVPN app, OpenVPN, WireGuard against octomon 0.12.0.">
+<meta name="author" content="Simon Thorpe">
+<link rel="canonical" href="https://octomon.dev/testing">
+<link rel="alternate" type="application/rss+xml" title="octomon blog" href="/blog/feed.xml">
+<link rel="alternate" type="application/rss+xml" title="octomon releases" href="/changelog.xml">
+<link rel="icon" type="image/png" sizes="32x32" href="/images/octomon-logo-32.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/images/octomon-icon-tile.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/images/octomon-icon-tile.png">
+<meta property="og:site_name" content="octomon">
+<meta property="og:locale" content="en_GB">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://octomon.dev/testing">
+<meta property="og:title" content="octomon: tested against real VPN clients">
+<meta property="og:description" content="Real VPN clients in containers, checked against octomon 0.12.0: naming, labels and location identity across reconnects.">
+<meta property="og:image" content="https://octomon.dev/images/octomon-og-card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="octomon: tested against real VPN clients">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="octomon: tested against real VPN clients">
+<meta name="twitter:description" content="Real VPN clients in containers, checked against octomon 0.12.0: naming, labels and location identity across reconnects.">
+<meta name="twitter:image" content="https://octomon.dev/images/octomon-og-card.png">
+<link rel="stylesheet" href="/tokens.css">
+<style>
+  /* Every colour on this page is a token from tokens.css, no hex here. */
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 84px; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+  }
+  body {
+    margin: 0;
+    background: var(--octo-ink);
+    color: var(--octo-white);
+    font-family: var(--octo-body);
+    font-size: 17px;
+    line-height: 1.6;
+    /* wide content must scroll inside its own container, never the page */
+    overflow-x: clip;
+  }
+  a { color: var(--octo-green); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  :focus-visible {
+    outline: 2px solid var(--octo-green);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  h1, h2 {
+    font-family: var(--octo-display);
+    text-transform: uppercase;
+    letter-spacing: -0.01em;
+    font-weight: 400;
+    line-height: 1.05;
+    margin: 0 0 0.4em;
+  }
+  kbd {
+    font-family: var(--octo-mono);
+    font-size: 0.85em;
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    padding: 0.1em 0.45em;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  /* the nav stays put while the page scrolls under it. sticky, not fixed,
+     so it keeps its place in the flow and nothing needs a top padding to
+     dodge it; scroll-padding-top on html keeps in-page anchors clear of it */
+  header {
+    position: sticky; top: 0; z-index: 20;
+    border-bottom: 1px solid var(--octo-line);
+    background: var(--octo-ink);
+  }
+  .nav {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+    padding: 14px 0;
+  }
+  .mark { display: flex; align-items: center; gap: 12px; color: var(--octo-white); }
+  .mark:hover { text-decoration: none; }
+  .mark svg { width: 34px; height: 34px; display: block; }
+  .wordmark {
+    font-family: var(--octo-mono);
+    font-weight: 800;
+    font-size: 1.35rem;
+    letter-spacing: 0.023em;
+  }
+  nav.links { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px 22px; font-family: var(--octo-mono); font-size: 0.95rem; }
+  /* mobile hamburger: pure CSS (checkbox), desktop never sees it */
+  .menu-btn { display: none; }
+
+  section { padding: 64px 0; }
+  section + section { border-top: 1px solid var(--octo-line); }
+  /* the body follows the page head directly, so it needs far less air above
+     it than a section that follows another section does */
+  main > section { padding-top: 36px; }
+  h1 { font-size: clamp(2rem, 4.5vw, 3.4rem); }
+  h2 { font-size: clamp(1.6rem, 3vw, 2.4rem); }
+  .lede { color: var(--octo-muted); max-width: 56em; margin-top: 0; }
+
+  /* the page head: no hero art, just the title over a magenta rule */
+  .pagehead { padding: 44px 0 26px; border-bottom: 2px solid var(--octo-magenta); }
+  /* the head's lede runs the full wrap: a one-line description should stay
+     on one line rather than wrap early into a narrow column */
+  .pagehead .lede { max-width: none; }
+  /* byline under a post title: date and reading time, never a name */
+  .postmeta {
+    font-family: var(--octo-mono);
+    font-size: 0.85rem;
+    color: var(--octo-muted);
+    margin: 0 0 0.9em;
+  }
+
+  /* the index: one card per post, newest first, same card as /privacy */
+  .postlist { margin-top: 0; }
+  .postlist .card:first-child { margin-top: 0; }
+  .card {
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+    padding: 22px 24px;
+    margin-top: 24px;
+  }
+  .card h2 {
+    margin: 0 0 10px;
+    font-family: var(--octo-mono); font-weight: 700; font-size: 1.15rem;
+    text-transform: none; letter-spacing: 0; line-height: 1.35;
+  }
+  .card h2 a { color: var(--octo-green); }
+  .card p { margin: 0 0 0.7em; color: var(--octo-muted); }
+  .card p:last-child { margin-bottom: 0; }
+  .card .more { font-family: var(--octo-mono); font-size: 0.85rem; }
+
+  /* the post body: one column at a readable measure, not the full 1120 */
+  /* 44em at 17px is about 750px: a long-form measure with room for the
+     figures and the inline monospace, without lines turning into rows. */
+  .post { max-width: 44em; }
+  /* Body copy comes off pure white: #F4F7FA on the ink ground is the highest
+     contrast on the site, and at paragraph length that makes thin text glow.
+     A soft off-white keeps the dark theme and reads for longer; the extra
+     leading does the rest. Headings stay white. */
+  .post p, .post li {
+    color: color-mix(in srgb, var(--octo-white) 84%, var(--octo-ink));
+    font-size: 1.05rem;
+    line-height: 1.75;
+  }
+  .post > p:first-child { margin-top: 0; }
+  .post h2 {
+    /* smaller than a section head: a subhead should not shout */
+    font-size: clamp(1.3rem, 2.2vw, 1.7rem);
+    margin: 1.9em 0 0.5em;
+  }
+  .post h3 {
+    margin: 1.6em 0 0.4em;
+    font-family: var(--octo-mono); font-weight: 700; font-size: 1.05rem;
+    color: var(--octo-green);
+  }
+  /* the "#" after every heading: invisible until the heading is hovered or
+     the link is focused, so a reader who wants a deep link can find one and
+     nobody else sees it */
+  .post h2 .anchor, .post h3 .anchor, .post h4 .anchor {
+    margin-left: 0.35em; font-weight: 400; font-family: var(--octo-mono);
+    color: var(--octo-muted); text-decoration: none; opacity: 0;
+  }
+  .post h2:hover .anchor, .post h3:hover .anchor, .post h4:hover .anchor,
+  .post .anchor:focus-visible { opacity: 1; }
+  .post ul, .post ol { padding-left: 1.3em; margin: 1em 0; }
+  .post li { margin: 0.5em 0; }
+  .post li::marker { color: var(--octo-magenta); }
+  .post code {
+    font-family: var(--octo-mono); font-size: 0.9em;
+    color: var(--octo-green);
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-radius: 5px;
+    padding: 0.08em 0.35em;
+    /* a run that wraps gets its padding and border on both halves */
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
+  .post pre {
+    background: var(--octo-deep);
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-chip);
+    padding: 16px 18px;
+    /* the block scrolls, the page never does */
+    overflow-x: auto;
+  }
+  .post pre code {
+    background: none; border: 0; padding: 0;
+    color: var(--octo-white); font-size: 0.88rem; line-height: 1.5;
+  }
+  .post blockquote {
+    margin: 1.4em 0;
+    padding: 2px 0 2px 18px;
+    border-left: 3px solid var(--octo-magenta);
+    color: var(--octo-muted);
+  }
+  .post blockquote p:last-child { margin-bottom: 0; }
+  .post img {
+    max-width: 100%; height: auto; display: block;
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+    cursor: zoom-in;
+  }
+
+  /* lightbox: any click (or Esc) closes. Same as the homepage's. */
+  .lightbox {
+    position: fixed; inset: 0; z-index: 50;
+    display: flex; align-items: center; justify-content: center;
+    padding: 3vmin;
+    background: color-mix(in srgb, var(--octo-deep) 94%, transparent);
+    cursor: zoom-out;
+  }
+  .lightbox[hidden] { display: none; }
+  .lightbox img {
+    max-width: 100%; max-height: 100%; width: auto; height: auto;
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+  }
+  .post figure { margin: 1.8em 0; }
+  /* video embed in a post: 16:9, framed like the figures */
+  .post .video-frame {
+    display: block; aspect-ratio: 16 / 9; width: 100%;
+    margin: 1.8em 0;
+    border: 1px solid var(--octo-line);
+    border-radius: var(--octo-radius-card);
+    background: var(--octo-deep);
+  }
+  .post figcaption {
+    font-family: var(--octo-mono); font-size: 0.82rem;
+    color: var(--octo-muted); margin-top: 10px;
+  }
+  .post hr { border: 0; border-top: 1px solid var(--octo-line); margin: 2.4em 0; }
+  .post strong { color: var(--octo-white); }
+  .post table { width: 100%; border-collapse: collapse; margin: 1.4em 0; font-size: 0.94rem; }
+  .post th, .post td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--octo-line); }
+  .post th { font-family: var(--octo-mono); font-weight: 700; color: var(--octo-green); }
+
+  .backlink { font-family: var(--octo-mono); font-size: 0.9rem; margin-top: 48px; }
+
+  footer {
+    border-top: 2px solid var(--octo-magenta); /* decorative rule */
+    padding: 28px 0 40px;
+    color: var(--octo-muted);
+    font-size: 0.9rem;
+  }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; }
+
+  /* phones */
+  @media (max-width: 600px) {
+    .wrap { padding: 0 16px; }
+    /* hamburger: the mark keeps the left edge; links drop into a column
+       only when the burger is checked */
+    .menu-btn {
+      display: block; margin-left: auto; cursor: pointer;
+      font-size: 1.5rem; line-height: 1; color: var(--octo-white);
+      padding: 4px 8px; border: 1px solid var(--octo-line);
+      border-radius: var(--octo-radius-chip);
+    }
+    nav.links { display: none; }
+    /* the closed nav is one row: the mark left, the burger right, both
+       centred in a band with equal air above and below. The open menu gets
+       its bottom air from the checked links rule below instead. */
+    .nav { padding: 12px 0; }
+    /* the open menu lines up with the mark above it, which the tablet rule
+       has already nudged 12px in from the wrap's edge; without this the links
+       sit further left than the logo they hang under */
+    .menu-toggle:checked ~ nav.links {
+      display: flex; flex-basis: 100%; flex-direction: column;
+      gap: 12px; padding: 8px 2px 12px 12px; font-size: 1rem;
+    }
+    section { padding: 44px 0; }
+    .pagehead { padding: 32px 0 22px; }
+    main > section { padding-top: 28px; }
+    .card { padding: 16px; }
+    .post pre { padding: 12px 14px; }
+    footer .wrap { flex-direction: column; align-items: flex-start; gap: 6px; }
+  }
+  @media (max-width: 480px) {
+    .wordmark { font-size: 1.15rem; }
+  }
+
+  .runmeta { font-family: var(--octo-mono); font-size: 0.85rem; color: var(--octo-muted); margin: -4px 0 0; }
+  .muted { color: var(--octo-muted); font-weight: 400; font-size: 0.85em; }
+  .tag { font-family: var(--octo-mono); font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.04em; padding: 2px 8px; border-radius: var(--octo-radius-chip); vertical-align: middle; margin-left: 8px; }
+  .tag.pass { background: rgba(63, 207, 92, 0.15); color: var(--octo-green); }
+  .tag.fail { background: rgba(224, 82, 77, 0.15); color: var(--octo-red); }
+  .tag.skip { background: rgba(138, 150, 164, 0.15); color: var(--octo-muted); }
+  .card table { width: 100%; border-collapse: collapse; margin: 6px 0 0; font-size: 0.9rem; }
+  .card th, .card td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--octo-line); vertical-align: top; }
+  .card th { font-family: var(--octo-mono); font-weight: 700; color: var(--octo-green); font-size: 0.8rem; }
+  .card tr:last-child td { border-bottom: 0; }
+  .card td.checks { font-family: var(--octo-mono); font-size: 0.82rem; white-space: nowrap; }
+  .ok { color: var(--octo-green); } .bad { color: var(--octo-red); }
+  @media (max-width: 700px) {
+    .card table, .card thead, .card tbody, .card tr, .card td { display: block; }
+    .card thead { display: none; }
+    .card td { border-bottom: 0; padding: 3px 0; }
+    .card tr { border-bottom: 1px solid var(--octo-line); padding: 8px 0; }
+    .card tr:last-child { border-bottom: 0; }
+    .card td.checks { white-space: normal; }
+  }
+</style>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebPage",
+  "@id": "https://octomon.dev/testing",
+  "url": "https://octomon.dev/testing",
+  "name": "octomon: tested against real VPN clients",
+  "dateModified": "2026-11-08",
+  "publisher": {
+    "@type": "Organization",
+    "name": "octomon",
+    "url": "https://octomon.dev/",
+    "logo": {
+      "@type": "ImageObject",
+      "url": "https://octomon.dev/images/octomon-icon-tile.png"
+    }
+  }
+}
+</script>
+<!-- Cloudflare Web Analytics -->
+<script type='module' src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "0ebdfd53d18b49d39f76f9d08b3499c9"}'></script>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <a class="mark" href="/" aria-label="octomon home">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-hidden="true">
+        <g fill="var(--octo-green)">
+          <g transform="rotate(-14 22 64)"><rect x="18" y="60" width="8" height="44" rx="4"/></g>
+          <g transform="rotate(-7 34 64)"><rect x="30" y="60" width="8" height="58" rx="4"/></g>
+          <rect x="42" y="60" width="8" height="40" rx="4"/>
+          <rect x="54" y="60" width="8" height="54" rx="4"/>
+          <rect x="66" y="60" width="8" height="42" rx="4"/>
+          <rect x="78" y="60" width="8" height="58" rx="4" fill="var(--octo-amber)"/>
+          <g transform="rotate(7 94 64)"><rect x="90" y="60" width="8" height="46" rx="4"/></g>
+          <g transform="rotate(14 106 64)"><rect x="102" y="60" width="8" height="60" rx="4"/></g>
+        </g>
+        <path d="M22 70 C22 42 38 18 64 18 C90 18 106 42 106 70 Z" fill="var(--octo-green)"/>
+        <rect x="44" y="38" width="11" height="18" rx="1.5" fill="var(--octo-red)"/>
+        <rect x="73" y="38" width="11" height="18" rx="1.5" fill="var(--octo-red)"/>
+      </svg>
+      <span class="wordmark">octomon</span>
+    </a>
+    <input type="checkbox" id="menu" class="menu-toggle" hidden>
+    <label for="menu" class="menu-btn" aria-label="menu">&#9776;</label>
+    <nav class="links" aria-label="site">
+      <a href="/#install">install</a>
+      <a href="/howto">how to</a>
+      <a href="/#features">features</a>
+      <a href="/#video">video</a>
+      <a href="/blog/">blog</a>
+      <a href="/changelog">changelog</a>
+      <a href="/understand">faq</a>
+      <a href="/understand#glossary">glossary</a>
+      <a href="/privacy">privacy</a>
+      <a href="https://github.com/securitypedant/octomon">github</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+  <div class="pagehead">
+    <div class="wrap">
+      <h1>Tested against real VPN clients</h1>
+      <p class="lede">Before each release, octomon is run inside Linux containers next to
+      real VPN clients, and what it says about each tunnel is checked: that it names the
+      client, that the location label has the right shape, and that the location it files
+      the network under stays the same when the tunnel reconnects, lands on another server
+      or gets a new address. These are the results.</p>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <div class="post">
+        <p>The rig is in the repository under
+        <a href="https://github.com/securitypedant/octomon/tree/main/testing/vpn-rig"><code>testing/vpn-rig/</code></a>: one
+        container per client, the rig's own WireGuard and OpenVPN servers for the
+        self-contained cases, a real account for the rest. It is run by hand; it is not
+        part of the automated test suite, which is why the result is published here
+        rather than in a badge. What is published is the outcome only: the client, the
+        device shape octomon saw, the name it gave the tunnel, and whether each check
+        held. Addresses, keys and logs from the runs stay on the machine that ran them.</p>
+        <p>What it cannot tell you: anything about macOS or Windows (the rig is Linux by
+        construction), Wi-Fi, a real home or office network underneath the tunnel, or
+        corporate clients such as Zscaler and GlobalProtect.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="v0.12.0">
+    <div class="wrap">
+      <h2>octomon 0.12.0 <span class="muted">· 8 November 2026 · 3/3 clients passed</span></h2>
+      <p class="runmeta">Linux containers on Docker Desktop (macOS host) · built from <a href="https://github.com/securitypedant/octomon/commit/0fb6643"><code>0fb6643</code></a></p>
+      <div class="card">
+        <h2>NordVPN app (NordLynx) <span class="tag pass">passed</span></h2>
+        <table>
+          <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
+          <tbody>
+<tr>
+            <td>connect (nearest)</td>
+            <td><code>nordlynx</code></td>
+            <td>NordVPN</td>
+            <td>first connection</td>
+            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>reconnect to another country</td>
+            <td><code>nordlynx</code></td>
+            <td>NordVPN</td>
+            <td>same location after reconnecting</td>
+            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h2>OpenVPN (tun) <span class="tag pass">passed</span></h2>
+        <table>
+          <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
+          <tbody>
+<tr>
+            <td>connect 1194 (pool 10.8)</td>
+            <td><code>tun0</code></td>
+            <td>OpenVPN</td>
+            <td>first connection</td>
+            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>reconnect 1195 (pool 10.9, another server)</td>
+            <td><code>tun0</code></td>
+            <td>OpenVPN</td>
+            <td>same location after reconnecting</td>
+            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h2>WireGuard (wg-quick, kernel device) <span class="tag pass">passed</span></h2>
+        <table>
+          <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
+          <tbody>
+<tr>
+            <td>connect wg0</td>
+            <td><code>wg0</code></td>
+            <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
+            <td>first connection</td>
+            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>reconnect wg0</td>
+            <td><code>wg0</code></td>
+            <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
+            <td>same location after reconnecting</td>
+            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>connect wg1 (second address)</td>
+            <td><code>wg1</code></td>
+            <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
+            <td>a new location, as designed</td>
+            <td class="checks"><span class="ok">✓</span> named · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2025–2026 Simon Thorpe · MIT or Apache-2.0</span>
+    <a href="/blog/">blog</a>
+    <a href="/changelog">changelog</a>
+    <a href="/privacy">privacy</a>
+    <a href="https://github.com/securitypedant/octomon">github.com/securitypedant/octomon</a>
+    <a href="https://crates.io/crates/octomon">crates.io/crates/octomon</a>
+    <a href="https://www.youtube.com/watch?v=ECwBaSvUwfk">intro video</a>
+  </div>
+</footer>
+
+</body>
+</html>
