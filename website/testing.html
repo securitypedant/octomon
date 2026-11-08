@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>octomon: tested against real VPN clients</title>
-<meta name="description" content="What octomon says about real VPN clients, checked before each release: NordVPN app, OpenVPN, Cloudflare WARP, WireGuard against octomon 0.12.0.">
+<meta name="description" content="What octomon says about real VPN clients, checked before each release: Fault injection, NordVPN app, OpenVPN, Tailscale, Unnamed tunnel, Cloudflare WARP, WireGuard against octomon 0.12.0.">
 <meta name="author" content="Simon Thorpe">
 <link rel="canonical" href="https://octomon.dev/testing">
 <link rel="alternate" type="application/rss+xml" title="octomon blog" href="/blog/feed.xml">
@@ -411,8 +411,56 @@
 
   <section id="v0.12.0">
     <div class="wrap">
-      <h2>octomon 0.12.0 <span class="muted">· 8 November 2026 · 4/4 clients passed</span></h2>
-      <p class="runmeta">Linux containers on Docker Desktop (macOS host) · built from <a href="https://github.com/securitypedant/octomon/commit/fd27701"><code>fd27701</code></a></p>
+      <h2>octomon 0.12.0 <span class="muted">· 8 November 2026 · 7/7 clients passed</span></h2>
+      <p class="runmeta">Linux containers on Docker Desktop (macOS host) · built from <a href="https://github.com/securitypedant/octomon/commit/e227e1c"><code>e227e1c</code></a></p>
+      <div class="card">
+        <h3>Fault injection (no VPN) <span class="tag pass">passed</span></h3>
+        <table>
+          <thead><tr><th>what was broken</th><th>what octomon said</th><th>checks</th></tr></thead>
+          <tbody>
+<tr>
+            <td>nothing wrong, long enough to learn the normal (5 healthy minutes)</td>
+            <td>healthy <span class="muted">(exit 0)</span></td>
+            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> healthy · <span class="ok">✓</span> exit 0 · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>15% packet loss on the link</td>
+            <td>problems: gateway / LAN <span class="muted">(exit 1)</span></td>
+            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> noticed · <span class="ok">✓</span> gateway flagged · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>250 ms added to everything</td>
+            <td>problems: gateway / LAN <span class="muted">(exit 1)</span></td>
+            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> noticed · <span class="ok">✓</span> gateway flagged · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>DNS dropped, everything else fine</td>
+            <td>problems: DNS, web blocked, ping works <span class="muted">(exit 1)</span></td>
+            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> noticed · <span class="ok">✓</span> cause · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>web (80/443) rejected, ping and DNS fine</td>
+            <td>problems: web filtered <span class="muted">(exit 1)</span></td>
+            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> noticed · <span class="ok">✓</span> cause · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>outbound ICMP dropped, TCP and DNS fine</td>
+            <td>healthy: gateway / LAN <span class="muted">(exit 0)</span></td>
+            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> not called down · <span class="ok">✓</span> web still ok · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>nothing leaves the LAN</td>
+            <td>problems: internet <span class="muted">(exit 1)</span></td>
+            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> noticed · <span class="ok">✓</span> exit non-zero · <span class="ok">✓</span> cause · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>captive portal answers every HTTP request</td>
+            <td>problems: captive portal <span class="muted">(exit 1)</span></td>
+            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> noticed · <span class="ok">✓</span> cause · <span class="ok">✓</span> clean log</td>
+          </tr>
+          </tbody>
+        </table>
+      </div>
       <div class="card">
         <h3>NordVPN app (NordLynx) <span class="tag pass">passed</span></h3>
         <table>
@@ -451,6 +499,64 @@
             <td>reconnect 1195 (pool 10.9, another server)</td>
             <td><code>tun0</code></td>
             <td>OpenVPN</td>
+            <td>same location after reconnecting</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h3>Tailscale (mesh client beside a WireGuard tunnel) <span class="tag pass">passed</span></h3>
+        <table>
+          <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
+          <tbody>
+<tr>
+            <td>tailscale up (mesh only)</td>
+            <td><code>tailscale0</code></td>
+            <td><span class="muted">no tunnel: the LAN itself</span></td>
+            <td>first connection</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>WireGuard tunnel beside the resident Tailscale</td>
+            <td><code>wg0</code></td>
+            <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
+            <td>a new location, as designed</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>reconnect the WireGuard tunnel</td>
+            <td><code>wg0</code></td>
+            <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
+            <td>same location after reconnecting</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>WireGuard down, Tailscale stays</td>
+            <td><code>tailscale0</code></td>
+            <td><span class="muted">no tunnel: the LAN itself</span></td>
+            <td>back to the first location</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h3>Unnamed tunnel (plain GRE, no client) <span class="tag pass">passed</span></h3>
+        <table>
+          <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
+          <tbody>
+<tr>
+            <td>GRE tunnel up (10.77.0.2)</td>
+            <td><code>gre1</code></td>
+            <td>unidentified VPN / tunnel</td>
+            <td>first connection</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>re-created with another address (10.77.0.6)</td>
+            <td><code>gre1</code></td>
+            <td>unidentified VPN / tunnel</td>
             <td>same location after reconnecting</td>
             <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
           </tr>

@@ -4,9 +4,175 @@
       "octomon": "0.12.0",
       "date": "2026-11-08",
       "host": "Linux containers on Docker Desktop (macOS host)",
-      "commit": "fd27701",
+      "commit": "e227e1c",
       "dirty": false,
       "clients": [
+        {
+          "name": "faults",
+          "status": "pass",
+          "phases": [
+            {
+              "name": "nothing wrong, long enough to learn the normal (5 healthy minutes)",
+              "pass": true,
+              "device": "eth0",
+              "recognised_as": "",
+              "medium": "Ethernet (wired)",
+              "label_has_address": true,
+              "key": "first",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [],
+              "checks": {
+                "key": true,
+                "healthy": true,
+                "exit 0": true,
+                "clean_log": true
+              }
+            },
+            {
+              "name": "15% packet loss on the link",
+              "pass": true,
+              "device": "eth0",
+              "recognised_as": "",
+              "medium": "Ethernet (wired)",
+              "label_has_address": true,
+              "key": "same",
+              "status": "problems",
+              "exit_code": 1,
+              "causes": [
+                "gateway"
+              ],
+              "checks": {
+                "key": true,
+                "noticed": true,
+                "gateway flagged": true,
+                "clean_log": true
+              }
+            },
+            {
+              "name": "250 ms added to everything",
+              "pass": true,
+              "device": "eth0",
+              "recognised_as": "",
+              "medium": "Ethernet (wired)",
+              "label_has_address": true,
+              "key": "same",
+              "status": "problems",
+              "exit_code": 1,
+              "causes": [
+                "gateway"
+              ],
+              "checks": {
+                "key": true,
+                "noticed": true,
+                "gateway flagged": true,
+                "clean_log": true
+              }
+            },
+            {
+              "name": "DNS dropped, everything else fine",
+              "pass": true,
+              "device": "eth0",
+              "recognised_as": "",
+              "medium": "Ethernet (wired)",
+              "label_has_address": true,
+              "key": "same",
+              "status": "problems",
+              "exit_code": 1,
+              "causes": [
+                "dns",
+                "http-blocked"
+              ],
+              "checks": {
+                "key": true,
+                "noticed": true,
+                "cause": true,
+                "clean_log": true
+              }
+            },
+            {
+              "name": "web (80/443) rejected, ping and DNS fine",
+              "pass": true,
+              "device": "eth0",
+              "recognised_as": "",
+              "medium": "Ethernet (wired)",
+              "label_has_address": true,
+              "key": "same",
+              "status": "problems",
+              "exit_code": 1,
+              "causes": [
+                "web-filtered"
+              ],
+              "checks": {
+                "key": true,
+                "noticed": true,
+                "cause": true,
+                "clean_log": true
+              }
+            },
+            {
+              "name": "outbound ICMP dropped, TCP and DNS fine",
+              "pass": true,
+              "device": "eth0",
+              "recognised_as": "",
+              "medium": "Ethernet (wired)",
+              "label_has_address": true,
+              "key": "same",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [
+                "gateway"
+              ],
+              "checks": {
+                "key": true,
+                "not called down": true,
+                "web still ok": true,
+                "clean_log": true
+              }
+            },
+            {
+              "name": "nothing leaves the LAN",
+              "pass": true,
+              "device": "eth0",
+              "recognised_as": "",
+              "medium": "Ethernet (wired)",
+              "label_has_address": true,
+              "key": "same",
+              "status": "problems",
+              "exit_code": 1,
+              "causes": [
+                "internet"
+              ],
+              "checks": {
+                "key": true,
+                "noticed": true,
+                "exit non-zero": true,
+                "cause": true,
+                "clean_log": true
+              }
+            },
+            {
+              "name": "captive portal answers every HTTP request",
+              "pass": true,
+              "device": "eth0",
+              "recognised_as": "",
+              "medium": "Ethernet (wired)",
+              "label_has_address": true,
+              "key": "same",
+              "status": "problems",
+              "exit_code": 1,
+              "causes": [
+                "captive-portal"
+              ],
+              "checks": {
+                "key": true,
+                "noticed": true,
+                "cause": true,
+                "clean_log": true
+              }
+            }
+          ]
+        },
         {
           "name": "nordvpn",
           "status": "pass",
@@ -19,6 +185,12 @@
               "medium": "Tunnel (VPN)",
               "label_has_address": false,
               "key": "first",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [
+                "destination",
+                "vpn-caveat"
+              ],
               "checks": {
                 "name": true,
                 "label": true,
@@ -34,6 +206,9 @@
               "medium": "Tunnel (VPN)",
               "label_has_address": false,
               "key": "same",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [],
               "checks": {
                 "name": true,
                 "label": true,
@@ -55,6 +230,9 @@
               "medium": "Tunnel (VPN)",
               "label_has_address": false,
               "key": "first",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [],
               "checks": {
                 "name": true,
                 "label": true,
@@ -70,6 +248,133 @@
               "medium": "Tunnel (VPN)",
               "label_has_address": false,
               "key": "same",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [],
+              "checks": {
+                "name": true,
+                "label": true,
+                "key": true,
+                "clean_log": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "tailscale",
+          "status": "pass",
+          "phases": [
+            {
+              "name": "tailscale up (mesh only)",
+              "pass": true,
+              "device": "tailscale0",
+              "recognised_as": "",
+              "medium": "Ethernet (wired)",
+              "label_has_address": true,
+              "key": "first",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [],
+              "checks": {
+                "name": true,
+                "label": true,
+                "bypassed": true,
+                "key": true,
+                "clean_log": true
+              }
+            },
+            {
+              "name": "WireGuard tunnel beside the resident Tailscale",
+              "pass": true,
+              "device": "wg0",
+              "recognised_as": "WireGuard",
+              "medium": "Tunnel (VPN)",
+              "label_has_address": true,
+              "key": "different",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [],
+              "checks": {
+                "name": true,
+                "label": true,
+                "bypassed": true,
+                "key": true,
+                "clean_log": true
+              }
+            },
+            {
+              "name": "reconnect the WireGuard tunnel",
+              "pass": true,
+              "device": "wg0",
+              "recognised_as": "WireGuard",
+              "medium": "Tunnel (VPN)",
+              "label_has_address": true,
+              "key": "same",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [],
+              "checks": {
+                "name": true,
+                "label": true,
+                "bypassed": true,
+                "key": true,
+                "clean_log": true
+              }
+            },
+            {
+              "name": "WireGuard down, Tailscale stays",
+              "pass": true,
+              "device": "tailscale0",
+              "recognised_as": "",
+              "medium": "Ethernet (wired)",
+              "label_has_address": true,
+              "key": "restored",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [],
+              "checks": {
+                "name": true,
+                "label": true,
+                "bypassed": true,
+                "key": true,
+                "clean_log": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "unnamed",
+          "status": "pass",
+          "phases": [
+            {
+              "name": "GRE tunnel up (10.77.0.2)",
+              "pass": true,
+              "device": "gre1",
+              "recognised_as": "unidentified VPN / tunnel",
+              "medium": "Tunnel (VPN)",
+              "label_has_address": false,
+              "key": "first",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [],
+              "checks": {
+                "name": true,
+                "label": true,
+                "key": true,
+                "clean_log": true
+              }
+            },
+            {
+              "name": "re-created with another address (10.77.0.6)",
+              "pass": true,
+              "device": "gre1",
+              "recognised_as": "unidentified VPN / tunnel",
+              "medium": "Tunnel (VPN)",
+              "label_has_address": false,
+              "key": "same",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [],
               "checks": {
                 "name": true,
                 "label": true,
@@ -91,6 +396,9 @@
               "medium": "Ethernet (wired)",
               "label_has_address": false,
               "key": "first",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [],
               "checks": {
                 "name": true,
                 "label": true,
@@ -106,6 +414,9 @@
               "medium": "Ethernet (wired)",
               "label_has_address": false,
               "key": "same",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [],
               "checks": {
                 "name": true,
                 "label": true,
@@ -121,6 +432,9 @@
               "medium": "Ethernet (wired)",
               "label_has_address": false,
               "key": "same",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [],
               "checks": {
                 "name": true,
                 "label": true,
@@ -142,6 +456,9 @@
               "medium": "Tunnel (VPN)",
               "label_has_address": true,
               "key": "first",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [],
               "checks": {
                 "name": true,
                 "label": true,
@@ -157,6 +474,9 @@
               "medium": "Tunnel (VPN)",
               "label_has_address": true,
               "key": "same",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [],
               "checks": {
                 "name": true,
                 "label": true,
@@ -172,6 +492,9 @@
               "medium": "Tunnel (VPN)",
               "label_has_address": true,
               "key": "different",
+              "status": "healthy",
+              "exit_code": 0,
+              "causes": [],
               "checks": {
                 "name": true,
                 "label": true,
