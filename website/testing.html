@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>octomon: tested against real VPN clients</title>
-<meta name="description" content="What octomon says about real VPN clients, checked before each release: Fault injection, NordVPN app, OpenVPN, Tailscale, Unnamed tunnel, Cloudflare WARP, WireGuard against octomon 0.12.0.">
+<meta name="description" content="What octomon 0.12.0 was checked for before release: Fault injection, NordVPN app, OpenVPN, Tailscale, Unnamed tunnel, Cloudflare WARP, WireGuard, 24 phases, 101 checks.">
 <meta name="author" content="Simon Thorpe">
 <link rel="canonical" href="https://octomon.dev/testing">
 <link rel="alternate" type="application/rss+xml" title="octomon blog" href="/blog/feed.xml">
@@ -17,14 +17,14 @@
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://octomon.dev/testing">
 <meta property="og:title" content="octomon: tested against real VPN clients">
-<meta property="og:description" content="Real VPN clients in containers, checked against octomon 0.12.0: naming, labels and location identity across reconnects.">
+<meta property="og:description" content="Real VPN clients in containers, checked against octomon 0.12.0: naming, labels, location identity across reconnects, and the analysis under injected faults.">
 <meta property="og:image" content="https://octomon.dev/images/octomon-og-card.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="octomon: tested against real VPN clients">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="octomon: tested against real VPN clients">
-<meta name="twitter:description" content="Real VPN clients in containers, checked against octomon 0.12.0: naming, labels and location identity across reconnects.">
+<meta name="twitter:description" content="Real VPN clients in containers, checked against octomon 0.12.0: naming, labels, location identity across reconnects, and the analysis under injected faults.">
 <meta name="twitter:image" content="https://octomon.dev/images/octomon-og-card.png">
 <link rel="stylesheet" href="/tokens.css">
 <style>
@@ -288,8 +288,14 @@
     .wordmark { font-size: 1.15rem; }
   }
 
-  .runmeta { font-family: var(--octo-mono); font-size: 0.8rem; color: var(--octo-muted); margin: -6px 0 10px; }
+  .runmeta { font-family: var(--octo-mono); font-size: 0.8rem; color: var(--octo-muted); margin: -6px 0 14px; }
   .muted { color: var(--octo-muted); font-weight: 400; font-size: 0.85em; }
+  .post h3 { margin: 0 0 8px; font-size: 1.05rem; }
+  dl.areas { margin: 0 0 12px; display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; }
+  dl.areas dt { font-family: var(--octo-mono); font-weight: 700; color: var(--octo-green); font-size: 0.8rem; padding-top: 2px; }
+  dl.areas dd { margin: 0; font-size: 0.92rem; }
+  dl.areas dd ul { margin: 4px 0 0; padding-left: 1.2em; }
+  dl.areas dd li { margin: 1px 0; }
   .card { padding: 12px 16px; margin: 0 0 10px; }
   .card h3 { margin: 0 0 4px; font-size: 1rem; }
   .card p { margin: 4px 0; font-size: 0.9rem; }
@@ -305,23 +311,15 @@
   .card td:nth-child(3) { white-space: nowrap; }
   .card td.checks { font-family: var(--octo-mono); font-size: 0.78rem; white-space: nowrap; }
   .ok { color: var(--octo-green); } .bad { color: var(--octo-red); }
-  details.run { border-top: 1px solid var(--octo-line); padding: 10px 0 4px; }
-  details.run:last-of-type { border-bottom: 1px solid var(--octo-line); }
-  details.run summary { cursor: pointer; font-weight: 700; font-size: 1.05rem; list-style: none; padding: 2px 0; }
-  details.run summary::-webkit-details-marker { display: none; }
-  details.run summary::before { content: "▸"; display: inline-block; width: 1.1em; color: var(--octo-muted); }
-  details.run[open] summary::before { content: "▾"; }
-  details.run[open] summary { margin-bottom: 10px; }
-  details.run .runmeta { margin: 0 0 10px 1.1em; }
-  details.run .card { margin-left: 1.1em; }
   @media (max-width: 700px) {
+    dl.areas { display: block; }
+    dl.areas dd { margin: 0 0 8px; }
     .card table, .card thead, .card tbody, .card tr, .card td { display: block; }
     .card thead { display: none; }
     .card td { border-bottom: 0; padding: 2px 0; }
     .card tr { border-bottom: 1px solid var(--octo-line); padding: 6px 0; }
     .card tr:last-child { border-bottom: 0; }
     .card td.checks, .card td:nth-child(3) { white-space: normal; }
-    details.run .runmeta, details.run .card { margin-left: 0; }
   }
 </style>
 <script type="application/ld+json">
@@ -390,29 +388,32 @@
     <div class="wrap">
       <h1>Tested against real VPN clients</h1>
       <p class="lede">Before each release, octomon is run inside Linux containers next to
-      real VPN clients to check what it says about each tunnel.</p>
+      real VPN clients to check what it says about each tunnel. This page is the record for the current release.</p>
     </div>
   </div>
 
-  <section>
+  <section id="v0.12.0">
     <div class="wrap">
+      <h2>octomon 0.12.0 <span class="muted">· tested 8 November 2026</span></h2>
+      <p class="runmeta">7 clients · 24 phases · 101 checks · <span class="ok">every check held</span> · Linux containers on Docker Desktop (macOS host) · built from <a href="https://github.com/securitypedant/octomon/commit/e227e1c"><code>e227e1c</code></a></p>
       <div class="post">
-        <p>The rig is in the repository under
-        <a href="https://github.com/securitypedant/octomon/tree/main/testing/vpn-rig"><code>testing/vpn-rig/</code></a> and has one
-        container per client with the rig's own WireGuard, OpenVPN and GRE servers for the
-        self-contained cases and real accounts for the others. One client has no VPN at
-        all and breaks its own network on purpose, to check what the analysis says. It is run by hand and not
-        part of the automated test suite. What is published is the outcome only: the client, the
-        device shape octomon saw, the name it gave the tunnel, and whether each check
-        held.</p>
+        <h3>What this release was checked for</h3>
+        <dl class="areas">
+          <dt>Tunnel naming</dt><dd>what octomon calls each tunnel, from its device type, address blocks and the running client: NordVPN, OpenVPN, WireGuard, unidentified VPN / tunnel, Cloudflare WARP.</dd>
+          <dt>Location labels</dt><dd>the label a location gets under each tunnel, and whether it carries the tunnel address (WireGuard) or not (clients that hand out a new address per connection).</dd>
+          <dt>Location identity</dt><dd>that a tunnel keeps one learned location across reconnects, other servers, new leases and new device registrations (7 phases), gets a new one only where that is by design (2), and that the network underneath comes back as itself when the tunnel drops (1).</dd>
+          <dt>Resident mesh clients</dt><dd>a mesh client with only its own routes (Tailscale) is listed as a bypassed tunnel, does not become the location, and does not lend its name to a VPN brought up beside it.</dd>
+          <dt>Analysis under faults</dt><dd>a container with no VPN breaks its own network one way per phase, and the analysis has to notice, name the right cause, keep the same location throughout and never call a usable network down:<ul><li>nothing wrong, long enough to learn the normal (5 healthy minutes)</li><li>15% packet loss on the link</li><li>250 ms added to everything</li><li>DNS dropped, everything else fine</li><li>web (80/443) rejected, ping and DNS fine</li><li>outbound ICMP dropped, TCP and DNS fine</li><li>nothing leaves the LAN</li><li>captive portal answers every HTTP request</li></ul></dd>
+          <dt>Stability</dt><dd>no panic and no collector restart in any phase, read from octomon's own error log.</dd>
+        </dl>
+        <p>Clients: Fault injection (no VPN), NordVPN app (NordLynx), OpenVPN (tun), Tailscale (mesh client beside a WireGuard tunnel), Unnamed tunnel (plain GRE, no client), Cloudflare WARP (consumer), WireGuard (wg-quick, kernel device).</p>
       </div>
     </div>
   </section>
 
-  <section id="v0.12.0">
+  <section>
     <div class="wrap">
-      <h2>octomon 0.12.0 <span class="muted">· 8 November 2026 · 7/7 clients passed</span></h2>
-      <p class="runmeta">Linux containers on Docker Desktop (macOS host) · built from <a href="https://github.com/securitypedant/octomon/commit/e227e1c"><code>e227e1c</code></a></p>
+      <h2>The detail</h2>
       <div class="card">
         <h3>Fault injection (no VPN) <span class="tag pass">passed</span></h3>
         <table>
@@ -564,7 +565,7 @@
         </table>
       </div>
       <div class="card">
-        <h3>Cloudflare WARP <span class="tag pass">passed</span></h3>
+        <h3>Cloudflare WARP (consumer) <span class="tag pass">passed</span></h3>
         <table>
           <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
           <tbody>
@@ -624,6 +625,20 @@
     </div>
   </section>
 
+  <section>
+    <div class="wrap">
+      <div class="post">
+        <p>The rig is in the repository under
+        <a href="https://github.com/securitypedant/octomon/tree/main/testing/vpn-rig"><code>testing/vpn-rig/</code></a> and has one
+        container per client with the rig's own WireGuard, OpenVPN and GRE servers for the
+        self-contained cases and real accounts for the others. One client has no VPN at
+        all and breaks its own network on purpose, to check what the analysis says. It is run by hand and not
+        part of the automated test suite. What is published is the outcome only: the client, the
+        device shape octomon saw, the name it gave the tunnel, and whether each check
+        held. Only the latest run is kept; a run against a new release replaces this page.</p>
+      </div>
+    </div>
+  </section>
 </main>
 
 <footer>

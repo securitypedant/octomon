@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # testing/vpn-rig/publish.sh
 #
-# Folds out/report.json (the allow-listed summary run.sh writes) into the
-# website's record of rig runs, website/testing/vpn-rig.json, replacing any
-# earlier run for the same octomon version, newest first. Then renders the
-# page. Review `git diff website/testing` before committing: that file is
-# what the world sees.
+# Writes out/report.json (the allow-listed summary run.sh writes) as the
+# website's record of the latest rig run, website/testing/vpn-rig.json,
+# replacing whatever run was there: the page is a statement of what the
+# current release was checked for, not a history. Then renders the page.
+# Review `git diff website/testing` before committing: that file is what the
+# world sees.
 set -eu
 cd "$(dirname "$0")"
 REPO=$(git rev-parse --show-toplevel)
@@ -22,15 +23,14 @@ clean=$(jq '{octomon, date, host, commit, dirty,
     clients: [.clients[] | {name, status}
         + (if .reason then {reason} else {} end)
         + (if .phases then {phases: [.phases[] | {name, pass}
+            + (if .skipped then {skipped} else {} end)
             + (if .device then {device, recognised_as, medium, label_has_address, key, status, exit_code, causes, checks} else {} end)
             + (if .reason then {reason} else {} end)]} else {} end)]}' "$report")
 
 mkdir -p "$(dirname "$SITE")"
-[ -f "$SITE" ] || echo '{"runs": []}' >"$SITE"
 version=$(jq -r .octomon "$report")
-jq --argjson run "$clean" --arg v "$version" \
-    '.runs = ([$run] + [.runs[] | select(.octomon != $v)])' "$SITE" >"$SITE.tmp"
+jq -n --argjson run "$clean" '{run: $run}' >"$SITE.tmp"
 mv "$SITE.tmp" "$SITE"
-echo "recorded octomon $version in website/testing/vpn-rig.json ($(jq '.runs | length' "$SITE") runs)"
+echo "recorded octomon $version in website/testing/vpn-rig.json"
 
 (cd "$REPO" && node tools/testing.mjs)
