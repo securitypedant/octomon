@@ -111,7 +111,9 @@ function areas() {
       `that a tunnel keeps one learned location across reconnects, other servers, new leases and new device registrations (${n("same")} phases), gets a new one only where that is by design (${n("different")}), and that the network underneath comes back as itself when the tunnel drops (${n("restored")}).`,
     ]);
   }
-  const bystanders = withCheck("bypassed");
+  // The crowded client checks this too, but the mesh client in it is the
+  // one with a client of its own.
+  const bystanders = withCheck("bypassed").filter((c) => c !== "crowded");
   if (bystanders.length) {
     out.push([
       "Resident mesh clients",

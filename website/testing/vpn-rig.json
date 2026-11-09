@@ -1,11 +1,171 @@
 {
   "run": {
-    "octomon": "0.12.0",
-    "date": "2026-11-08",
+    "octomon": "0.12.1",
+    "date": "2026-11-09",
     "host": "Linux containers on Docker Desktop (macOS host)",
-    "commit": "e227e1c",
+    "commit": "92490d9",
     "dirty": false,
     "clients": [
+      {
+        "name": "crowded",
+        "status": "pass",
+        "phases": [
+          {
+            "name": "every daemon resident (nordvpnd, warp-svc, tailscaled), nothing connected",
+            "pass": true,
+            "device": "eth0",
+            "recognised_as": "",
+            "medium": "Ethernet (wired)",
+            "label_has_address": true,
+            "key": "first",
+            "status": "healthy",
+            "exit_code": 0,
+            "causes": [],
+            "checks": {
+              "name": true,
+              "label": true,
+              "bypassed": true,
+              "key": true,
+              "clean_log": true
+            }
+          },
+          {
+            "name": "NordVPN connected, WARP and Tailscale daemons resident",
+            "pass": true,
+            "device": "nordlynx",
+            "recognised_as": "NordVPN",
+            "medium": "Tunnel (VPN)",
+            "label_has_address": false,
+            "key": "different",
+            "status": "healthy",
+            "exit_code": 0,
+            "causes": [
+              "destination",
+              "vpn-caveat"
+            ],
+            "checks": {
+              "name": true,
+              "label": true,
+              "bypassed": true,
+              "key": true,
+              "clean_log": true
+            }
+          },
+          {
+            "name": "WARP connected, NordVPN and Tailscale daemons resident",
+            "pass": true,
+            "device": "CloudflareWARP",
+            "recognised_as": "Cloudflare WARP",
+            "medium": "Ethernet (wired)",
+            "label_has_address": false,
+            "key": "different",
+            "status": "healthy",
+            "exit_code": 0,
+            "causes": [],
+            "checks": {
+              "name": true,
+              "label": true,
+              "bypassed": true,
+              "key": true,
+              "clean_log": true
+            }
+          },
+          {
+            "name": "WARP connected over a wg-quick tunnel: two tunnels up, WARP carrying the traffic",
+            "pass": true,
+            "device": "CloudflareWARP",
+            "recognised_as": "Cloudflare WARP",
+            "medium": "Tunnel (VPN)",
+            "label_has_address": false,
+            "key": "same",
+            "status": "healthy",
+            "exit_code": 0,
+            "causes": [],
+            "checks": {
+              "name": true,
+              "label": true,
+              "key": true,
+              "the WireGuard tunnel beside it is listed, as WireGuard": true,
+              "clean_log": true
+            }
+          },
+          {
+            "name": "NordVPN connected, then WARP asked to connect too (on Linux WARP gives up: Nord's routing swallows its control traffic)",
+            "pass": true,
+            "device": "nordlynx",
+            "recognised_as": "NordVPN",
+            "medium": "Tunnel (VPN)",
+            "label_has_address": false,
+            "key": "different",
+            "status": "healthy",
+            "exit_code": 0,
+            "causes": [],
+            "checks": {
+              "name": true,
+              "label": true,
+              "key": true,
+              "clean_log": true
+            }
+          },
+          {
+            "name": "wg-quick tunnel with three providers' daemons resident (none of them owns it)",
+            "pass": true,
+            "device": "wg0",
+            "recognised_as": "WireGuard",
+            "medium": "Tunnel (VPN)",
+            "label_has_address": true,
+            "key": "different",
+            "status": "healthy",
+            "exit_code": 0,
+            "causes": [],
+            "checks": {
+              "name": true,
+              "label": true,
+              "bypassed": true,
+              "key": true,
+              "clean_log": true
+            }
+          },
+          {
+            "name": "OpenVPN with three providers' daemons resident",
+            "pass": true,
+            "device": "tun0",
+            "recognised_as": "OpenVPN",
+            "medium": "Tunnel (VPN)",
+            "label_has_address": false,
+            "key": "different",
+            "status": "healthy",
+            "exit_code": 0,
+            "causes": [],
+            "checks": {
+              "name": true,
+              "label": true,
+              "bypassed": true,
+              "key": true,
+              "clean_log": true
+            }
+          },
+          {
+            "name": "Tailscale mesh alone again: the resident daemons name nothing",
+            "pass": true,
+            "device": "eth0",
+            "recognised_as": "",
+            "medium": "Ethernet (wired)",
+            "label_has_address": true,
+            "key": "restored",
+            "status": "healthy",
+            "exit_code": 0,
+            "causes": [],
+            "checks": {
+              "name": true,
+              "label": true,
+              "bypassed": true,
+              "key": true,
+              "clean_log": true
+            }
+          }
+        ]
+      },
       {
         "name": "faults",
         "status": "pass",
@@ -39,7 +199,7 @@
             "status": "problems",
             "exit_code": 1,
             "causes": [
-              "gateway"
+              "internet"
             ],
             "checks": {
               "key": true,
@@ -79,13 +239,14 @@
             "status": "problems",
             "exit_code": 1,
             "causes": [
-              "dns",
-              "http-blocked"
+              "dns"
             ],
             "checks": {
               "key": true,
               "noticed": true,
               "cause": true,
+              "one cause, not a firewall too": true,
+              "web check says lookup": true,
               "clean_log": true
             }
           },
@@ -194,6 +355,7 @@
               "name": true,
               "label": true,
               "key": true,
+              "NordVPN's resolvers configured": true,
               "clean_log": true
             }
           },
@@ -279,6 +441,7 @@
               "label": true,
               "bypassed": true,
               "key": true,
+              "resolvers untouched": true,
               "clean_log": true
             }
           },
@@ -322,6 +485,71 @@
           },
           {
             "name": "WireGuard down, Tailscale stays",
+            "pass": true,
+            "device": "tailscale0",
+            "recognised_as": "",
+            "medium": "Ethernet (wired)",
+            "label_has_address": true,
+            "key": "restored",
+            "status": "healthy",
+            "exit_code": 0,
+            "causes": [],
+            "checks": {
+              "name": true,
+              "label": true,
+              "bypassed": true,
+              "key": true,
+              "clean_log": true
+            }
+          },
+          {
+            "name": "MagicDNS on: Tailscale takes over the system resolver",
+            "pass": true,
+            "device": "tailscale0",
+            "recognised_as": "",
+            "medium": "Ethernet (wired)",
+            "label_has_address": true,
+            "key": "same",
+            "status": "healthy",
+            "exit_code": 0,
+            "causes": [],
+            "checks": {
+              "name": true,
+              "label": true,
+              "bypassed": true,
+              "key": true,
+              "resolver is MagicDNS": true,
+              "DNS still works": true,
+              "clean_log": true
+            }
+          },
+          {
+            "name": "WireGuard tunnel beside Tailscale's resolver (wg-quick's rule swallows the v4 route to MagicDNS)",
+            "pass": true,
+            "device": "wg0",
+            "recognised_as": "WireGuard",
+            "medium": "Tunnel (VPN)",
+            "label_has_address": true,
+            "key": "different",
+            "status": "problems",
+            "exit_code": 1,
+            "causes": [
+              "local-dns",
+              "vpn-caveat"
+            ],
+            "checks": {
+              "name": true,
+              "label": true,
+              "bypassed": true,
+              "key": true,
+              "resolver is MagicDNS": true,
+              "stalled resolver is DNS, not a firewall": true,
+              "the dead first resolver is named": true,
+              "clean_log": true
+            }
+          },
+          {
+            "name": "WireGuard down again",
             "pass": true,
             "device": "tailscale0",
             "recognised_as": "",
@@ -384,6 +612,105 @@
         ]
       },
       {
+        "name": "warp-team",
+        "status": "pass",
+        "phases": [
+          {
+            "name": "connect, enrolled in the organisation (its protocol and address shape)",
+            "pass": true,
+            "device": "CloudflareWARP",
+            "recognised_as": "Cloudflare WARP",
+            "medium": "Ethernet (wired)",
+            "label_has_address": false,
+            "key": "first",
+            "status": "healthy",
+            "exit_code": 0,
+            "causes": [
+              "gateway",
+              "vpn-caveat"
+            ],
+            "checks": {
+              "name": true,
+              "label": true,
+              "key": true,
+              "one of WARP's two interface address shapes": true,
+              "WARP's resolvers configured": true,
+              "clean_log": true
+            }
+          },
+          {
+            "name": "reconnect",
+            "pass": true,
+            "device": "CloudflareWARP",
+            "recognised_as": "Cloudflare WARP",
+            "medium": "Ethernet (wired)",
+            "label_has_address": false,
+            "key": "same",
+            "status": "healthy",
+            "exit_code": 0,
+            "causes": [
+              "gateway",
+              "vpn-caveat"
+            ],
+            "checks": {
+              "name": true,
+              "label": true,
+              "key": true,
+              "one of WARP's two interface address shapes": true,
+              "WARP's resolvers configured": true,
+              "clean_log": true
+            }
+          },
+          {
+            "name": "re-register (the daemon re-enrols itself; new device identity and addresses)",
+            "pass": true,
+            "device": "CloudflareWARP",
+            "recognised_as": "Cloudflare WARP",
+            "medium": "Ethernet (wired)",
+            "label_has_address": false,
+            "key": "same",
+            "status": "healthy",
+            "exit_code": 0,
+            "causes": [
+              "gateway",
+              "vpn-caveat"
+            ],
+            "checks": {
+              "name": true,
+              "label": true,
+              "key": true,
+              "one of WARP's two interface address shapes": true,
+              "WARP's resolvers configured": true,
+              "clean_log": true
+            }
+          },
+          {
+            "name": "IPv6 removed from the device: named by the daemon and resolvers alone",
+            "pass": true,
+            "device": "CloudflareWARP",
+            "recognised_as": "Cloudflare WARP",
+            "medium": "Ethernet (wired)",
+            "label_has_address": false,
+            "key": "same",
+            "status": "healthy",
+            "exit_code": 0,
+            "causes": [
+              "gateway",
+              "vpn-caveat"
+            ],
+            "checks": {
+              "name": true,
+              "label": true,
+              "key": true,
+              "one of WARP's two interface address shapes": true,
+              "WARP's resolvers configured": true,
+              "the device has no v6 left": true,
+              "clean_log": true
+            }
+          }
+        ]
+      },
+      {
         "name": "warp",
         "status": "pass",
         "phases": [
@@ -402,6 +729,7 @@
               "name": true,
               "label": true,
               "key": true,
+              "WARP's resolvers configured": true,
               "clean_log": true
             }
           },
@@ -438,6 +766,25 @@
               "name": true,
               "label": true,
               "key": true,
+              "clean_log": true
+            }
+          },
+          {
+            "name": "IPv6 removed from the device: 172.16.0.2 alone, named by the daemon and resolvers",
+            "pass": true,
+            "device": "CloudflareWARP",
+            "recognised_as": "Cloudflare WARP",
+            "medium": "Ethernet (wired)",
+            "label_has_address": false,
+            "key": "same",
+            "status": "healthy",
+            "exit_code": 0,
+            "causes": [],
+            "checks": {
+              "name": true,
+              "label": true,
+              "key": true,
+              "the device has no v6 left": true,
               "clean_log": true
             }
           }

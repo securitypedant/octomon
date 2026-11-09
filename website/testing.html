@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>octomon: tested against real VPN clients</title>
-<meta name="description" content="What octomon 0.12.0 was checked for before release: Fault injection, NordVPN app, OpenVPN, Tailscale, Unnamed tunnel, Cloudflare WARP, WireGuard, 24 phases, 101 checks.">
+<meta name="description" content="What octomon 0.12.1 was checked for before release: Several clients installed at once, Fault injection, NordVPN app, OpenVPN, Tailscale, Unnamed tunnel, Cloudflare WARP, Cloudflare WARP, WireGuard, 40 phases, 195 checks.">
 <meta name="author" content="Simon Thorpe">
 <link rel="canonical" href="https://octomon.dev/testing">
 <link rel="alternate" type="application/rss+xml" title="octomon blog" href="/blog/feed.xml">
@@ -17,14 +17,14 @@
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://octomon.dev/testing">
 <meta property="og:title" content="octomon: tested against real VPN clients">
-<meta property="og:description" content="Real VPN clients in containers, checked against octomon 0.12.0: naming, labels, location identity across reconnects, and the analysis under injected faults.">
+<meta property="og:description" content="Real VPN clients in containers, checked against octomon 0.12.1: naming, labels, location identity across reconnects, and the analysis under injected faults.">
 <meta property="og:image" content="https://octomon.dev/images/octomon-og-card.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="octomon: tested against real VPN clients">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="octomon: tested against real VPN clients">
-<meta name="twitter:description" content="Real VPN clients in containers, checked against octomon 0.12.0: naming, labels, location identity across reconnects, and the analysis under injected faults.">
+<meta name="twitter:description" content="Real VPN clients in containers, checked against octomon 0.12.1: naming, labels, location identity across reconnects, and the analysis under injected faults.">
 <meta name="twitter:image" content="https://octomon.dev/images/octomon-og-card.png">
 <link rel="stylesheet" href="/tokens.css">
 <style>
@@ -329,7 +329,7 @@
   "@id": "https://octomon.dev/testing",
   "url": "https://octomon.dev/testing",
   "name": "octomon: tested against real VPN clients",
-  "dateModified": "2026-11-08",
+  "dateModified": "2026-11-09",
   "publisher": {
     "@type": "Organization",
     "name": "octomon",
@@ -392,21 +392,22 @@
     </div>
   </div>
 
-  <section id="v0.12.0">
+  <section id="v0.12.1">
     <div class="wrap">
-      <h2>octomon 0.12.0 <span class="muted">· tested 8 November 2026</span></h2>
-      <p class="runmeta">7 clients · 24 phases · 101 checks · <span class="ok">every check held</span> · Linux containers on Docker Desktop (macOS host) · built from <a href="https://github.com/securitypedant/octomon/commit/e227e1c"><code>e227e1c</code></a></p>
+      <h2>octomon 0.12.1 <span class="muted">· tested 9 November 2026</span></h2>
+      <p class="runmeta">9 clients · 40 phases · 195 checks · <span class="ok">every check held</span> · Linux containers on Docker Desktop (macOS host) · built from <a href="https://github.com/securitypedant/octomon/commit/92490d9"><code>92490d9</code></a></p>
       <div class="post">
         <h3>What this release was checked for</h3>
         <dl class="areas">
-          <dt>Tunnel naming</dt><dd>what octomon calls each tunnel, from its device type, address blocks and the running client: NordVPN, OpenVPN, WireGuard, unidentified VPN / tunnel, Cloudflare WARP.</dd>
+          <dt>Tunnel naming</dt><dd>what octomon calls each tunnel, from its device type, address blocks, the running client and the resolvers it configures: NordVPN, Cloudflare WARP, WireGuard, OpenVPN, unidentified VPN / tunnel.</dd>
           <dt>Location labels</dt><dd>the label a location gets under each tunnel, and whether it carries the tunnel address (WireGuard) or not (clients that hand out a new address per connection).</dd>
-          <dt>Location identity</dt><dd>that a tunnel keeps one learned location across reconnects, other servers, new leases and new device registrations (7 phases), gets a new one only where that is by design (2), and that the network underneath comes back as itself when the tunnel drops (1).</dd>
+          <dt>Location identity</dt><dd>that a tunnel keeps one learned location across reconnects, other servers, new leases and new device registrations (13 phases), gets a new one only where that is by design (8), and that the network underneath comes back as itself when the tunnel drops (3).</dd>
           <dt>Resident mesh clients</dt><dd>a mesh client with only its own routes (Tailscale) is listed as a bypassed tunnel, does not become the location, and does not lend its name to a VPN brought up beside it.</dd>
+          <dt>Several clients at once</dt><dd>one machine with NordVPN, WARP, Tailscale, wg-quick and OpenVPN installed and their daemons all resident while one tunnel at a time, or two, is connected: each tunnel is named as itself (NordVPN, Cloudflare WARP, WireGuard, OpenVPN) and no resident client lends its name to another's tunnel.</dd>
           <dt>Analysis under faults</dt><dd>a container with no VPN breaks its own network one way per phase, and the analysis has to notice, name the right cause, keep the same location throughout and never call a usable network down:<ul><li>nothing wrong, long enough to learn the normal (5 healthy minutes)</li><li>15% packet loss on the link</li><li>250 ms added to everything</li><li>DNS dropped, everything else fine</li><li>web (80/443) rejected, ping and DNS fine</li><li>outbound ICMP dropped, TCP and DNS fine</li><li>nothing leaves the LAN</li><li>captive portal answers every HTTP request</li></ul></dd>
           <dt>Stability</dt><dd>no panic and no collector restart in any phase, read from octomon's own error log.</dd>
         </dl>
-        <p>Clients: Fault injection (no VPN), NordVPN app (NordLynx), OpenVPN (tun), Tailscale (mesh client beside a WireGuard tunnel), Unnamed tunnel (plain GRE, no client), Cloudflare WARP (consumer), WireGuard (wg-quick, kernel device).</p>
+        <p>Clients: Several clients installed at once (NordVPN, WARP, Tailscale, wg-quick, OpenVPN), Fault injection (no VPN), NordVPN app (NordLynx), OpenVPN (tun), Tailscale (mesh client beside a WireGuard tunnel), Unnamed tunnel (plain GRE, no client), Cloudflare WARP (enrolled in a Zero Trust organisation), Cloudflare WARP (consumer), WireGuard (wg-quick, kernel device).</p>
       </div>
     </div>
   </section>
@@ -414,6 +415,70 @@
   <section>
     <div class="wrap">
       <h2>The detail</h2>
+      <div class="card">
+        <h3>Several clients installed at once (NordVPN, WARP, Tailscale, wg-quick, OpenVPN) <span class="tag pass">passed</span></h3>
+        <table>
+          <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
+          <tbody>
+<tr>
+            <td>every daemon resident (nordvpnd, warp-svc, tailscaled), nothing connected</td>
+            <td><code>eth0</code></td>
+            <td><span class="muted">no tunnel: the LAN itself</span></td>
+            <td>first connection</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>NordVPN connected, WARP and Tailscale daemons resident</td>
+            <td><code>nordlynx</code></td>
+            <td>NordVPN</td>
+            <td>a new location, as designed</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>WARP connected, NordVPN and Tailscale daemons resident</td>
+            <td><code>CloudflareWARP</code></td>
+            <td>Cloudflare WARP</td>
+            <td>a new location, as designed</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>WARP connected over a wg-quick tunnel: two tunnels up, WARP carrying the traffic</td>
+            <td><code>CloudflareWARP</code></td>
+            <td>Cloudflare WARP</td>
+            <td>same location after reconnecting</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> the WireGuard tunnel beside it is listed, as WireGuard · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>NordVPN connected, then WARP asked to connect too (on Linux WARP gives up: Nord's routing swallows its control traffic)</td>
+            <td><code>nordlynx</code></td>
+            <td>NordVPN</td>
+            <td>a new location, as designed</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>wg-quick tunnel with three providers' daemons resident (none of them owns it)</td>
+            <td><code>wg0</code></td>
+            <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
+            <td>a new location, as designed</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>OpenVPN with three providers' daemons resident</td>
+            <td><code>tun0</code></td>
+            <td>OpenVPN</td>
+            <td>a new location, as designed</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>Tailscale mesh alone again: the resident daemons name nothing</td>
+            <td><code>eth0</code></td>
+            <td><span class="muted">no tunnel: the LAN itself</span></td>
+            <td>back to the first location</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+          </tbody>
+        </table>
+      </div>
       <div class="card">
         <h3>Fault injection (no VPN) <span class="tag pass">passed</span></h3>
         <table>
@@ -426,7 +491,7 @@
           </tr>
 <tr>
             <td>15% packet loss on the link</td>
-            <td>problems: gateway / LAN <span class="muted">(exit 1)</span></td>
+            <td>problems: internet <span class="muted">(exit 1)</span></td>
             <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> noticed · <span class="ok">✓</span> gateway flagged · <span class="ok">✓</span> clean log</td>
           </tr>
 <tr>
@@ -436,8 +501,8 @@
           </tr>
 <tr>
             <td>DNS dropped, everything else fine</td>
-            <td>problems: DNS, web blocked, ping works <span class="muted">(exit 1)</span></td>
-            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> noticed · <span class="ok">✓</span> cause · <span class="ok">✓</span> clean log</td>
+            <td>problems: DNS <span class="muted">(exit 1)</span></td>
+            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> noticed · <span class="ok">✓</span> cause · <span class="ok">✓</span> one cause, not a firewall too · <span class="ok">✓</span> web check says lookup · <span class="ok">✓</span> clean log</td>
           </tr>
 <tr>
             <td>web (80/443) rejected, ping and DNS fine</td>
@@ -472,7 +537,7 @@
             <td><code>nordlynx</code></td>
             <td>NordVPN</td>
             <td>first connection</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> NordVPN's resolvers configured · <span class="ok">✓</span> clean log</td>
           </tr>
 <tr>
             <td>reconnect to another country</td>
@@ -516,7 +581,7 @@
             <td><code>tailscale0</code></td>
             <td><span class="muted">no tunnel: the LAN itself</span></td>
             <td>first connection</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> resolvers untouched · <span class="ok">✓</span> clean log</td>
           </tr>
 <tr>
             <td>WireGuard tunnel beside the resident Tailscale</td>
@@ -534,6 +599,27 @@
           </tr>
 <tr>
             <td>WireGuard down, Tailscale stays</td>
+            <td><code>tailscale0</code></td>
+            <td><span class="muted">no tunnel: the LAN itself</span></td>
+            <td>back to the first location</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>MagicDNS on: Tailscale takes over the system resolver</td>
+            <td><code>tailscale0</code></td>
+            <td><span class="muted">no tunnel: the LAN itself</span></td>
+            <td>same location after reconnecting</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> resolver is MagicDNS · <span class="ok">✓</span> DNS still works · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>WireGuard tunnel beside Tailscale's resolver (wg-quick's rule swallows the v4 route to MagicDNS)</td>
+            <td><code>wg0</code></td>
+            <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
+            <td>a new location, as designed</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> resolver is MagicDNS · <span class="ok">✓</span> stalled resolver is DNS, not a firewall · <span class="ok">✓</span> the dead first resolver is named · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>WireGuard down again</td>
             <td><code>tailscale0</code></td>
             <td><span class="muted">no tunnel: the LAN itself</span></td>
             <td>back to the first location</td>
@@ -565,6 +651,42 @@
         </table>
       </div>
       <div class="card">
+        <h3>Cloudflare WARP (enrolled in a Zero Trust organisation) <span class="tag pass">passed</span></h3>
+        <table>
+          <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
+          <tbody>
+<tr>
+            <td>connect, enrolled in the organisation (its protocol and address shape)</td>
+            <td><code>CloudflareWARP</code></td>
+            <td>Cloudflare WARP</td>
+            <td>first connection</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> one of WARP's two interface address shapes · <span class="ok">✓</span> WARP's resolvers configured · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>reconnect</td>
+            <td><code>CloudflareWARP</code></td>
+            <td>Cloudflare WARP</td>
+            <td>same location after reconnecting</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> one of WARP's two interface address shapes · <span class="ok">✓</span> WARP's resolvers configured · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>re-register (the daemon re-enrols itself; new device identity and addresses)</td>
+            <td><code>CloudflareWARP</code></td>
+            <td>Cloudflare WARP</td>
+            <td>same location after reconnecting</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> one of WARP's two interface address shapes · <span class="ok">✓</span> WARP's resolvers configured · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>IPv6 removed from the device: named by the daemon and resolvers alone</td>
+            <td><code>CloudflareWARP</code></td>
+            <td>Cloudflare WARP</td>
+            <td>same location after reconnecting</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> one of WARP's two interface address shapes · <span class="ok">✓</span> WARP's resolvers configured · <span class="ok">✓</span> the device has no v6 left · <span class="ok">✓</span> clean log</td>
+          </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
         <h3>Cloudflare WARP (consumer) <span class="tag pass">passed</span></h3>
         <table>
           <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
@@ -574,7 +696,7 @@
             <td><code>CloudflareWARP</code></td>
             <td>Cloudflare WARP</td>
             <td>first connection</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> WARP's resolvers configured · <span class="ok">✓</span> clean log</td>
           </tr>
 <tr>
             <td>reconnect</td>
@@ -589,6 +711,13 @@
             <td>Cloudflare WARP</td>
             <td>same location after reconnecting</td>
             <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+          </tr>
+<tr>
+            <td>IPv6 removed from the device: 172.16.0.2 alone, named by the daemon and resolvers</td>
+            <td><code>CloudflareWARP</code></td>
+            <td>Cloudflare WARP</td>
+            <td>same location after reconnecting</td>
+            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> the device has no v6 left · <span class="ok">✓</span> clean log</td>
           </tr>
           </tbody>
         </table>
