@@ -209,15 +209,40 @@ pub fn date_skew_ms(date: &str) -> Option<f64> {
     Some((now.timestamp_millis() - server.timestamp_millis()) as f64)
 }
 
+/// The reason a probe that never resolved its hostname reports. The analysis
+/// matches on it: a web check that failed here is DNS's failure, not a
+/// firewall's.
+pub const LOOKUP_FAILED: &str = "name lookup failed";
+
 /// Compress reqwest's error chains into something a status line can carry.
 fn short_reason(e: &reqwest::Error) -> String {
     if e.is_timeout() {
         "timeout".to_string()
     } else if e.is_connect() {
-        "connect failed".to_string()
+        // hyper files a failed name lookup under "connect"; its own layer in
+        // the chain says "dns error". Keeping the two apart matters: a lookup
+        // failure beside dead resolvers is one fault, a refused TCP connect
+        // beside working resolvers is another.
+        if chain_mentions_dns(e) {
+            LOOKUP_FAILED.to_string()
+        } else {
+            "connect failed".to_string()
+        }
     } else {
         "request failed".to_string()
     }
+}
+
+fn chain_mentions_dns(e: &reqwest::Error) -> bool {
+    use std::error::Error as _;
+    let mut src = e.source();
+    while let Some(s) = src {
+        if s.to_string().contains("dns error") {
+            return true;
+        }
+        src = s.source();
+    }
+    false
 }
 
 /// Probe, and on a bad answer let an independent provider arbitrate. The third

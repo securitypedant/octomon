@@ -713,6 +713,13 @@ fn inflated_vs(t: &TargetStat, normal_ms: Option<f64>) -> bool {
             .is_some_and(|(normal, mean)| crate::baseline::well_above(mean, normal))
 }
 
+/// The web check failed before it could connect: its hostname never
+/// resolved. The check goes through the system resolver like a browser does,
+/// so this is DNS seen from the application side, not a web fault.
+fn web_lookup_failed(s: &AppState) -> bool {
+    matches!(&s.http.v4, crate::app::FamilyProbe::Fail(r) if r == crate::collectors::http::LOOKUP_FAILED)
+}
+
 /// What an inflation summary compares against: the session floor when that
 /// is what showed it, else the learned normal that did.
 fn inflation_reference(t: &TargetStat, normal_ms: Option<f64>) -> String {
@@ -1584,6 +1591,12 @@ pub fn evaluate(s: &AppState) -> Triage {
                 ));
             }
         }
+        if web_lookup_failed(s) {
+            evidence.push(
+                "the web check could not resolve its hostname either — the browser's view of the same fault"
+                    .to_string(),
+            );
+        }
         // A working HTTP probe *proves* names resolve — it fetched a hostname
         // through the system resolver. When octomon's own resolver probes fail
         // anyway (link-local quirks, port-53 filtering on carrier networks),
@@ -1694,6 +1707,15 @@ pub fn evaluate(s: &AppState) -> Triage {
                             .to_string(),
                     );
                 }
+                // When the wait is long enough that the web check itself ran
+                // out of time, "internet OK" is not what the user sees.
+                let stalling = first_in_order && http_failing;
+                if stalling {
+                    evidence.insert(
+                        2,
+                        "the web check failed too: lookups are stalling on it, the internet itself is fine".to_string(),
+                    );
+                }
                 findings.push(Finding {
                     cause: Cause::LocalDns,
                     severity: Severity::Degraded,
@@ -1701,29 +1723,87 @@ pub fn evaluate(s: &AppState) -> Triage {
                     // the LAN's resolver does not. Corroboration: it is the
                     // resolver the OS puts first — the one the network gave.
                     confidence: judge(fine >= 2 || http_ok, first_in_order, dns_symptom),
-                    summary: format!(
-                        "local DNS {} down — internet OK, local names won't resolve",
-                        p.server
-                    ),
+                    summary: if stalling {
+                        format!(
+                            "local DNS {} down and asked first — every lookup waits on its timeout",
+                            p.server
+                        )
+                    } else {
+                        format!(
+                            "local DNS {} down — internet OK, local names won't resolve",
+                            p.server
+                        )
+                    },
                     evidence,
                     subject: p.server.to_string(),
                     symptom: dns_symptom,
                     since: None,
                 });
             } else {
-                findings.push(Finding {
-                    cause: Cause::Dns,
-                    severity: Severity::Info,
-                    confidence: Confidence::Weak,
-                    summary: format!(
-                        "{n_fail} of {} DNS resolvers failing — others fine",
-                        probes.len()
-                    ),
-                    evidence,
-                    subject: String::new(),
-                    symptom: false,
-                    since: None,
-                });
+                // The one the OS asks first matters more than the others:
+                // glibc waits on its timeout before the next is even tried,
+                // so with it dead every lookup is seconds late and the web
+                // check (which resolves a hostname) runs past its deadline.
+                // Found by the rig: wg-quick's policy rule swallows the v4
+                // route to Tailscale's MagicDNS, the v6 one still answers.
+                // The web check failing is what makes this a degradation;
+                // a resolver that falls back fast (macOS asks them all at
+                // once) is the footnote it always was.
+                let first_dead = probes
+                    .iter()
+                    .copied()
+                    .find(|p| failing(p) && s.netinfo.dns.first() == Some(&p.server.to_string()));
+                match first_dead {
+                    Some(p) if http_failing => {
+                        let other = probes
+                            .iter()
+                            .find(|q| !failing(q))
+                            .map(|q| q.server.to_string())
+                            .unwrap_or_default();
+                        let mut evidence = evidence.clone();
+                        evidence.insert(
+                            0,
+                            "first in resolver order: every lookup waits on its timeout before the next resolver is tried"
+                                .to_string(),
+                        );
+                        evidence.insert(
+                            1,
+                            format!(
+                                "the web check failed ({}) while {other} answers — lookups are stalling, not blocked",
+                                match &s.http.v4 {
+                                    crate::app::FamilyProbe::Fail(r) => r.as_str(),
+                                    _ => "",
+                                }
+                            ),
+                        );
+                        findings.push(Finding {
+                            cause: Cause::Dns,
+                            severity: Severity::Degraded,
+                            confidence: judge(fine >= 2, true, dns_symptom),
+                            summary: format!(
+                                "first DNS resolver {} not answering — every lookup waits on its timeout, {other} works",
+                                p.server
+                            ),
+                            evidence,
+                            subject: p.server.to_string(),
+                            symptom: dns_symptom,
+                            since: None,
+                        });
+                    }
+                    _ => findings.push(Finding {
+                        cause: Cause::Dns,
+                        severity: Severity::Info,
+                        confidence: Confidence::Weak,
+                        summary: format!(
+                            "{n_fail} of {} DNS resolvers failing — others fine",
+                            probes.len()
+                        ),
+                        evidence,
+                        subject: String::new(),
+                        symptom: false,
+                        since: None,
+                    }),
+                }
             }
         }
     }
@@ -2199,11 +2279,44 @@ pub fn evaluate(s: &AppState) -> Triage {
                 FP::Fail(r) => r.clone(),
                 _ => String::new(),
             };
+            let lookup_failed = web_lookup_failed(s);
+            // The web check never got as far as a connection: it could not
+            // resolve its hostname, or it ran out of time, which with a
+            // resolver stalling every lookup is the same thing seen later.
+            // With a DNS finding already standing above, the failure is that
+            // finding's own evidence (it cites it), not a second fault with a
+            // firewall story.
+            let dns_has_the_floor = (lookup_failed || reason == "timeout")
+                && findings.iter().any(|f| {
+                    matches!(f.cause, Cause::Dns | Cause::LocalDns) && f.severity != Severity::Info
+                });
             // A configured proxy that works turns this from a fault into how
             // this network is meant to be used.
             let proxied_ok = matches!(http.via_proxy, FP::Ok(_));
             let proxy_desc = s.proxy.as_ref().map(|p| p.describe()).unwrap_or_default();
-            if proxied_ok {
+            if dns_has_the_floor {
+                // Nothing to add.
+            } else if lookup_failed && probes.iter().any(|p| !failing(p)) {
+                // The resolvers answer octomon's direct queries, yet the
+                // system resolver path the web check (and every browser) goes
+                // through fails: a stub, nsswitch or search-domain problem on
+                // this machine rather than the network's DNS. Without DNS
+                // probe data there is no contrast to draw, and the generic
+                // finding below carries the lookup reason as it is.
+                findings.push(Finding {
+                    cause: Cause::LocalDns,
+                    severity: Severity::Degraded,
+                    confidence: judge(true, false, false),
+                    summary: "names fail to resolve for applications while the resolvers answer direct queries".to_string(),
+                    evidence: vec![
+                        format!("HTTP probe: {reason} on two independent endpoints; octomon's own queries to the resolvers succeed"),
+                        "the system resolver path (a local stub, nsswitch, search domains) is the difference".to_string(),
+                    ],
+                    subject: String::new(),
+                    symptom: false,
+                    since: None,
+                });
+            } else if proxied_ok {
                 findings.push(Finding {
                     cause: Cause::HttpBlocked,
                     severity: Severity::Info,
@@ -6425,6 +6538,145 @@ mod tests {
             }
         }
         assert!(!causes(&evaluate(&s)).contains(&Cause::HttpBlocked));
+    }
+
+    /// Found by the rig's DNS fault: with every resolver dead the web check
+    /// fails too, because it never resolves its hostname, and that failure
+    /// was read as a second fault ("proxy or firewall"). A lookup failure
+    /// beside dead resolvers is the DNS finding's own evidence. Beside
+    /// resolvers that answer octomon directly it is a fault on this machine's
+    /// resolver path, still not a firewall's.
+    #[test]
+    fn a_web_check_that_never_resolved_is_not_a_blocked_web() {
+        use crate::app::FamilyProbe;
+        let probe = |ok: bool| {
+            let mut p = crate::app::DnsProbe::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+            for _ in 0..10 {
+                p.record(if ok { Some(9.0) } else { None });
+            }
+            if !ok {
+                p.status = "timeout".into();
+            }
+            p
+        };
+        let mut s = healthy_state();
+        s.dns = vec![probe(false)];
+        s.http.v4 = FamilyProbe::Fail(crate::collectors::http::LOOKUP_FAILED.into());
+        s.http.v6 = FamilyProbe::NotApplicable;
+        let t = evaluate(&s);
+        let c = causes(&t);
+        assert_eq!(c, vec![Cause::Dns], "{c:?}");
+        let dns = &t.findings[0];
+        assert_eq!(dns.severity, Severity::Down);
+        assert!(
+            dns.evidence
+                .iter()
+                .any(|e| e.contains("web check could not resolve")),
+            "{:?}",
+            dns.evidence
+        );
+
+        // Resolvers answer octomon, the web check still cannot resolve: the
+        // machine's own resolver path, named as such.
+        s.dns = vec![probe(true)];
+        let t = evaluate(&s);
+        let c = causes(&t);
+        assert!(!c.contains(&Cause::HttpBlocked), "{c:?}");
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::LocalDns)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Degraded);
+        assert!(f.summary.contains("resolvers answer"), "{}", f.summary);
+
+        // A refused connection with names resolving is still the firewall.
+        s.http.v4 = FamilyProbe::Fail("connect failed".into());
+        assert!(causes(&evaluate(&s)).contains(&Cause::HttpBlocked));
+    }
+
+    /// From the rig, Tailscale's MagicDNS beside a wg-quick tunnel: the
+    /// first resolver in the OS order is dead (its route swallowed by the
+    /// tunnel), the second answers, and the web check times out because
+    /// every lookup waits on the first one's timeout. That is a DNS
+    /// degradation with the web timeout as its evidence, not a firewall. The
+    /// same dead resolver with the web check fine stays the footnote.
+    #[test]
+    fn a_dead_first_resolver_that_stalls_the_web_check_is_dns_not_a_firewall() {
+        use crate::app::FamilyProbe;
+        let probe = |a: IpAddr, ok: bool| {
+            let mut p = crate::app::DnsProbe::new(a);
+            for _ in 0..10 {
+                p.record(if ok { Some(10.0) } else { None });
+            }
+            if !ok {
+                p.status = "timeout".into();
+            }
+            p
+        };
+        // MagicDNS is CGNAT space, which counts as local: the local-resolver
+        // branch, worded for the stall rather than "internet OK".
+        let magic_v4: IpAddr = "100.100.100.100".parse().unwrap();
+        let magic_v6: IpAddr = "fd7a:115c:a1e0::53".parse().unwrap();
+        let mut s = healthy_state();
+        s.netinfo.dns = vec![magic_v4.to_string(), magic_v6.to_string()];
+        s.dns = vec![probe(magic_v4, false), probe(magic_v6, true)];
+        s.http.v4 = FamilyProbe::Fail("timeout".into());
+        s.http.v6 = FamilyProbe::NotApplicable;
+        let t = evaluate(&s);
+        let c = causes(&t);
+        assert!(!c.contains(&Cause::HttpBlocked), "{c:?}");
+        let f = t
+            .findings
+            .iter()
+            .find(|f| f.cause == Cause::LocalDns)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Degraded);
+        assert!(f.summary.contains("asked first"), "{}", f.summary);
+        assert!(
+            f.evidence.iter().any(|e| e.contains("stalling")),
+            "{:?}",
+            f.evidence
+        );
+
+        // A public resolver first in order and dead, another answering:
+        // the same stall, as a DNS finding.
+        let quad9: IpAddr = "9.9.9.9".parse().unwrap();
+        let cf: IpAddr = "1.1.1.1".parse().unwrap();
+        s.netinfo.dns = vec![quad9.to_string(), cf.to_string()];
+        s.dns = vec![probe(quad9, false), probe(cf, true)];
+        let t = evaluate(&s);
+        let c = causes(&t);
+        assert!(!c.contains(&Cause::HttpBlocked), "{c:?}");
+        let f = t.findings.iter().find(|f| f.cause == Cause::Dns).unwrap();
+        assert_eq!(f.severity, Severity::Degraded);
+        assert!(
+            f.summary.starts_with("first DNS resolver 9.9.9.9"),
+            "{}",
+            f.summary
+        );
+        assert!(
+            f.evidence
+                .iter()
+                .any(|e| e.contains("waits on its timeout")),
+            "{:?}",
+            f.evidence
+        );
+
+        // Web check fine: applications fall back fast enough, a footnote.
+        s.http.v4 = FamilyProbe::Ok(40.0);
+        let t = evaluate(&s);
+        let f = t.findings.iter().find(|f| f.cause == Cause::Dns).unwrap();
+        assert_eq!(f.severity, Severity::Info);
+
+        // The dead resolver second in order: the OS never waits on it.
+        s.netinfo.dns = vec![cf.to_string(), quad9.to_string()];
+        s.http.v4 = FamilyProbe::Fail("timeout".into());
+        let t = evaluate(&s);
+        let f = t.findings.iter().find(|f| f.cause == Cause::Dns).unwrap();
+        assert_eq!(f.severity, Severity::Info);
+        // ... and the timeout is then unexplained by DNS, so the web story stands.
+        assert!(causes(&t).contains(&Cause::HttpBlocked));
     }
 
     #[test]
