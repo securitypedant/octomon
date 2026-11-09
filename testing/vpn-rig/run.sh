@@ -64,8 +64,10 @@ run_client() {
     expect=$dir/expect.json
     hr; say "client: $name"
 
-    # Secrets: a client that names one is skipped without the file.
-    local secret
+    # Secrets: a client that names one ("secret") is skipped without the
+    # file. One that lists several ("secrets") runs with those present, and
+    # a phase marked "needs" with one of them is skipped when it is missing.
+    local secret s
     secret=$(jq -r '.secret // empty' "$expect")
     if [ -n "$secret" ] && [ ! -f "secrets/$secret" ]; then
         say "  skipped: secrets/$secret not present"
@@ -73,6 +75,12 @@ run_client() {
         client_result "$name" skipped "no credentials mounted"
         return 0
     fi
+    local mounts=()
+    [ -n "$secret" ] && mounts=(-v "$RIG/secrets/$secret:/run/secrets/$secret:ro")
+    for s in $(jq -r '.secrets[]?' "$expect"); do
+        if [ -f "secrets/$s" ]; then mounts+=(-v "$RIG/secrets/$s:/run/secrets/$s:ro")
+        else say "  secrets/$s not present: its phases will be skipped"; fi
+    done
 
     if ! docker build -q -t "octomon-rig-$name" "$dir" >/dev/null; then
         say "  image build failed"; failures=$((failures + 1))
@@ -95,8 +103,7 @@ run_client() {
 
     local cname=rig-$name
     docker rm -f "$cname" >/dev/null 2>&1
-    local mounts=() ip
-    [ -n "$secret" ] && mounts=(-v "$RIG/secrets/$secret:/run/secrets/$secret:ro")
+    local ip
     # A client its server must be able to name (GRE) asks for a fixed address.
     ip=$(jq -r '.ip // empty' "$expect")
     [ -n "$ip" ] && mounts+=(--ip "$ip")
@@ -131,6 +138,14 @@ run_client() {
         file=$OUT/$name-$i.json
         pok=1
         say "  phase $((i + 1))/$nphases: $phase"
+        local needs
+        needs=$(jq -r ".phases[$i].needs // empty" "$expect")
+        if [ -n "$needs" ] && [ ! -f "secrets/$needs" ]; then
+            say "    skipped: needs secrets/$needs"
+            jq -n --arg name "$phase" --arg reason "not run: no secrets/$needs" \
+                '{name: $name, pass: true, skipped: true, reason: $reason}' >"$OUT/$name-$i.phase.json"
+            continue
+        fi
 
         # shellcheck disable=SC2086
         [ -n "$before" ] && docker exec "$cname" vpn $before >/dev/null 2>&1
@@ -193,15 +208,22 @@ run_client() {
         esac
         check key "$key_ok"
         # Free-form asserts: a jq path on the probe's JSON and a regex its
-        # (raw) value must match. The fault client lives on these.
-        local nasserts j apath amatch aname avalue
-        nasserts=$(jq ".phases[$i].asserts // [] | length" "$expect")
+        # (raw) value must match ("match") or must not ("absent"). The fault
+        # client lives on these. Client-level asserts apply to every phase,
+        # before the phase's own.
+        local nasserts j apath amatch aabsent aname avalue asserts
+        asserts=$(jq -c "(.asserts // []) + (.phases[$i].asserts // [])" "$expect")
+        nasserts=$(jq length <<<"$asserts")
         for ((j = 0; j < nasserts; j++)); do
-            aname=$(jq -r ".phases[$i].asserts[$j].name" "$expect")
-            apath=$(jq -r ".phases[$i].asserts[$j].path" "$expect")
-            amatch=$(jq -r ".phases[$i].asserts[$j].match" "$expect")
+            aname=$(jq -r ".[$j].name" <<<"$asserts")
+            apath=$(jq -r ".[$j].path" <<<"$asserts")
+            amatch=$(jq -r ".[$j].match // empty" <<<"$asserts")
+            aabsent=$(jq -r ".[$j].absent // empty" <<<"$asserts")
             avalue=$(jq -r "$apath" "$file" 2>/dev/null)
-            if [[ $avalue =~ $amatch ]]; then check "$aname" true
+            if [ -n "$aabsent" ]; then
+                if [[ $avalue =~ $aabsent ]]; then say "    FAIL: $aname: $apath = $(head -c 200 <<<"$avalue") =~ /$aabsent/"; check "$aname" false
+                else check "$aname" true; fi
+            elif [[ $avalue =~ $amatch ]]; then check "$aname" true
             else say "    FAIL: $aname: $apath = $(head -c 200 <<<"$avalue") !~ /$amatch/"; check "$aname" false; fi
         done
         if jq -r .errors_log "$file" | grep -Eq 'panic|supervisor'; then

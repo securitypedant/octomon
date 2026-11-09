@@ -1,0 +1,49 @@
+{
+  "secret": "warp-team.env",
+  "tunnel": "^Cloudflare WARP",
+  "label": "via Cloudflare WARP$",
+  "asserts": [
+    {
+      "name": "one of WARP's two interface address shapes",
+      "path": ".addr",
+      "match": "^(172\\.16\\.0\\.2/|100\\.(9[6-9]|1[01][0-9])\\.)"
+    },
+    {
+      "name": "WARP's resolvers configured",
+      "path": "[.doctor.dns[]|select(.reference|not)|.server]|join(\",\")",
+      "match": "127\\.0\\.2\\.[23]"
+    }
+  ],
+  "phases": [
+    {
+      "name": "connect, enrolled in the organisation (its protocol and address shape)",
+      "cmd": "connect",
+      "iface": "CloudflareWARP"
+    },
+    {
+      "name": "reconnect",
+      "cmd": "reconnect",
+      "iface": "CloudflareWARP",
+      "key": "same"
+    },
+    {
+      "name": "re-register (the daemon re-enrols itself; new device identity and addresses)",
+      "cmd": "reregister",
+      "iface": "CloudflareWARP",
+      "key": "same"
+    },
+    {
+      "name": "IPv6 removed from the device: named by the daemon and resolvers alone",
+      "cmd": "no-v6",
+      "iface": "CloudflareWARP",
+      "key": "same",
+      "asserts": [
+        {
+          "name": "the device has no v6 left",
+          "path": ".addr6",
+          "absent": ":"
+        }
+      ]
+    }
+  ]
+}

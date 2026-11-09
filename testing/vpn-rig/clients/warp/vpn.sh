@@ -1,5 +1,5 @@
 #!/bin/sh
-# vpn connect | reconnect | reregister | disconnect
+# vpn connect | reconnect | reregister | no-v6 | disconnect
 # Cloudflare WARP's Linux client in consumer mode (no account): a tun device
 # named CloudflareWARP. The daemon is started on the first call and left
 # running; the device is registered once. --accept-tos stands in for the
@@ -27,6 +27,10 @@ case "$1" in
     # A fresh device identity: new keys, new tunnel addresses, same place.
     reregister) daemon; $WARP disconnect || true; $WARP registration delete || true; sleep 1
         $WARP registration new; $WARP mode warp >/dev/null 2>&1 || true; $WARP connect; wait_connected ;;
+    # The device with only its v4 left. Over WireGuard that is 172.16.0.2 on
+    # every WARP device, so this is the shape of a host with IPv6 off, and
+    # the name must then come from the running daemon and the resolvers.
+    no-v6) daemon; ip -6 addr flush dev CloudflareWARP; ip addr show dev CloudflareWARP ;;
     disconnect) $WARP disconnect >/dev/null 2>&1 || true ;;
-    *) echo "usage: vpn connect|reconnect|reregister|disconnect" >&2; exit 2 ;;
+    *) echo "usage: vpn connect|reconnect|reregister|no-v6|disconnect" >&2; exit 2 ;;
 esac

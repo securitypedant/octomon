@@ -1,0 +1,89 @@
+{
+  "secrets": [
+    "nordvpn.token",
+    "tailscale.authkey"
+  ],
+  "servers": [
+    "wg-server",
+    "ovpn-server"
+  ],
+  "bypassed": "^(Tailscale)?$",
+  "phases": [
+    {
+      "name": "every daemon resident (nordvpnd, warp-svc, tailscaled), nothing connected",
+      "cmd": "none",
+      "iface": "eth0",
+      "tunnel": "^$",
+      "label": "^[0-9.]+$"
+    },
+    {
+      "name": "NordVPN connected, WARP and Tailscale daemons resident",
+      "cmd": "nord",
+      "needs": "nordvpn.token",
+      "iface": "nordlynx",
+      "key": "different",
+      "tunnel": "^NordVPN$",
+      "label": "via NordVPN$"
+    },
+    {
+      "name": "WARP connected, NordVPN and Tailscale daemons resident",
+      "cmd": "warp",
+      "iface": "CloudflareWARP",
+      "key": "different",
+      "tunnel": "^Cloudflare WARP$",
+      "label": "via Cloudflare WARP$"
+    },
+    {
+      "name": "WARP connected over a wg-quick tunnel: two tunnels up, WARP carrying the traffic",
+      "cmd": "wg+warp",
+      "iface": "CloudflareWARP",
+      "key": "same",
+      "tunnel": "^Cloudflare WARP$",
+      "label": "via Cloudflare WARP$",
+      "bypassed": "",
+      "asserts": [
+        {
+          "name": "the WireGuard tunnel beside it is listed, as WireGuard",
+          "path": "[.doctor.network.bypassed_tunnels[]?|.vendor]|map(select(.!=\"Tailscale\"))|join(\",\")",
+          "match": "^WireGuard$"
+        }
+      ]
+    },
+    {
+      "name": "NordVPN connected, then WARP asked to connect too (on Linux WARP gives up: Nord's routing swallows its control traffic)",
+      "cmd": "nord+warp",
+      "needs": "nordvpn.token",
+      "iface": "nordlynx",
+      "key": "different",
+      "tunnel": "^NordVPN$",
+      "label": "via NordVPN$",
+      "bypassed": ""
+    },
+    {
+      "name": "wg-quick tunnel with three providers' daemons resident (none of them owns it)",
+      "cmd": "wg",
+      "iface": "wg0",
+      "key": "different",
+      "tunnel": "^WireGuard$",
+      "label": "via WireGuard 10\\.13\\.13\\.2$"
+    },
+    {
+      "name": "OpenVPN with three providers' daemons resident",
+      "cmd": "ovpn",
+      "iface": "tun0",
+      "key": "different",
+      "tunnel": "^OpenVPN$",
+      "label": "via OpenVPN$"
+    },
+    {
+      "name": "Tailscale mesh alone again: the resident daemons name nothing",
+      "cmd": "none",
+      "needs": "tailscale.authkey",
+      "iface": "eth0",
+      "key": "restored",
+      "tunnel": "^$",
+      "label": "^[0-9.]+$",
+      "bypassed": "^Tailscale$"
+    }
+  ]
+}

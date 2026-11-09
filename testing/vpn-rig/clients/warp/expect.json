@@ -2,8 +2,42 @@
   "tunnel": "^Cloudflare WARP",
   "label": "via Cloudflare WARP$",
   "phases": [
-    {"name": "connect", "cmd": "connect", "iface": "CloudflareWARP"},
-    {"name": "reconnect", "cmd": "reconnect", "iface": "CloudflareWARP", "key": "same"},
-    {"name": "re-register (new device identity and addresses)", "cmd": "reregister", "iface": "CloudflareWARP", "key": "same"}
+    {
+      "name": "connect",
+      "cmd": "connect",
+      "iface": "CloudflareWARP",
+      "asserts": [
+        {
+          "name": "WARP's resolvers configured",
+          "path": "[.doctor.dns[]|select(.reference|not)|.server]|join(\",\")",
+          "match": "127\\.0\\.2\\.[23]"
+        }
+      ]
+    },
+    {
+      "name": "reconnect",
+      "cmd": "reconnect",
+      "iface": "CloudflareWARP",
+      "key": "same"
+    },
+    {
+      "name": "re-register (new device identity and addresses)",
+      "cmd": "reregister",
+      "iface": "CloudflareWARP",
+      "key": "same"
+    },
+    {
+      "name": "IPv6 removed from the device: 172.16.0.2 alone, named by the daemon and resolvers",
+      "cmd": "no-v6",
+      "iface": "CloudflareWARP",
+      "key": "same",
+      "asserts": [
+        {
+          "name": "the device has no v6 left",
+          "path": ".addr6",
+          "absent": ":"
+        }
+      ]
+    }
   ]
 }

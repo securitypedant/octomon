@@ -1,14 +1,107 @@
 {
   "secret": "tailscale.authkey",
-  "servers": ["wg-server"],
+  "servers": [
+    "wg-server"
+  ],
   "phases": [
-    {"name": "tailscale up (mesh only)", "cmd": "up", "iface": "tailscale0",
-     "tunnel": "^$", "label": "^[0-9.]+$", "bypassed": "^Tailscale$"},
-    {"name": "WireGuard tunnel beside the resident Tailscale", "cmd": "wg-connect", "iface": "wg0", "key": "different",
-     "tunnel": "^WireGuard$", "label": "via WireGuard 10\\.13\\.13\\.2$", "bypassed": "^Tailscale$"},
-    {"name": "reconnect the WireGuard tunnel", "cmd": "wg-reconnect", "iface": "wg0", "key": "same",
-     "tunnel": "^WireGuard$", "label": "via WireGuard 10\\.13\\.13\\.2$", "bypassed": "^Tailscale$"},
-    {"name": "WireGuard down, Tailscale stays", "cmd": "wg-disconnect", "iface": "tailscale0", "key": "restored",
-     "tunnel": "^$", "label": "^[0-9.]+$", "bypassed": "^Tailscale$"}
+    {
+      "name": "tailscale up (mesh only)",
+      "cmd": "up",
+      "iface": "tailscale0",
+      "tunnel": "^$",
+      "label": "^[0-9.]+$",
+      "bypassed": "^Tailscale$",
+      "asserts": [
+        {
+          "name": "resolvers untouched",
+          "path": "[.doctor.dns[]|select(.reference|not)|.server]|join(\",\")",
+          "absent": "100\\.100\\.100\\.100"
+        }
+      ]
+    },
+    {
+      "name": "WireGuard tunnel beside the resident Tailscale",
+      "cmd": "wg-connect",
+      "iface": "wg0",
+      "key": "different",
+      "tunnel": "^WireGuard$",
+      "label": "via WireGuard 10\\.13\\.13\\.2$",
+      "bypassed": "^Tailscale$"
+    },
+    {
+      "name": "reconnect the WireGuard tunnel",
+      "cmd": "wg-reconnect",
+      "iface": "wg0",
+      "key": "same",
+      "tunnel": "^WireGuard$",
+      "label": "via WireGuard 10\\.13\\.13\\.2$",
+      "bypassed": "^Tailscale$"
+    },
+    {
+      "name": "WireGuard down, Tailscale stays",
+      "cmd": "wg-disconnect",
+      "iface": "tailscale0",
+      "key": "restored",
+      "tunnel": "^$",
+      "label": "^[0-9.]+$",
+      "bypassed": "^Tailscale$"
+    },
+    {
+      "name": "MagicDNS on: Tailscale takes over the system resolver",
+      "cmd": "dns-on",
+      "iface": "tailscale0",
+      "key": "same",
+      "tunnel": "^$",
+      "label": "^[0-9.]+$",
+      "bypassed": "^Tailscale$",
+      "asserts": [
+        {
+          "name": "resolver is MagicDNS",
+          "path": "[.doctor.dns[]|select(.reference|not)|.server]|join(\",\")",
+          "match": "100\\.100\\.100\\.100"
+        },
+        {
+          "name": "DNS still works",
+          "path": "[.doctor.analysis.findings[]?|select(.severity!=\"info\")|.cause]|join(\",\")",
+          "absent": "dns"
+        }
+      ]
+    },
+    {
+      "name": "WireGuard tunnel beside Tailscale's resolver (wg-quick's rule swallows the v4 route to MagicDNS)",
+      "cmd": "wg-connect",
+      "iface": "wg0",
+      "key": "different",
+      "tunnel": "^WireGuard$",
+      "label": "via WireGuard 10\\.13\\.13\\.2$",
+      "bypassed": "^Tailscale$",
+      "asserts": [
+        {
+          "name": "resolver is MagicDNS",
+          "path": "[.doctor.dns[]|select(.reference|not)|.server]|join(\",\")",
+          "match": "100\\.100\\.100\\.100"
+        },
+        {
+          "name": "stalled resolver is DNS, not a firewall",
+          "path": "[.doctor.analysis.findings[]?|.cause]|join(\",\")",
+          "absent": "http-blocked"
+        },
+        {
+          "name": "the dead first resolver is named",
+          "path": "[.doctor.analysis.findings[]?|select(.severity!=\"info\")|.cause]|join(\",\")",
+          "match": "dns"
+        }
+      ],
+      "observe": 30
+    },
+    {
+      "name": "WireGuard down again",
+      "cmd": "wg-disconnect",
+      "iface": "tailscale0",
+      "key": "restored",
+      "tunnel": "^$",
+      "label": "^[0-9.]+$",
+      "bypassed": "^Tailscale$"
+    }
   ]
 }

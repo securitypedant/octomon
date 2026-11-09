@@ -37,12 +37,13 @@ errors_log=$(cat "$HOME/.local/share/octomon/errors.log" 2>/dev/null || true)
 jq -n \
     --arg iface "$iface" \
     --arg addr "$(ip -4 -o addr show dev "$iface" | awk '{print $4}' | head -1)" \
+    --arg addr6 "$(ip -6 -o addr show dev "$iface" scope global 2>/dev/null | awk '{print $4}' | paste -sd, -)" \
     --arg routes "$(ip route show; ip rule show 2>/dev/null)" \
     --argjson check_exit "$check_exit" \
     --arg check_out "$check_out" \
     --argjson doctor_exit "$doctor_exit" \
     --argjson doctor "$doctor" \
     --arg errors_log "$errors_log" \
-    '{iface: $iface, addr: $addr, routes: $routes,
+    '{iface: $iface, addr: $addr, addr6: $addr6, routes: $routes,
       check: {exit: $check_exit, out: $check_out},
       doctor_exit: $doctor_exit, doctor: $doctor, errors_log: $errors_log}'

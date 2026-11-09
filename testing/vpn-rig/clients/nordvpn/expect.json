@@ -3,7 +3,23 @@
   "tunnel": "^NordVPN",
   "label": "via NordVPN$",
   "phases": [
-    {"name": "connect (nearest)", "cmd": "connect", "iface": "nordlynx"},
-    {"name": "reconnect to another country", "cmd": "reconnect Canada", "iface": "nordlynx", "key": "same"}
+    {
+      "name": "connect (nearest)",
+      "cmd": "connect",
+      "iface": "nordlynx",
+      "asserts": [
+        {
+          "name": "NordVPN's resolvers configured",
+          "path": "[.doctor.dns[]|select(.reference|not)|.server]|join(\",\")",
+          "match": "103\\.86\\.9[69]\\.100"
+        }
+      ]
+    },
+    {
+      "name": "reconnect to another country",
+      "cmd": "reconnect Canada",
+      "iface": "nordlynx",
+      "key": "same"
+    }
   ]
 }
