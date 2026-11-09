@@ -65,7 +65,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-
 # (ring pairs each curve with one hash) — so behind WARP every HTTPS check died
 # with UnsupportedSignatureAlgorithmForPublicKeyContext. aws-lc-rs accepts it.
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12", "logging"] }
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 surge-ping = "0.9.0"
