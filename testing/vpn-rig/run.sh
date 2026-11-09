@@ -21,12 +21,12 @@ OUT=$RIG/out
 OBSERVE=${OBSERVE:-15}
 NET=octomon-rig
 
+all=0
 if [ $# -eq 0 ]; then
     set -- $(ls clients)
+    all=1
 fi
-
 mkdir -p "$OUT"
-rm -f "$OUT"/*.json "$OUT"/*.log
 
 say() { printf '%s\n' "$*"; }
 hr() { printf '%s\n' "----------------------------------------------------------------"; }
@@ -42,6 +42,19 @@ if ! git -C "$REPO" ls-files -z -co --exclude-standard -x media \
 fi
 OCTOMON_VERSION=$(docker run --rm octomon-rig-base octomon --version 2>/dev/null | awk '{print $2}')
 say "octomon $OCTOMON_VERSION"
+
+# out/ holds one run of one build. A full run starts it afresh; a run of
+# some clients replaces only their records, so a client re-run after a fix
+# to its phases still leaves a complete report to publish, unless the build
+# changed under it, in which case everything older goes too.
+build="$OCTOMON_VERSION @ $(git -C "$REPO" rev-parse --short HEAD)$(git -C "$REPO" status --porcelain -- . ':!website' ':!media' | grep -q . && echo ' (dirty)')"
+if [ "$all" = 1 ] || [ "$(cat "$OUT/build" 2>/dev/null)" != "$build" ]; then
+    rm -f "$OUT"/*.json "$OUT"/*.log
+else
+    # Phase files are <client>-<n>.*; the digit keeps "warp" off "warp-team".
+    for c in "$@"; do rm -f "$OUT/$c"-[0-9]*.json "$OUT/$c"-[0-9]*.log "$OUT/$c".client.json "$OUT/$c"-compose.log "$OUT/$c"-errors.log; done
+fi
+printf '%s\n' "$build" >"$OUT/build"
 
 # The LAN every client and server shares. compose would make it for the
 # servers; a client with no servers of its own (a real account) needs it too.
