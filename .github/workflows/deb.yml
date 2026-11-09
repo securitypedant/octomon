@@ -65,12 +65,25 @@ jobs:
             echo "::error::'$TAG' is not a release tag (vX.Y.Z)"
             exit 1
           fi
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG }}
           # Nothing after the checkout needs the token, and the crates built
           # below should not find one in .git/config.
           persist-credentials: false
+          # Full history, for the ancestry check below.
+          fetch-depth: 0
+      # A release is cut from main, so the code built here must already be
+      # on main: `cargo deb` runs every crate's build scripts in the default
+      # branch's context (CodeQL: cache poisoning from a dispatched ref), and
+      # this keeps that to code the default branch itself carries. Only
+      # writers can create tags or dispatch this workflow in the first place.
+      - name: Check the tag is on main
+        run: |
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::'$TAG' is not on main; releases are cut from main"
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked
