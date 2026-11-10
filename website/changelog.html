@@ -365,8 +365,18 @@
       "url": "https://octomon.dev/images/octomon-icon-tile.png"
     }
   },
-  "dateModified": "2026-11-07",
+  "dateModified": "2026-11-09",
   "hasPart": [
+    {
+      "@type": "SoftwareApplication",
+      "name": "octomon",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "macOS, Linux, Windows",
+      "softwareVersion": "0.12.1",
+      "datePublished": "2026-11-09",
+      "releaseNotes": "https://octomon.dev/changelog#v0.12.1",
+      "url": "https://github.com/securitypedant/octomon/releases/tag/v0.12.1"
+    },
     {
       "@type": "SoftwareApplication",
       "name": "octomon",
@@ -933,7 +943,7 @@
         <a href="/testing">testing page</a>.</p>
       </div>
       <ul class="versions">
-        <li class="vgroup"><span class="vlabel">0.12</span><a href="#v0.12.0">0.12.0</a></li>
+        <li class="vgroup"><span class="vlabel">0.12</span><a href="#v0.12.1">0.12.1</a><a href="#v0.12.0">0.12.0</a></li>
         <li class="vgroup"><span class="vlabel">0.11</span><a href="#v0.11.9">0.11.9</a><a href="#v0.11.8">0.11.8</a><a href="#v0.11.7">0.11.7</a><a href="#v0.11.6">0.11.6</a><a href="#v0.11.5">0.11.5</a><a href="#v0.11.4">0.11.4</a><a href="#v0.11.3">0.11.3</a><a href="#v0.11.2">0.11.2</a><a href="#v0.11.1">0.11.1</a><a href="#v0.11.0">0.11.0</a></li>
         <li class="vgroup"><span class="vlabel">0.10</span><a href="#v0.10.1">0.10.1</a><a href="#v0.10.0">0.10.0</a></li>
         <li class="vgroup"><span class="vlabel">0.9</span><a href="#v0.9.8">0.9.8</a><a href="#v0.9.7">0.9.7</a><a href="#v0.9.6">0.9.6</a><a href="#v0.9.5">0.9.5</a><a href="#v0.9.4">0.9.4</a><a href="#v0.9.3">0.9.3</a><a href="#v0.9.2">0.9.2</a><a href="#v0.9.1">0.9.1</a><a href="#v0.9.0">0.9.0</a></li>
@@ -952,6 +962,21 @@
   <section>
     <div class="wrap">
       <div class="post">
+
+        <article class="release" id="v0.12.1">
+          <h2><a href="#v0.12.1">0.12.1</a></h2>
+          <p class="relmeta"><time datetime="2026-11-09">9 November 2026</time> · <a href="https://github.com/securitypedant/octomon/releases/tag/v0.12.1">release on GitHub</a></p>
+          <p class="relsummary">I built a simple test rig in Docker that allows me to configure several different VPN clients and test octomon to correctly identify them, also I had one container test faults that Octomon should respond correctly to. Results of <a href="/testing">testing here</a>. While building the rig, I found some bugs... which is kinda the point!</p>
+          <ul>
+          <li>A full-tunnel VPN no longer comes back as a second location with the same label. The network underneath a full tunnel is identified by its gateway&#39;s MAC address, read from the neighbour cache, and under a full tunnel nothing keeps that entry alive. Once the entry had aged out the location keyed on the gateway&#39;s IP instead, so &quot;172.19.0.1 via WireGuard 10.13.13.2&quot; existed twice, one copy per state of the cache. octomon now resolves the gateway itself (one UDP datagram to the discard port, no privilege needed) before it reads the MAC.</li>
+          <li>Latency is judged against the location&#39;s learned normal, not only against the session&#39;s own best. octomon compared each path&#39;s recent latency with the lowest it had seen this session, so a session started while the network was already slow had nothing to compare with. An established normal is now a second floor, and the finding says which one it compared with (&quot;gateway latency inflated (272ms vs ~0ms normal here)&quot;). First visits to a network are judged as before.</li>
+          <li>Pings that stop being answered on a network that normally answers them are a note, not an outage. Every ping unanswered while the web check and TCP to every built-in target succeed is a firewall or router policy. It now says &quot;pings stopped being answered on this network&quot;, with web and TCP traffic noted as unaffected.</li>
+          <li>A DNS outage is one finding, not two. The web check resolves a hostname like a browser does, so when every resolver is dead it fails too, and that failure was read as a second fault, &quot;web traffic blocked while ping works&quot;, blamed on a proxy or firewall. octomon now tells a connection that was refused from a name that never resolved (&quot;name lookup failed&quot; in the ladder), and a lookup failure beside dead resolvers is the DNS finding&#39;s own evidence.</li>
+          <li>A dead resolver that the OS asks first is a degradation, not a footnote. Applications wait on the first resolver&#39;s timeout before the next is tried, so with it dead every lookup is seconds late and pages stall, while octomon said &quot;1 of 2 resolvers failing, others fine&quot; and, when the web check ran out of time, blamed a firewall. It now names the resolver (&quot;first DNS resolver 100.100.100.100 not answering: every lookup waits on its timeout, fd7a:115c:a1e0::53 works&quot;) with the web timeout as its evidence, and the same for a LAN resolver asked first.</li>
+          <li>VPN clients can also be recognised by the DNS resolvers they configure. A client that pushes its own DNS writes it into the system&#39;s resolver list when it connects and takes it back when it disconnects, which says the client is active in a way a resident process cannot: NordVPN&#39;s 103.86.96.100, Cloudflare WARP&#39;s 127.0.2.2, Tailscale&#39;s MagicDNS at 100.100.100.100, Mullvad&#39;s 10.64.0.1, Proton&#39;s 10.2.0.1, Surfshark&#39;s, PIA&#39;s and Windscribe&#39;s. It is the third witness beside the tunnel&#39;s address and the running clients: it confirms a match in a shared or private address block, breaks a tie between two resident clients, and stands in when no process is visible. Like the process table it is narrowed by the tunnel&#39;s own addresses, so Tailscale&#39;s resolver never names a WireGuard tunnel beside it. Resolvers a server pushes (OpenVPN, WireGuard, corporate clients) and resolvers networks use on their own (Cloudflare Gateway&#39;s 172.64.36.x) are not in the table.</li>
+          <li>Cloudflare WARP is recognised without its IPv6 address. Over the WireGuard protocol (consumer WARP, and Zero Trust organisations that do not assign each device its own local IP) every WARP device&#39;s interface is 172.16.0.2; the 100.96/12 address octomon knew is on the interface only under MASQUE or with that setting on. octomon named WARP from the 2606:4700 v6 beside it, so with IPv6 off the device would have fallen to &quot;unidentified VPN / tunnel&quot;. 172.16.0.2 now counts for WARP the way a private block counts for any client: only with its daemon running or its resolvers in use.</li>
+          </ul>
+        </article>
 
         <article class="release" id="v0.12.0">
           <h2><a href="#v0.12.0">0.12.0</a></h2>
