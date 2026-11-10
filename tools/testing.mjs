@@ -71,8 +71,8 @@ const STATUS = { healthy: "healthy", problems: "problems", down: "down", insuffi
 const mark = (ok) => (ok ? `<span class="ok">✓</span>` : `<span class="bad">✗</span>`);
 const checkList = (checks) =>
   Object.entries(checks ?? {})
-    .map(([k, ok]) => `${mark(ok)} ${esc(k.replace(/_/g, " "))}`)
-    .join(" · ");
+    .map(([k, ok]) => `<span class="chk">${mark(ok)} ${esc(k.replace(/_/g, " "))}</span>`)
+    .join(" ");
 
 const ran = run.clients.filter((c) => c.status !== "skipped");
 const phases = ran.flatMap((c) => (c.phases ?? []).map((p) => ({ ...p, client: c.name })));
@@ -199,7 +199,7 @@ function clientCard(c) {
         <h3>${esc(title)} <span class="tag ${c.status === "pass" ? "pass" : "fail"}">${c.status === "pass" ? "passed" : "failed"}</span></h3>${
           c.reason ? `\n        <p>${esc(c.reason)}.</p>` : ""
         }
-        <table>
+        <table class="${faults ? "faults" : "tunnels"}">
           <thead><tr>${head}</tr></thead>
           <tbody>
 ${rows}
@@ -266,6 +266,8 @@ ${run.clients.map(clientCard).join("\n")}
 </main>`;
 
 const extraCss = `
+  /* Blog copy reads at 44em; this page's paragraphs run the width of the wrap. */
+  .post { max-width: none; }
   .runmeta { font-family: var(--octo-mono); font-size: 0.8rem; color: var(--octo-muted); margin: -6px 0 14px; }
   .muted { color: var(--octo-muted); font-weight: 400; font-size: 0.85em; }
   .post h3 { margin: 0 0 8px; font-size: 1.05rem; }
@@ -273,7 +275,7 @@ const extraCss = `
   dl.areas dt { font-family: var(--octo-mono); font-weight: 700; color: var(--octo-green); font-size: 0.8rem; padding-top: 2px; }
   dl.areas dd { margin: 0; font-size: 0.92rem; }
   dl.areas dd ul { margin: 4px 0 0; padding-left: 1.2em; }
-  dl.areas dd li { margin: 1px 0; }
+  dl.areas dd li { margin: 1px 0; font-size: inherit; line-height: inherit; }
   .card { padding: 12px 16px; margin: 0 0 10px; }
   .card h3 { margin: 0 0 4px; font-size: 1rem; }
   .card p { margin: 4px 0; font-size: 0.9rem; }
@@ -286,8 +288,19 @@ const extraCss = `
   .card th, .card td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--octo-line); vertical-align: top; }
   .card th { font-family: var(--octo-mono); font-weight: 700; color: var(--octo-green); font-size: 0.74rem; }
   .card tr:last-child td { border-bottom: 0; }
-  .card td:nth-child(3) { white-space: nowrap; }
-  .card td.checks { font-family: var(--octo-mono); font-size: 0.78rem; white-space: nowrap; }
+  /* Fixed proportions: a long check label must not squeeze the phase text
+     to a word per line, and the table must stay inside its card. */
+  .card table { table-layout: fixed; }
+  .card table.tunnels th:nth-child(1) { width: 27%; }
+  .card table.tunnels th:nth-child(2) { width: 13%; }
+  .card table.tunnels th:nth-child(3) { width: 17%; }
+  .card table.tunnels th:nth-child(4) { width: 11%; }
+  .card table.faults th:nth-child(1) { width: 30%; }
+  .card table.faults th:nth-child(2) { width: 22%; }
+  .card td.checks { font-family: var(--octo-mono); font-size: 0.78rem; }
+  /* Lines break between checks first; inside one only when it is too long
+     for the column on its own (an inline-block shrinks to fit). */
+  .chk { display: inline-block; margin-right: 10px; }
   .ok { color: var(--octo-green); } .bad { color: var(--octo-red); }
   @media (max-width: 700px) {
     dl.areas { display: block; }
@@ -297,12 +310,13 @@ const extraCss = `
     .card td { border-bottom: 0; padding: 2px 0; }
     .card tr { border-bottom: 1px solid var(--octo-line); padding: 6px 0; }
     .card tr:last-child { border-bottom: 0; }
-    .card td.checks, .card td:nth-child(3) { white-space: normal; }
+    .card td:first-child { width: auto; min-width: 0; }
+    .card td:nth-child(3) { white-space: normal; }
   }`;
 
 const html = page({
   title: "octomon: tested against real VPN clients",
-  description: `What octomon ${run.octomon} was checked for before release: ${list(ran.map((c) => shortName(c.name)))}, ${phases.length} phases, ${checks.length} checks.`,
+  description: `What octomon ${run.octomon} was checked for before release: ${list([...new Set(ran.map((c) => shortName(c.name)))])}, ${phases.length} phases, ${checks.length} checks.`,
   url: URL_PATH,
   ogType: "website",
   ogTitle: "octomon: tested against real VPN clients",

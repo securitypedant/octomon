@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>octomon: tested against real VPN clients</title>
-<meta name="description" content="What octomon 0.12.1 was checked for before release: Several clients installed at once, Fault injection, NordVPN app, OpenVPN, Tailscale, Unnamed tunnel, Cloudflare WARP, Cloudflare WARP, WireGuard, 40 phases, 195 checks.">
+<meta name="description" content="What octomon 0.12.1 was checked for before release: Several clients installed at once, Fault injection, NordVPN app, OpenVPN, Tailscale, Unnamed tunnel, Cloudflare WARP, WireGuard, 40 phases, 195 checks.">
 <meta name="author" content="Simon Thorpe">
 <link rel="canonical" href="https://octomon.dev/testing">
 <link rel="alternate" type="application/rss+xml" title="octomon blog" href="/blog/feed.xml">
@@ -288,6 +288,8 @@
     .wordmark { font-size: 1.15rem; }
   }
 
+  /* Blog copy reads at 44em; this page's paragraphs run the width of the wrap. */
+  .post { max-width: none; }
   .runmeta { font-family: var(--octo-mono); font-size: 0.8rem; color: var(--octo-muted); margin: -6px 0 14px; }
   .muted { color: var(--octo-muted); font-weight: 400; font-size: 0.85em; }
   .post h3 { margin: 0 0 8px; font-size: 1.05rem; }
@@ -295,7 +297,7 @@
   dl.areas dt { font-family: var(--octo-mono); font-weight: 700; color: var(--octo-green); font-size: 0.8rem; padding-top: 2px; }
   dl.areas dd { margin: 0; font-size: 0.92rem; }
   dl.areas dd ul { margin: 4px 0 0; padding-left: 1.2em; }
-  dl.areas dd li { margin: 1px 0; }
+  dl.areas dd li { margin: 1px 0; font-size: inherit; line-height: inherit; }
   .card { padding: 12px 16px; margin: 0 0 10px; }
   .card h3 { margin: 0 0 4px; font-size: 1rem; }
   .card p { margin: 4px 0; font-size: 0.9rem; }
@@ -308,8 +310,19 @@
   .card th, .card td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--octo-line); vertical-align: top; }
   .card th { font-family: var(--octo-mono); font-weight: 700; color: var(--octo-green); font-size: 0.74rem; }
   .card tr:last-child td { border-bottom: 0; }
-  .card td:nth-child(3) { white-space: nowrap; }
-  .card td.checks { font-family: var(--octo-mono); font-size: 0.78rem; white-space: nowrap; }
+  /* Fixed proportions: a long check label must not squeeze the phase text
+     to a word per line, and the table must stay inside its card. */
+  .card table { table-layout: fixed; }
+  .card table.tunnels th:nth-child(1) { width: 27%; }
+  .card table.tunnels th:nth-child(2) { width: 13%; }
+  .card table.tunnels th:nth-child(3) { width: 17%; }
+  .card table.tunnels th:nth-child(4) { width: 11%; }
+  .card table.faults th:nth-child(1) { width: 30%; }
+  .card table.faults th:nth-child(2) { width: 22%; }
+  .card td.checks { font-family: var(--octo-mono); font-size: 0.78rem; }
+  /* Lines break between checks first; inside one only when it is too long
+     for the column on its own (an inline-block shrinks to fit). */
+  .chk { display: inline-block; margin-right: 10px; }
   .ok { color: var(--octo-green); } .bad { color: var(--octo-red); }
   @media (max-width: 700px) {
     dl.areas { display: block; }
@@ -319,7 +332,8 @@
     .card td { border-bottom: 0; padding: 2px 0; }
     .card tr { border-bottom: 1px solid var(--octo-line); padding: 6px 0; }
     .card tr:last-child { border-bottom: 0; }
-    .card td.checks, .card td:nth-child(3) { white-space: normal; }
+    .card td:first-child { width: auto; min-width: 0; }
+    .card td:nth-child(3) { white-space: normal; }
   }
 </style>
 <script type="application/ld+json">
@@ -417,7 +431,7 @@
       <h2>The detail</h2>
       <div class="card">
         <h3>Several clients installed at once (NordVPN, WARP, Tailscale, wg-quick, OpenVPN) <span class="tag pass">passed</span></h3>
-        <table>
+        <table class="tunnels">
           <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
           <tbody>
 <tr>
@@ -425,111 +439,111 @@
             <td><code>eth0</code></td>
             <td><span class="muted">no tunnel: the LAN itself</span></td>
             <td>first connection</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> bypassed</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>NordVPN connected, WARP and Tailscale daemons resident</td>
             <td><code>nordlynx</code></td>
             <td>NordVPN</td>
             <td>a new location, as designed</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> bypassed</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>WARP connected, NordVPN and Tailscale daemons resident</td>
             <td><code>CloudflareWARP</code></td>
             <td>Cloudflare WARP</td>
             <td>a new location, as designed</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> bypassed</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>WARP connected over a wg-quick tunnel: two tunnels up, WARP carrying the traffic</td>
             <td><code>CloudflareWARP</code></td>
             <td>Cloudflare WARP</td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> the WireGuard tunnel beside it is listed, as WireGuard · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> the WireGuard tunnel beside it is listed, as WireGuard</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>NordVPN connected, then WARP asked to connect too (on Linux WARP gives up: Nord's routing swallows its control traffic)</td>
             <td><code>nordlynx</code></td>
             <td>NordVPN</td>
             <td>a new location, as designed</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>wg-quick tunnel with three providers' daemons resident (none of them owns it)</td>
             <td><code>wg0</code></td>
             <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
             <td>a new location, as designed</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> bypassed</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>OpenVPN with three providers' daemons resident</td>
             <td><code>tun0</code></td>
             <td>OpenVPN</td>
             <td>a new location, as designed</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> bypassed</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>Tailscale mesh alone again: the resident daemons name nothing</td>
             <td><code>eth0</code></td>
             <td><span class="muted">no tunnel: the LAN itself</span></td>
             <td>back to the first location</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> bypassed</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
           </tbody>
         </table>
       </div>
       <div class="card">
         <h3>Fault injection (no VPN) <span class="tag pass">passed</span></h3>
-        <table>
+        <table class="faults">
           <thead><tr><th>what was broken</th><th>what octomon said</th><th>checks</th></tr></thead>
           <tbody>
 <tr>
             <td>nothing wrong, long enough to learn the normal (5 healthy minutes)</td>
             <td>healthy <span class="muted">(exit 0)</span></td>
-            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> healthy · <span class="ok">✓</span> exit 0 · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> healthy</span> <span class="chk"><span class="ok">✓</span> exit 0</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>15% packet loss on the link</td>
             <td>problems: internet <span class="muted">(exit 1)</span></td>
-            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> noticed · <span class="ok">✓</span> gateway flagged · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> noticed</span> <span class="chk"><span class="ok">✓</span> gateway flagged</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>250 ms added to everything</td>
             <td>problems: gateway / LAN <span class="muted">(exit 1)</span></td>
-            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> noticed · <span class="ok">✓</span> gateway flagged · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> noticed</span> <span class="chk"><span class="ok">✓</span> gateway flagged</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>DNS dropped, everything else fine</td>
             <td>problems: DNS <span class="muted">(exit 1)</span></td>
-            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> noticed · <span class="ok">✓</span> cause · <span class="ok">✓</span> one cause, not a firewall too · <span class="ok">✓</span> web check says lookup · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> noticed</span> <span class="chk"><span class="ok">✓</span> cause</span> <span class="chk"><span class="ok">✓</span> one cause, not a firewall too</span> <span class="chk"><span class="ok">✓</span> web check says lookup</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>web (80/443) rejected, ping and DNS fine</td>
             <td>problems: web filtered <span class="muted">(exit 1)</span></td>
-            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> noticed · <span class="ok">✓</span> cause · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> noticed</span> <span class="chk"><span class="ok">✓</span> cause</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>outbound ICMP dropped, TCP and DNS fine</td>
             <td>healthy: gateway / LAN <span class="muted">(exit 0)</span></td>
-            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> not called down · <span class="ok">✓</span> web still ok · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> not called down</span> <span class="chk"><span class="ok">✓</span> web still ok</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>nothing leaves the LAN</td>
             <td>problems: internet <span class="muted">(exit 1)</span></td>
-            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> noticed · <span class="ok">✓</span> exit non-zero · <span class="ok">✓</span> cause · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> noticed</span> <span class="chk"><span class="ok">✓</span> exit non-zero</span> <span class="chk"><span class="ok">✓</span> cause</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>captive portal answers every HTTP request</td>
             <td>problems: captive portal <span class="muted">(exit 1)</span></td>
-            <td class="checks"><span class="ok">✓</span> key · <span class="ok">✓</span> noticed · <span class="ok">✓</span> cause · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> noticed</span> <span class="chk"><span class="ok">✓</span> cause</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
           </tbody>
         </table>
       </div>
       <div class="card">
         <h3>NordVPN app (NordLynx) <span class="tag pass">passed</span></h3>
-        <table>
+        <table class="tunnels">
           <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
           <tbody>
 <tr>
@@ -537,21 +551,21 @@
             <td><code>nordlynx</code></td>
             <td>NordVPN</td>
             <td>first connection</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> NordVPN's resolvers configured · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> NordVPN's resolvers configured</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>reconnect to another country</td>
             <td><code>nordlynx</code></td>
             <td>NordVPN</td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
           </tbody>
         </table>
       </div>
       <div class="card">
         <h3>OpenVPN (tun) <span class="tag pass">passed</span></h3>
-        <table>
+        <table class="tunnels">
           <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
           <tbody>
 <tr>
@@ -559,21 +573,21 @@
             <td><code>tun0</code></td>
             <td>OpenVPN</td>
             <td>first connection</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>reconnect 1195 (pool 10.9, another server)</td>
             <td><code>tun0</code></td>
             <td>OpenVPN</td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
           </tbody>
         </table>
       </div>
       <div class="card">
         <h3>Tailscale (mesh client beside a WireGuard tunnel) <span class="tag pass">passed</span></h3>
-        <table>
+        <table class="tunnels">
           <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
           <tbody>
 <tr>
@@ -581,56 +595,56 @@
             <td><code>tailscale0</code></td>
             <td><span class="muted">no tunnel: the LAN itself</span></td>
             <td>first connection</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> resolvers untouched · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> bypassed</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> resolvers untouched</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>WireGuard tunnel beside the resident Tailscale</td>
             <td><code>wg0</code></td>
             <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
             <td>a new location, as designed</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> bypassed</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>reconnect the WireGuard tunnel</td>
             <td><code>wg0</code></td>
             <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> bypassed</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>WireGuard down, Tailscale stays</td>
             <td><code>tailscale0</code></td>
             <td><span class="muted">no tunnel: the LAN itself</span></td>
             <td>back to the first location</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> bypassed</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>MagicDNS on: Tailscale takes over the system resolver</td>
             <td><code>tailscale0</code></td>
             <td><span class="muted">no tunnel: the LAN itself</span></td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> resolver is MagicDNS · <span class="ok">✓</span> DNS still works · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> bypassed</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> resolver is MagicDNS</span> <span class="chk"><span class="ok">✓</span> DNS still works</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>WireGuard tunnel beside Tailscale's resolver (wg-quick's rule swallows the v4 route to MagicDNS)</td>
             <td><code>wg0</code></td>
             <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
             <td>a new location, as designed</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> resolver is MagicDNS · <span class="ok">✓</span> stalled resolver is DNS, not a firewall · <span class="ok">✓</span> the dead first resolver is named · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> bypassed</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> resolver is MagicDNS</span> <span class="chk"><span class="ok">✓</span> stalled resolver is DNS, not a firewall</span> <span class="chk"><span class="ok">✓</span> the dead first resolver is named</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>WireGuard down again</td>
             <td><code>tailscale0</code></td>
             <td><span class="muted">no tunnel: the LAN itself</span></td>
             <td>back to the first location</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> bypassed · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> bypassed</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
           </tbody>
         </table>
       </div>
       <div class="card">
         <h3>Unnamed tunnel (plain GRE, no client) <span class="tag pass">passed</span></h3>
-        <table>
+        <table class="tunnels">
           <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
           <tbody>
 <tr>
@@ -638,21 +652,21 @@
             <td><code>gre1</code></td>
             <td>unidentified VPN / tunnel</td>
             <td>first connection</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>re-created with another address (10.77.0.6)</td>
             <td><code>gre1</code></td>
             <td>unidentified VPN / tunnel</td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
           </tbody>
         </table>
       </div>
       <div class="card">
         <h3>Cloudflare WARP (enrolled in a Zero Trust organisation) <span class="tag pass">passed</span></h3>
-        <table>
+        <table class="tunnels">
           <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
           <tbody>
 <tr>
@@ -660,35 +674,35 @@
             <td><code>CloudflareWARP</code></td>
             <td>Cloudflare WARP</td>
             <td>first connection</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> one of WARP's two interface address shapes · <span class="ok">✓</span> WARP's resolvers configured · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> one of WARP's two interface address shapes</span> <span class="chk"><span class="ok">✓</span> WARP's resolvers configured</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>reconnect</td>
             <td><code>CloudflareWARP</code></td>
             <td>Cloudflare WARP</td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> one of WARP's two interface address shapes · <span class="ok">✓</span> WARP's resolvers configured · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> one of WARP's two interface address shapes</span> <span class="chk"><span class="ok">✓</span> WARP's resolvers configured</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>re-register (the daemon re-enrols itself; new device identity and addresses)</td>
             <td><code>CloudflareWARP</code></td>
             <td>Cloudflare WARP</td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> one of WARP's two interface address shapes · <span class="ok">✓</span> WARP's resolvers configured · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> one of WARP's two interface address shapes</span> <span class="chk"><span class="ok">✓</span> WARP's resolvers configured</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>IPv6 removed from the device: named by the daemon and resolvers alone</td>
             <td><code>CloudflareWARP</code></td>
             <td>Cloudflare WARP</td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> one of WARP's two interface address shapes · <span class="ok">✓</span> WARP's resolvers configured · <span class="ok">✓</span> the device has no v6 left · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> one of WARP's two interface address shapes</span> <span class="chk"><span class="ok">✓</span> WARP's resolvers configured</span> <span class="chk"><span class="ok">✓</span> the device has no v6 left</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
           </tbody>
         </table>
       </div>
       <div class="card">
         <h3>Cloudflare WARP (consumer) <span class="tag pass">passed</span></h3>
-        <table>
+        <table class="tunnels">
           <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
           <tbody>
 <tr>
@@ -696,35 +710,35 @@
             <td><code>CloudflareWARP</code></td>
             <td>Cloudflare WARP</td>
             <td>first connection</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> WARP's resolvers configured · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> WARP's resolvers configured</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>reconnect</td>
             <td><code>CloudflareWARP</code></td>
             <td>Cloudflare WARP</td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>re-register (new device identity and addresses)</td>
             <td><code>CloudflareWARP</code></td>
             <td>Cloudflare WARP</td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>IPv6 removed from the device: 172.16.0.2 alone, named by the daemon and resolvers</td>
             <td><code>CloudflareWARP</code></td>
             <td>Cloudflare WARP</td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> the device has no v6 left · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> the device has no v6 left</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
           </tbody>
         </table>
       </div>
       <div class="card">
         <h3>WireGuard (wg-quick, kernel device) <span class="tag pass">passed</span></h3>
-        <table>
+        <table class="tunnels">
           <thead><tr><th>phase</th><th>device</th><th>recognised as</th><th>location key</th><th>checks</th></tr></thead>
           <tbody>
 <tr>
@@ -732,21 +746,21 @@
             <td><code>wg0</code></td>
             <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
             <td>first connection</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>reconnect wg0</td>
             <td><code>wg0</code></td>
             <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
             <td>same location after reconnecting</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
 <tr>
             <td>connect wg1 (second address)</td>
             <td><code>wg1</code></td>
             <td>WireGuard <span class="muted">(label carries the tunnel address)</span></td>
             <td>a new location, as designed</td>
-            <td class="checks"><span class="ok">✓</span> name · <span class="ok">✓</span> label · <span class="ok">✓</span> key · <span class="ok">✓</span> clean log</td>
+            <td class="checks"><span class="chk"><span class="ok">✓</span> name</span> <span class="chk"><span class="ok">✓</span> label</span> <span class="chk"><span class="ok">✓</span> key</span> <span class="chk"><span class="ok">✓</span> clean log</span></td>
           </tr>
           </tbody>
         </table>
