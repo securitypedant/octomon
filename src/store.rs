@@ -710,7 +710,7 @@ pub fn append_locked(path: &std::path::Path, text: &str) -> std::io::Result<()> 
     }
     let _held = FileLock::acquire(path)
         .inspect_err(|e| {
-            static TOLD: parking_lot::Mutex<Vec<PathBuf>> = parking_lot::const_mutex(Vec::new());
+            static TOLD: parking_lot::Mutex<Vec<PathBuf>> = parking_lot::Mutex::new(Vec::new());
             let mut told = TOLD.lock();
             if !told.iter().any(|p| p == path) {
                 told.push(path.to_path_buf());
@@ -772,7 +772,7 @@ impl PruneClock {
     pub const fn new(every: std::time::Duration) -> Self {
         Self {
             every,
-            last: parking_lot::const_mutex(None),
+            last: parking_lot::Mutex::new(None),
         }
     }
 

@@ -557,7 +557,7 @@ pub fn save_one(key: &str, b: &Baseline) {
 /// The learner lock, held for the life of the process once taken: see
 /// [`save_learned`]. A sibling of the baselines file rather than the file's
 /// own lock, which is held only across one save.
-static LEARNER: parking_lot::Mutex<Option<crate::store::FileLock>> = parking_lot::const_mutex(None);
+static LEARNER: parking_lot::Mutex<Option<crate::store::FileLock>> = parking_lot::Mutex::new(None);
 
 /// What became of a learned sample offered for saving.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1337,8 +1337,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("baselines.json");
-        let dashboard = parking_lot::const_mutex(None);
-        let watcher = parking_lot::const_mutex(None);
+        let dashboard = parking_lot::Mutex::new(None);
+        let watcher = parking_lot::Mutex::new(None);
         let learned = |samples| Baseline {
             samples,
             ..Default::default()
