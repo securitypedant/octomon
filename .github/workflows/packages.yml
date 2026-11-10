@@ -133,7 +133,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir src && cd src
+          # Not `src`: that is the crate's source tree in the checkout.
+          mkdir tarballs
+          cd tarballs
           for t in x86_64 aarch64; do
             gh release download "$TAG" -R "$GITHUB_REPOSITORY" \
               -p "octomon-$t-unknown-linux-musl.tar.xz" \
@@ -146,7 +148,7 @@ jobs:
           for t in x86_64 aarch64; do
             rpmbuild -bb --target "$t" \
               --define "version $version" \
-              --define "_sourcedir $PWD/src" \
+              --define "_sourcedir $PWD/tarballs" \
               --define "_rpmdir $PWD/rpms" \
               packaging/rpm/octomon.spec
           done
