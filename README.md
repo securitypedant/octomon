@@ -161,15 +161,6 @@ On dnf 4 (RHEL 9 and relatives) the first line is
 `sudo dnf config-manager --add-repo https://octomon.dev/rpm/octomon.repo`; on
 openSUSE, `sudo zypper addrepo https://octomon.dev/rpm/octomon.repo && sudo zypper install octomon`.
 
-### Arch Linux
-
-[`octomon-bin`](https://aur.archlinux.org/packages/octomon-bin) on the AUR,
-updated with each release:
-
-```sh
-paru -S octomon-bin      # or yay, or any AUR helper
-```
-
 ### Nix
 
 The repository is a flake:
