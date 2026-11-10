@@ -148,6 +148,37 @@ echo "deb [signed-by=/usr/share/keyrings/octomon.gpg] https://octomon.dev/apt st
 sudo apt update && sudo apt install octomon
 ```
 
+### dnf (Fedora, RHEL, Rocky, Alma) and zypper (openSUSE)
+
+The same signed repository, as rpms for x86_64 and aarch64:
+
+```sh
+sudo dnf config-manager addrepo --from-repofile=https://octomon.dev/rpm/octomon.repo
+sudo dnf install octomon
+```
+
+On dnf 4 (RHEL 9 and relatives) the first line is
+`sudo dnf config-manager --add-repo https://octomon.dev/rpm/octomon.repo`; on
+openSUSE, `sudo zypper addrepo https://octomon.dev/rpm/octomon.repo && sudo zypper install octomon`.
+
+### Arch Linux
+
+[`octomon-bin`](https://aur.archlinux.org/packages/octomon-bin) on the AUR,
+updated with each release:
+
+```sh
+paru -S octomon-bin      # or yay, or any AUR helper
+```
+
+### Nix
+
+The repository is a flake:
+
+```sh
+nix run github:securitypedant/octomon
+# or, in a configuration: inputs.octomon.url = "github:securitypedant/octomon";
+```
+
 ### Other Linux
 
 Static musl binaries run on any distribution; the installer picks the right

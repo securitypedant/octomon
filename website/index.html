@@ -458,6 +458,39 @@ sudo apt update &amp;&amp; sudo apt install octomon">copy</button>
         </div>
         <div class="install-card">
           <div class="head">
+            <h3>dnf · Fedora, RHEL &amp; openSUSE</h3>
+            <button type="button" class="copy-btn" data-copy="sudo dnf config-manager addrepo --from-repofile=https://octomon.dev/rpm/octomon.repo
+sudo dnf install octomon">copy</button>
+          </div>
+          <div class="cmd"><div class="cmd-scroll">
+            <div class="line"><span class="prompt">$</span><code>sudo dnf config-manager addrepo --from-repofile=https://octomon.dev/rpm/octomon.repo</code></div>
+            <div class="line"><span class="prompt">$</span><code>sudo dnf install octomon</code></div>
+          </div></div>
+          <p class="note">x86_64 and aarch64, same signing key. dnf 4 (RHEL 9): <code>dnf config-manager --add-repo &lt;that url&gt;</code>;
+          openSUSE: <code>zypper addrepo &lt;that url&gt;</code>.</p>
+        </div>
+        <div class="install-card">
+          <div class="head">
+            <h3>AUR · Arch Linux</h3>
+            <button type="button" class="copy-btn" data-copy="paru -S octomon-bin">copy</button>
+          </div>
+          <div class="cmd"><div class="cmd-scroll">
+            <div class="line"><span class="prompt">$</span><code>paru -S octomon-bin</code></div>
+          </div></div>
+          <p class="note">Or yay, or any AUR helper. <a href="https://aur.archlinux.org/packages/octomon-bin">octomon-bin</a> is updated with each release.</p>
+        </div>
+        <div class="install-card">
+          <div class="head">
+            <h3>nix · flake</h3>
+            <button type="button" class="copy-btn" data-copy="nix run github:securitypedant/octomon">copy</button>
+          </div>
+          <div class="cmd"><div class="cmd-scroll">
+            <div class="line"><span class="prompt">$</span><code>nix run github:securitypedant/octomon</code></div>
+          </div></div>
+          <p class="note">Builds from source. Linux and macOS.</p>
+        </div>
+        <div class="install-card">
+          <div class="head">
             <h3>winget · Windows</h3>
             <button type="button" class="copy-btn" data-copy="winget install SimonThorpe.Octomon">copy</button>
           </div>

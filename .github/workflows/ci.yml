@@ -87,7 +87,7 @@ jobs:
           # with include_str!, so documentation really is inert; add future
           # web-only trees (a blog, say) here rather than to the trigger. The
           # Worker is inert to the Rust build too: it has its own job below.
-          inert='^(website/|worker/|octomon-brand/|packaging/|\.github/ISSUE_TEMPLATE/|screenshot\.png$|LICENSE|.*\.md$)'
+          inert='^(website/|worker/|octomon-brand/|packaging/|flake\.(nix|lock)$|\.github/ISSUE_TEMPLATE/|screenshot\.png$|LICENSE|.*\.md$)'
           if [ -z "$changed" ]; then
             decide true "empty diff — not trusting it"
             also true true

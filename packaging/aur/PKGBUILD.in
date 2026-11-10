@@ -1,0 +1,32 @@
+# Maintainer: Simon Thorpe <simsecpedant@gmail.com>
+#
+# octomon-bin on the AUR: the release's static musl binary, the same bytes
+# every other Linux channel ships. Rendered from PKGBUILD.in by render.sh
+# (CI does it on each release); edit the template, not the output.
+pkgname=octomon-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="btop-style terminal dashboard for your network: latency, bandwidth, Wi-Fi and DNS, with an analysis that names the failing layer"
+arch=('x86_64' 'aarch64')
+url="https://octomon.dev"
+license=('MIT OR Apache-2.0')
+provides=('octomon')
+conflicts=('octomon')
+# Powers startup path discovery and the [m] hop monitor; everything else
+# works without it.
+optdepends=('traceroute: path discovery and the hop monitor')
+# Nothing to split debug info from; makepkg still strips the binary.
+options=('!debug')
+_base="https://github.com/securitypedant/octomon/releases/download/v${pkgver}"
+source_x86_64=("octomon-${pkgver}-x86_64.tar.xz::${_base}/octomon-x86_64-unknown-linux-musl.tar.xz")
+source_aarch64=("octomon-${pkgver}-aarch64.tar.xz::${_base}/octomon-aarch64-unknown-linux-musl.tar.xz")
+sha256sums_x86_64=('@SHA256_X86_64@')
+sha256sums_aarch64=('@SHA256_AARCH64@')
+
+package() {
+    cd "octomon-${CARCH}-unknown-linux-musl"
+    install -Dm755 octomon "${pkgdir}/usr/bin/octomon"
+    install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname%-bin}/README.md"
+    install -Dm644 LICENSE-MIT "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-MIT"
+    install -Dm644 LICENSE-APACHE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-APACHE"
+}

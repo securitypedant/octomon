@@ -1,7 +1,7 @@
 # Winget: after each release, submit a version-bump PR to microsoft/winget-pkgs
 # so `winget install octomon` / `winget upgrade octomon` track the release.
 #
-# Same trigger shape as deb.yml, for the same reason: a `release: published`
+# Same trigger shape as packages.yml, for the same reason: a `release: published`
 # trigger would never fire — dist creates the release with the workflow's own
 # GITHUB_TOKEN, and token-created events do not start other workflows.
 # workflow_dispatch covers manual recovery for an existing tag.

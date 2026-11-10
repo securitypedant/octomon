@@ -119,7 +119,7 @@ winresource = "0.1.34"
 inherits = "release"
 lto = "thin"
 
-# `cargo deb` (.github/workflows/deb.yml) — Debian packages attached to each
+# `cargo deb` (.github/workflows/packages.yml) — Debian packages attached to each
 # GitHub release, and the input to the apt repository.
 [package.metadata.deb]
 maintainer = "Simon Thorpe <simsecpedant@gmail.com>"

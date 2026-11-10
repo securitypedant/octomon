@@ -1,7 +1,8 @@
 // octomon.dev: static site from ./website (served by the assets pipeline
-// before this worker runs), /apt/* read from the octomon-apt R2 bucket —
-// the Debian repository CI publishes into (.github/workflows/deb.yml) —
-// and /edge, the one endpoint the octomon client itself calls.
+// before this worker runs), /apt/* and /rpm/* read from the octomon-apt R2
+// bucket — the package repositories CI publishes into
+// (.github/workflows/packages.yml) — and /edge, the one endpoint the
+// octomon client itself calls.
 //
 // /edge privacy contract (see the site's /privacy page, which is the public
 // face of this promise): the handler is pure request→response. It reads
@@ -236,7 +237,11 @@ async function edgeStats(env, ctx) {
 
 const TYPES = {
   ".deb": "application/vnd.debian.binary-package",
+  ".rpm": "application/x-rpm",
   ".gz": "application/gzip",
+  ".xz": "application/x-xz",
+  ".zst": "application/zstd",
+  ".xml": "application/xml",
   ".gpg": "application/pgp-keys",
   ".asc": "application/pgp-signature",
 };
@@ -244,10 +249,15 @@ const TYPES = {
 function contentType(key) {
   const dot = key.lastIndexOf(".");
   const ext = dot >= 0 ? key.slice(dot) : "";
-  // Release/InRelease/Packages and anything unrecognised: plain text is what
-  // apt expects to fetch, and octet-stream would still work.
+  // Release/InRelease/Packages, the .repo file and anything unrecognised:
+  // plain text is what apt and dnf expect to fetch, and octet-stream would
+  // still work.
   return TYPES[ext] ?? "text/plain; charset=utf-8";
 }
+
+// The package repositories: URL prefix → bucket prefix. Both trees live in
+// one bucket under their own top-level folder.
+const REPOS = ["apt", "rpm"];
 
 export default {
   async fetch(request, env, ctx) {
@@ -258,11 +268,12 @@ export default {
     if (url.pathname === "/edge/stats") {
       return edgeStats(env, ctx);
     }
-    if (!url.pathname.startsWith("/apt/")) {
+    const repo = REPOS.find((r) => url.pathname.startsWith(`/${r}/`));
+    if (!repo) {
       // Non-asset paths that reach the worker have no answer of their own, so
       // a browser gets the site's own 404 page rather than a bare string. The
-      // /apt/ branch below deliberately keeps text/plain: apt is a package
-      // manager, and an HTML error page only confuses it.
+      // repository branch below deliberately keeps text/plain: apt and dnf
+      // are package managers, and an HTML error page only confuses them.
       const page = await env.ASSETS.fetch(new URL("/404.html", url));
       if (!page.ok) return new Response("not found\n", { status: 404 });
       return new Response(page.body, {
@@ -281,16 +292,16 @@ export default {
     // page that reads like the repository is broken.
     let key;
     try {
-      key = decodeURIComponent(url.pathname.slice("/apt/".length));
+      key = decodeURIComponent(url.pathname.slice(repo.length + 2));
     } catch {
       return new Response("bad request\n", { status: 400 });
     }
     if (!key) {
-      return new Response("octomon apt repository\n", {
+      return new Response(`octomon ${repo} repository\n`, {
         headers: { "content-type": "text/plain; charset=utf-8" },
       });
     }
-    const object = await env.APT.get(`apt/${key}`);
+    const object = await env.APT.get(`${repo}/${key}`);
     if (!object) {
       return new Response("not found\n", { status: 404 });
     }
@@ -298,9 +309,10 @@ export default {
       "content-type": contentType(key),
       "content-length": String(object.size),
       etag: object.httpEtag,
-      // Indexes change on release; short TTL keeps `apt update` honest while
-      // still absorbing fleets that update in lockstep. Pool files are
-      // versioned by name and could cache longer, but one rule is simpler.
+      // Indexes change on release; short TTL keeps `apt update` and `dnf
+      // makecache` honest while still absorbing fleets that update in
+      // lockstep. Package files are versioned by name and could cache
+      // longer, but one rule is simpler.
       "cache-control": "public, max-age=300",
     };
     if (request.method === "HEAD") {
