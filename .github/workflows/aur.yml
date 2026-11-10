@@ -43,17 +43,12 @@ jobs:
             echo "::error::'$TAG' is not a release tag (vX.Y.Z)"
             exit 1
           fi
+      # The template and render script come from the branch this workflow
+      # runs from; the tag contributes only its version and the checksums
+      # dist published with the release.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.TAG }}
           persist-credentials: false
-          fetch-depth: 0
-      - name: Check the tag is on main
-        run: |
-          if ! git merge-base --is-ancestor HEAD origin/main; then
-            echo "::error::'$TAG' is not on main; releases are cut from main"
-            exit 1
-          fi
       # Secrets cannot be read in a job-level `if`, so the gate is a step.
       - name: Check the AUR credentials are configured
         id: creds

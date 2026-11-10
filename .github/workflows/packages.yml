@@ -18,8 +18,9 @@
 #
 # Token scope: the deb job compiles every crate in Cargo.lock — their build
 # scripts and proc macros run as part of `cargo deb` — so it holds a read-only
-# token and no secrets. The rpm job compiles nothing (it repackages the
-# release's static binaries) and is read-only too. Only the publish job,
+# token and no secrets, and builds only a tag that is on main. The rpm job
+# compiles nothing (it repackages the release's static binaries, checksummed
+# against what dist published) and is read-only too. Only the publish job,
 # which runs nothing but apt, rpm, gpg and our own scripts over the built
 # artifacts, gets write access to the release and the signing and R2 secrets.
 name: Packages
@@ -115,19 +116,14 @@ jobs:
             echo "::error::'$TAG' is not a release tag (vX.Y.Z)"
             exit 1
           fi
+      # The packaging tooling (spec, scripts) comes from the branch this
+      # workflow file itself runs from, not from the tag: nothing of the
+      # tag's is executed here, only its published tarballs are repackaged,
+      # and a release cut before the tooling existed can still be packaged
+      # by dispatching for its tag.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.TAG }}
           persist-credentials: false
-          fetch-depth: 0
-      # The spec's %install runs from the checked-out ref, so the same rule
-      # as the deb job: only what main carries.
-      - name: Check the tag is on main
-        run: |
-          if ! git merge-base --is-ancestor HEAD origin/main; then
-            echo "::error::'$TAG' is not on main; releases are cut from main"
-            exit 1
-          fi
       - name: Install rpm tooling
         run: sudo apt-get update && sudo apt-get install -y rpm xz-utils
       # The release's own static binaries, so the rpm carries the same bytes
@@ -168,9 +164,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Scripts from the workflow's own branch, as in the rpm job.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.TAG }}
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
