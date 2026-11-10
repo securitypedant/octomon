@@ -61,6 +61,9 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
+    # A stalled apt mirror once held a job for the six hours GitHub allows
+    # before cancelling it; every job here is a few minutes' work.
+    timeout-minutes: 45
     steps:
       # The ref checked out below comes from a workflow_dispatch input on the
       # manual path, so insist that it names a release tag before fetching it.
@@ -109,6 +112,7 @@ jobs:
        github.event.workflow_run.head_repository.full_name == github.repository &&
        startsWith(github.event.workflow_run.head_branch, 'v'))
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Check the tag names a release
         run: |
@@ -163,6 +167,7 @@ jobs:
   publish:
     needs: [deb, rpm]
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
