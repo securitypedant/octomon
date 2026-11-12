@@ -16,25 +16,17 @@ Cross-check a wide-internet finding against a public status signal, or at
 least persist "N of my anchors dropped simultaneously" as its own event with a
 plain-language "this looks upstream of your ISP".
 
-## Ping the IPv6 gateway
-
-The v6 default router is almost always link-local (`fe80::…`), which
-`surge-ping` cannot address without an interface scope. Bind a dedicated v6
-client to the interface's own link-local address so the gateway rung can be
-judged for v6 as well as v4. Until then "IPv6 broken" localises via the
-presence of a v6 route and the v6 resolvers only.
-
 ## Path MTU on Windows
 
 `IcmpSendEcho` / `IP_DONTFRAGMENT` honour DF on Windows; wire the probe there.
 (macOS cannot: the kernel fragments regardless of DF on unprivileged sockets,
 its own `ping -D` included, and octomon reports the check as unavailable.)
 
-## QUIC egress on other hosts / QUIC in the reachability probe
+## HTTP/3 in the reachability probe
 
-The port scan checks QUIC to one host via version negotiation. A fuller check
-would try HTTP/3 to the connectivity endpoint so "browsers negotiate QUIC here"
-is answered directly.
+The egress monitor checks that QUIC leaves the network (a version-negotiation
+exchange over v4 and v6). A fuller check would fetch the connectivity endpoint
+over HTTP/3 so "browsers negotiate QUIC here" is answered directly.
 
 ## PAC / WPAD evaluation
 
