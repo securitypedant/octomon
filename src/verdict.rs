@@ -125,6 +125,10 @@ pub mod thresholds {
     /// the baseline on it forever means the location can never establish —
     /// which is exactly what the learned loss normals exist to grade against.
     pub const WEATHER_SECS: u64 = 600;
+    /// The recurrent form: finished episodes of one cause filling
+    /// WEATHER_SECS of the last this-many seconds is the same weather,
+    /// flapping or not.
+    pub const WEATHER_WINDOW_SECS: i64 = 2 * WEATHER_SECS as i64;
 }
 use thresholds as th;
 
@@ -1461,12 +1465,35 @@ pub fn evaluate(s: &AppState) -> Triage {
             let baseline_worse = baseline
                 .and_then(|b| b.rssi_dbm)
                 .is_some_and(|normal| (rssi as f64) < normal - 10.0);
+            // Name what actually failed: a finding raised by frame errors on a
+            // strong signal must not read "weak (rssi -43 dBm)" — rssi is
+            // evidence, not necessarily the trigger.
+            let (hurt_summary, note_summary) = match (
+                weak,
+                err_pct.filter(|e| *e >= th::WIFI_ERR_WARN_PCT),
+            ) {
+                (true, Some(e)) => (
+                    format!("Wi-Fi link is weak (rssi {rssi} dBm) and losing frames ({e:.1}%)"),
+                    format!("Wi-Fi signal weak (rssi {rssi} dBm) and erroring ({e:.1}%)"),
+                ),
+                (true, None) => (
+                    format!("Wi-Fi link is weak (rssi {rssi} dBm)"),
+                    format!("Wi-Fi signal weak (rssi {rssi} dBm)"),
+                ),
+                (false, Some(e)) => (
+                    format!(
+                        "Wi-Fi link is losing frames ({e:.1}% errors — signal is fine at rssi {rssi} dBm)"
+                    ),
+                    format!("Wi-Fi link is erroring ({e:.1}% of frames — signal is fine)"),
+                ),
+                (false, None) => unreachable!("the branch requires weak || err_bad"),
+            };
             findings.push(if hurting {
                 Finding {
                     cause: Cause::WifiLink,
                     severity: Severity::Degraded,
                     confidence: judge(true, rssi <= th::RSSI_AWFUL_DBM || baseline_worse, false),
-                    summary: format!("Wi-Fi link is weak (rssi {rssi} dBm)"),
+                    summary: hurt_summary,
                     evidence,
                     subject: String::new(),
                     symptom: false,
@@ -1477,7 +1504,7 @@ pub fn evaluate(s: &AppState) -> Triage {
                     cause: Cause::WifiLink,
                     severity: Severity::Info,
                     confidence: Confidence::Weak,
-                    summary: format!("Wi-Fi signal weak (rssi {rssi} dBm) — not yet hurting"),
+                    summary: format!("{note_summary} — not yet hurting"),
                     evidence,
                     subject: String::new(),
                     symptom: false,
@@ -4585,9 +4612,9 @@ pub async fn run(state: std::sync::Arc<parking_lot::Mutex<AppState>>, cfg: crate
     let sinks = cfg.alert.sinks();
     // Consecutive fully-healthy ticks; a fold happens each time this hits 60.
     let mut healthy_run: u32 = 0;
-    // Whether any second of the current healthy run had latency-suspect
-    // conditions (see baseline_step): such a minute folds latency-blind.
-    let mut run_suspect = false;
+    // Which folded fields suspect seconds in the current healthy run have
+    // tainted (see baseline_step): a tainted minute folds those fields blank.
+    let mut taint = FoldTaint::default();
     let mut last_speed_total: Option<usize> = None;
     loop {
         tick.tick().await;
@@ -4681,12 +4708,7 @@ pub async fn run(state: std::sync::Arc<parking_lot::Mutex<AppState>>, cfg: crate
 
             net_changes = std::mem::take(&mut s.net_history_unsaved);
 
-            baseline_step(
-                &mut s,
-                &mut healthy_run,
-                &mut run_suspect,
-                &mut last_speed_total,
-            )
+            baseline_step(&mut s, &mut healthy_run, &mut taint, &mut last_speed_total)
         };
 
         if !episodes.is_empty() {
@@ -4820,26 +4842,83 @@ fn latency_shaped(f: &Finding) -> bool {
         || (f.cause == Cause::GatewayLan && f.summary.contains("latency inflated"))
 }
 
+/// A finding whose only skewed measurements carry resolver time: slow or
+/// flaky DNS lands in dns_ms and in web_ttfb_ms (the fetch resolves first)
+/// and in none of the latency, loss or signal fields the fold records. A
+/// chronically slow resolver on an otherwise decent link should blank those
+/// two, not hold the location at "learning from scratch" forever.
+fn dns_shaped(f: &Finding) -> bool {
+    matches!(f.cause, Cause::Dns | Cause::LocalDns)
+}
+
 /// A finding that skews none of the numbers a fold records. The baseline
 /// learns v4 ICMP round trips, loss, DNS timing and signal — broken IPv6
-/// (while v4 works) and a wrong system clock touch none of those, yet either
-/// can stand for a machine's whole life on some networks (a v4-only VM NAT,
-/// an unsynced clock) and used to hold the location at "learning from
-/// scratch" forever.
+/// (while v4 works), a wrong system clock, hijacked answers and port-level
+/// filtering (port 443 dead while 80 and the other egress ports get out)
+/// touch none of those, yet any of them can stand for a machine's whole
+/// stay on some networks. A filtered hotspot *is* what it is: the folded
+/// loss and latency numbers are honest readings of it either way, and
+/// blocking the fold just means the location can never establish.
 fn skews_nothing_folded(f: &Finding) -> bool {
-    matches!(f.cause, Cause::Ipv6Broken | Cause::ClockSkew)
+    matches!(
+        f.cause,
+        Cause::Ipv6Broken
+            | Cause::ClockSkew
+            | Cause::DnsHijack
+            | Cause::WebFiltered
+            | Cause::HttpBlocked
+            | Cause::WebTarget
+            | Cause::SingleDestination
+    )
 }
 
 /// Standing long enough that this is the network's weather, not an episode.
-fn is_weather(f: &Finding) -> bool {
-    f.since
-        .is_some_and(|t| t.elapsed().as_secs() >= th::WEATHER_SECS)
+/// A continuously-stood finding counts, but so does a recurrent one: a
+/// finding that flaps — clearing, re-raising, clearing — still describes
+/// what this network *is*, and it is exactly the kind that otherwise holds
+/// the location at "learning from scratch" forever (a diner link that is
+/// degraded-but-usable for an hour without a ten-minute clean stretch).
+/// Occupancy counts finished episodes of the same cause on *this* network
+/// inside the window, plus the current stretch.
+fn is_weather(s: &AppState, f: &Finding) -> bool {
+    let stood = f.since.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+    if stood >= th::WEATHER_SECS {
+        return true;
+    }
+    let now = chrono::Utc::now().timestamp();
+    let network = s.baseline_key.as_deref();
+    let occupied: u64 = s
+        .history
+        .iter()
+        .filter(|e| {
+            Some(e.network.as_str()) == network
+                && e.cause == f.cause.label()
+                && e.at + e.duration_secs as i64 > now - th::WEATHER_WINDOW_SECS
+        })
+        .map(|e| e.duration_secs)
+        .sum::<u64>()
+        + stood;
+    occupied >= th::WEATHER_SECS
+}
+
+/// Which folded fields the suspect seconds of a healthy run contaminated.
+/// One bad second taints the whole minute's aggregate, so taints accumulate
+/// over the run and blank the matching fields when the minute folds.
+#[derive(Clone, Copy, Default)]
+struct FoldTaint {
+    /// Round-trip fields: gateway/anchor means and p95, and resolver timing,
+    /// all RTT-bound. Set by latency-shaped findings and by own load visibly
+    /// inflating those paths.
+    rtt: bool,
+    /// Resolver-time fields only (dns_ms, web_ttfb_ms): a resolver-shaped
+    /// finding does not imply inflated round trips.
+    dns: bool,
 }
 
 fn baseline_step(
     s: &mut AppState,
     healthy_run: &mut u32,
-    run_suspect: &mut bool,
+    taint: &mut FoldTaint,
     last_speed_total: &mut Option<usize>,
 ) -> BaselineIo {
     // Network fingerprint changed (or never resolved): swap baselines.
@@ -4898,18 +4977,19 @@ fn baseline_step(
         }
     }
 
-    // The fold gate, refined three times by field failures. Rule one: an
-    // *incident* must never teach the baseline. Rule two: an incident only
-    // blocks the numbers it actually *skews* — a congested evening or a
-    // loaded machine skews latency while leaving loss, signal and medium
-    // honest, and a hotel that is congested all evening (or a machine that
-    // always has agents running) would otherwise sit at "learning from
-    // scratch" forever, never able to establish at all. Rule three (the VM
-    // and hotel refinement): a Degraded finding that has stood for
-    // WEATHER_SECS is not an episode any more, it is what this network *is*
-    // — a working-but-poor connection is still a baseline, and the learned
-    // loss normals exist precisely so such a location can be graded against
-    // its own weather instead of staying solid red forever. So:
+    // The fold gate, refined by field failures. Rule one: an *incident* must
+    // never teach the baseline. Rule two: an incident only blocks the numbers
+    // it actually *skews* — a congested evening or a loaded machine skews
+    // latency while leaving loss, signal and medium honest, a slow resolver
+    // skews only resolver time, and a port-filtered hotspot skews nothing at
+    // all; a location that always runs that way would otherwise sit at
+    // "learning from scratch" forever, never able to establish at all. Rule
+    // three (the VM and hotel refinement): a Degraded finding that has stood
+    // for WEATHER_SECS — or filled it on and off — is not an episode any
+    // more, it is what this network *is* — a working-but-poor connection is
+    // still a baseline, and the learned loss normals exist precisely so such
+    // a location can be graded against its own weather instead of staying
+    // solid red forever. So:
     //   - Insufficient data, or any Down-class finding: nothing folds — a
     //     connection that isn't working is not a baseline.
     //   - findings that skew nothing the fold records (broken IPv6 while v4
@@ -4918,13 +4998,16 @@ fn baseline_step(
     //     load visibly inflating the paths): fold with the latency fields
     //     blanked — the location establishes, and its latency normals fill
     //     in during genuinely clean minutes.
-    //   - other Degraded findings (loss, DNS…): block while young; once
-    //     standing past WEATHER_SECS the minute folds in full — that loss
-    //     IS the location's normal.
+    //   - resolver-shaped trouble (slow DNS): fold with the resolver-time
+    //     fields blanked — the rest of the minute is still honest.
+    //   - other Degraded findings (loss, …): block while young; once
+    //     standing past WEATHER_SECS — or filling it recurrently — the
+    //     minute folds in full: that loss IS the location's normal.
     // Note-class findings never block: a note can be a permanent trait of a
     // location (a gateway that drops ICMP as policy).
     let mut blocked = false;
     let mut latency_suspect = false;
+    let mut dns_suspect = false;
     match &s.verdict.current {
         Verdict::Healthy => {}
         Verdict::Insufficient(_) => blocked = true,
@@ -4936,7 +5019,9 @@ fn baseline_step(
                     // fold untouched
                 } else if latency_shaped(f) {
                     latency_suspect = true;
-                } else if !is_weather(f) {
+                } else if dns_shaped(f) {
+                    dns_suspect = true;
+                } else if !is_weather(s, f) {
                     blocked = true;
                 }
             }
@@ -4959,23 +5044,28 @@ fn baseline_step(
 
     if blocked {
         *healthy_run = 0;
-        *run_suspect = false;
+        *taint = FoldTaint::default();
     } else {
         // One suspect second taints the whole minute: the sample aggregates
         // the window, and a spike inside it lands in the mean.
-        *run_suspect |= latency_suspect;
+        taint.rtt |= latency_suspect;
+        taint.dns |= dns_suspect;
         *healthy_run += 1;
         let uptime_ok = s.started.elapsed().as_secs() > 120;
         if *healthy_run >= 60 && uptime_ok {
             *healthy_run = 0;
             let mut sample = crate::baseline::Sample::take(s);
-            if *run_suspect {
+            if taint.rtt {
                 sample.gateway_ms = None;
                 sample.gateway_p95_ms = None;
                 sample.anchor_ms = None;
                 sample.dns_ms = None;
             }
-            *run_suspect = false;
+            if taint.dns {
+                sample.dns_ms = None;
+                sample.web_ttfb_ms = None;
+            }
+            *taint = FoldTaint::default();
             if let Some(b) = s.baseline.as_mut() {
                 b.fold(sample);
                 changed = true;
@@ -6757,16 +6847,16 @@ mod tests {
         s.baseline_unsaved = true;
 
         let mut healthy_run = 59;
-        let mut run_suspect = false;
+        let mut taint = FoldTaint::default();
         let mut last_speed = Some(0);
-        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut taint, &mut last_speed);
         assert!(matches!(io, BaselineIo::None), "no save while unsaved");
         assert_eq!(s.baseline.as_ref().unwrap().samples, 1, "still learned");
 
         // Once the store could be read again, the next fold saves as usual.
         s.baseline_unsaved = false;
         healthy_run = 59;
-        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut taint, &mut last_speed);
         assert!(matches!(io, BaselineIo::Save { .. }));
     }
 
@@ -6787,9 +6877,9 @@ mod tests {
         s.verdict.current = Verdict::Healthy;
 
         let mut healthy_run = 59;
-        let mut run_suspect = false;
+        let mut taint = FoldTaint::default();
         let mut last_speed = Some(0);
-        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut taint, &mut last_speed);
         assert!(
             matches!(io, BaselineIo::Save { .. }),
             "60th healthy tick folds"
@@ -6800,7 +6890,7 @@ mod tests {
         // and the healthy streak starts over.
         s.verdict.current = Verdict::Problems(vec![fake(Cause::GatewayLan)]);
         healthy_run = 59;
-        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut taint, &mut last_speed);
         assert!(matches!(io, BaselineIo::None));
         assert_eq!(healthy_run, 0, "the streak resets");
         assert_eq!(s.baseline.as_ref().unwrap().samples, 1, "nothing learned");
@@ -8246,9 +8336,9 @@ mod tests {
         s.throughput.up_bps = 500_000.0;
 
         let mut healthy_run = 59;
-        let mut run_suspect = false;
+        let mut taint = FoldTaint::default();
         let mut last_speed = Some(0);
-        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut taint, &mut last_speed);
         assert!(
             matches!(io, BaselineIo::Save { .. }),
             "clean latency under load still folds"
@@ -8265,7 +8355,7 @@ mod tests {
         healthy_run = 59;
         let before = s.baseline.as_ref().unwrap().samples;
         let clean_ms = s.baseline.as_ref().unwrap().gateway_ms;
-        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut taint, &mut last_speed);
         assert!(matches!(io, BaselineIo::Save { .. }));
         let b = s.baseline.as_ref().unwrap();
         assert_eq!(b.samples, before + 1, "the location still establishes");
@@ -8297,9 +8387,9 @@ mod tests {
         s.verdict.current = Verdict::Problems(vec![congested]);
 
         let mut healthy_run = 59;
-        let mut run_suspect = false;
+        let mut taint = FoldTaint::default();
         let mut last_speed = Some(0);
-        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut taint, &mut last_speed);
         assert!(matches!(io, BaselineIo::Save { .. }), "establishes anyway");
         let b = s.baseline.as_ref().unwrap();
         assert_eq!(b.samples, 1);
@@ -8311,7 +8401,7 @@ mod tests {
             ..fake(Cause::GatewayLan)
         }]);
         healthy_run = 59;
-        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut taint, &mut last_speed);
         assert!(matches!(io, BaselineIo::None));
         assert_eq!(healthy_run, 0);
     }
@@ -8334,9 +8424,9 @@ mod tests {
         s.verdict.current = Verdict::Problems(vec![fake(Cause::Ipv6Broken)]);
 
         let mut healthy_run = 59;
-        let mut run_suspect = false;
+        let mut taint = FoldTaint::default();
         let mut last_speed = Some(0);
-        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut taint, &mut last_speed);
         assert!(
             matches!(io, BaselineIo::Save { .. }),
             "v6-broken still folds"
@@ -8373,9 +8463,9 @@ mod tests {
             ..lossy.clone()
         }]);
         let mut healthy_run = 59;
-        let mut run_suspect = false;
+        let mut taint = FoldTaint::default();
         let mut last_speed = Some(0);
-        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut taint, &mut last_speed);
         assert!(
             matches!(io, BaselineIo::None),
             "a young episode still blocks"
@@ -8388,7 +8478,7 @@ mod tests {
             ..lossy
         }]);
         healthy_run = 59;
-        let io = baseline_step(&mut s, &mut healthy_run, &mut run_suspect, &mut last_speed);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut taint, &mut last_speed);
         assert!(matches!(io, BaselineIo::Save { .. }), "weather establishes");
         let b = s.baseline.as_ref().unwrap();
         assert_eq!(b.samples, 1);
@@ -8396,6 +8486,136 @@ mod tests {
             b.gateway_loss_pct.is_some(),
             "the weather itself is learned"
         );
+    }
+
+    /// The diner lesson: a finding that flaps — clearing, re-raising, never
+    /// standing a full WEATHER_SECS — is still the location's weather once
+    /// its episodes fill the window. Without that, a network that is
+    /// degraded-but-usable all visit can never establish at all.
+    #[test]
+    fn flapping_degradation_becomes_weather_and_folds() {
+        let mut s = healthy_state();
+        if let Some(earlier) = Instant::now().checked_sub(Duration::from_secs(3600)) {
+            s.started = earlier;
+        }
+        let (key, label) = crate::baseline::fingerprint(&s.netinfo).expect("fingerprintable");
+        s.baseline_key = Some(key.clone());
+        s.baseline = Some(crate::baseline::Baseline {
+            label,
+            ..Default::default()
+        });
+        let now = chrono::Utc::now().timestamp();
+        let episode = |at: i64, secs: u64, net: &str| crate::history::Episode {
+            network: net.to_string(),
+            at,
+            duration_secs: secs,
+            cause: Cause::UsableDegraded.label().into(),
+            severity: Severity::Degraded.label().into(),
+            summary: "connection degraded but usable".into(),
+        };
+        // 300s + 200s of ended episodes plus the current 60s stretch: 560s
+        // — just under WEATHER_SECS. An episode from a *different* network
+        // that would put it over must not count.
+        s.history.push(episode(now - 900, 300, &key));
+        s.history.push(episode(now - 400, 200, &key));
+        s.history
+            .push(episode(now - 350, 500, "some-other-network"));
+        s.verdict.current = Verdict::Problems(vec![Finding {
+            summary: "connection degraded but usable — heavy packet loss".into(),
+            since: Instant::now().checked_sub(Duration::from_secs(60)),
+            ..fake(Cause::UsableDegraded)
+        }]);
+        let mut healthy_run = 59;
+        let mut taint = FoldTaint::default();
+        let mut last_speed = Some(0);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut taint, &mut last_speed);
+        assert!(
+            matches!(io, BaselineIo::None),
+            "560s of flapping, mostly elsewhere, still blocks"
+        );
+        assert_eq!(healthy_run, 0);
+
+        // One more episode on this network: the last 20 minutes have been
+        // degraded more often than not — that is what this network *is*.
+        s.history.push(episode(now - 100, 60, &key));
+        healthy_run = 59;
+        let io = baseline_step(&mut s, &mut healthy_run, &mut taint, &mut last_speed);
+        assert!(
+            matches!(io, BaselineIo::Save { .. }),
+            "flapping weather establishes"
+        );
+        let b = s.baseline.as_ref().unwrap();
+        assert_eq!(b.samples, 1);
+        assert!(b.gateway_loss_pct.is_some(), "the weather is learned");
+    }
+
+    /// The filtered-hotspot case (the diner lesson, other half): port 443
+    /// blocked while every other egress port answers is what that network
+    /// *is* — the finding skews none of the folded numbers, so the location
+    /// still establishes instead of starving at "learning".
+    #[test]
+    fn a_filtered_network_still_establishes() {
+        let mut s = healthy_state();
+        if let Some(earlier) = Instant::now().checked_sub(Duration::from_secs(300)) {
+            s.started = earlier;
+        }
+        let (key, label) = crate::baseline::fingerprint(&s.netinfo).expect("fingerprintable");
+        s.baseline_key = Some(key);
+        s.baseline = Some(crate::baseline::Baseline {
+            label,
+            ..Default::default()
+        });
+        s.verdict.current = Verdict::Problems(vec![fake(Cause::WebFiltered)]);
+
+        let mut healthy_run = 59;
+        let mut taint = FoldTaint::default();
+        let mut last_speed = Some(0);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut taint, &mut last_speed);
+        assert!(matches!(io, BaselineIo::Save { .. }), "443-blocked folds");
+        let b = s.baseline.as_ref().unwrap();
+        assert_eq!(b.samples, 1);
+        assert!(b.gateway_ms.is_some(), "v4 numbers fold untouched");
+    }
+
+    /// A resolver-shaped finding blanks only resolver time: slow DNS does
+    /// not imply inflated round trips, so the minute still teaches latency
+    /// and loss — just not dns_ms or web_ttfb_ms.
+    #[test]
+    fn slow_dns_folds_with_only_resolver_time_blanked() {
+        let mut s = healthy_state();
+        if let Some(earlier) = Instant::now().checked_sub(Duration::from_secs(300)) {
+            s.started = earlier;
+        }
+        let (key, label) = crate::baseline::fingerprint(&s.netinfo).expect("fingerprintable");
+        s.baseline_key = Some(key);
+        s.baseline = Some(crate::baseline::Baseline {
+            label,
+            ..Default::default()
+        });
+        // Give the fixture resolver and web data for the taint to blank.
+        let mut resolver = crate::app::DnsProbe::new("8.8.8.8".parse().unwrap());
+        for _ in 0..3 {
+            resolver.record(Some(80.0));
+        }
+        s.dns.push(resolver);
+        for t in s.targets.iter_mut().filter(|t| !t.discovered) {
+            t.web.hist.push(500.0);
+        }
+        s.verdict.current = Verdict::Problems(vec![fake(Cause::Dns)]);
+
+        let mut healthy_run = 59;
+        let mut taint = FoldTaint::default();
+        let mut last_speed = Some(0);
+        let io = baseline_step(&mut s, &mut healthy_run, &mut taint, &mut last_speed);
+        assert!(
+            matches!(io, BaselineIo::Save { .. }),
+            "slow DNS still folds"
+        );
+        let b = s.baseline.as_ref().unwrap();
+        assert_eq!(b.samples, 1);
+        assert!(b.gateway_ms.is_some(), "honest latency is learned");
+        assert!(b.dns_ms.is_none(), "slow resolver time is not learned");
+        assert!(b.web_ttfb_ms.is_none(), "ttfb carries resolver time too");
     }
 
     #[test]
